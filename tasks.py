@@ -1,5 +1,6 @@
 """Tasks to publish local AudioMoth data to Zenodo."""
 
+# pylint: disable=line-too-long
 import os
 import glob
 import csv
@@ -41,6 +42,7 @@ from models.audiomoth import (
 )
 
 UPLOADED_FILES_BLOCK: Final[str] = "uploaded-files"
+UPLOAD_DATE_FORMAT: Final[str] = "%Y-%m-%d"
 
 
 @task
@@ -159,10 +161,9 @@ async def get_recording_dates(zip_file: str) -> Tuple[str, str]:
         latest_date = max(dates)
 
         # 6. Return the dates as a tuple
-        output_format = "%Y-%m-%d"
         dates = (
-            earliest_date.strftime(output_format),
-            latest_date.strftime(output_format),
+            earliest_date.strftime(UPLOAD_DATE_FORMAT),
+            latest_date.strftime(UPLOAD_DATE_FORMAT),
         )
 
         logger.debug(dates)
@@ -353,8 +354,6 @@ async def parse_collectors_csv(
             "Eclipse Start Time (UTC)",
             "Eclipse Maximum (UTC)",
             "Eclipse End Time (UTC)",
-            "Day of First Recording",
-            "Day of Last Recording",
             "Version",
         ]
 
@@ -419,6 +418,7 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
     metadata = Metadata(
         resource_type=ResourceType(id="dataset"),
         title=f"{data_collector.eclipse_date} {data_collector.eclipse_label()} ESID#{data_collector.esid}",
+        publication_date=datetime.now().strftime(UPLOAD_DATE_FORMAT),
         creators=creators,
         description=get_description(data_collector=data_collector),
         funding=get_fundings(),
@@ -432,7 +432,6 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
             Subject(subject="Eclipse"),
             Subject(subject="Participatory Science"),
             Subject(subject="Citizen Science"),
-            Subject(subject="2024 Total Solar Eclipse"),
         ],
     )
 
@@ -441,7 +440,7 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
         files_access=Access.PUBLIC,
         files_enabled=True,
         metadata=metadata.to_dict(),
-        community_id="9d50c9c1-afd0-4dc1-ad50-91040788af4f",
+        community_id="2ca990ba-e151-4741-a456-6b80da71c69d",
         custom_fields={
             "code:codeRepository": "https://github.com/ARISA-Lab-LLC/ESCSP",
             "code:developmentStatus": {"id": "wip"},
@@ -461,7 +460,7 @@ def get_description(data_collector: DataCollector) -> str:
     Returns:
         str: A description.
     """
-    eclipse_dt = datetime.strptime(data_collector.eclipse_date, "%Y-%m-%d")
+    eclipse_dt = datetime.strptime(data_collector.eclipse_date, UPLOAD_DATE_FORMAT)
 
     annular_location_info = Template(
         """

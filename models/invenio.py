@@ -252,6 +252,7 @@ class Metadata(BaseModel):
     resource_type: ResourceType
     title: str
     creators: List[Creator]
+    publication_date: str
     rights: Optional[List[License]] = None
     description: Optional[str] = None
     contributors: Optional[List[Contributor]] = None
