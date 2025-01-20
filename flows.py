@@ -1,0 +1,270 @@
+"""Flows to publish local AudioMoth data to Zenodo."""
+
+from typing import List, Tuple, Optional
+from prefect import flow, get_run_logger
+
+from prefect_invenio_rdm.flows import create_record_files
+from prefect_invenio_rdm.models.api import APIResult
+from prefect_invenio_rdm.models.records import DraftConfig
+
+from models.audiomoth import (
+    EclipseType,
+    DataCollector,
+    UploadData,
+    PersistedResult,
+    UploadedFilesBlock,
+)
+
+from tasks import (
+    list_dir_files,
+    get_esid_file_pairs,
+    get_draft_config,
+    parse_collectors_csv,
+    create_upload_data,
+    save_result_csv,
+    get_files_block,
+    rename_dir_files,
+    get_recording_dates,
+)
+
+
+@flow(name="upload-datasets")
+async def upload_datasets(
+    annular_dir: Optional[str] = None,
+    total_dir: Optional[str] = None,
+    annular_data_collector_csv: Optional[str] = None,
+    total_data_collector_csv: Optional[str] = None,
+    auto_publish: bool = False,
+    delete_failures: bool = False,
+    successful_results_file: Optional[str] = None,
+    failure_results_file: Optional[str] = None,
+) -> None:
+    """
+    Uploads local AudioMoth data to Zenodo.
+
+    Args:a
+        annular_dir (Optional[str]): The directory containing the annular eclipse data.
+        total_dir (Optional[str]): The directory containing the total eclipse data.
+        annular_data_collector_csv (Optional[str]): A CSV file containing info about the
+            data collectors for the annular eclipse.
+        total_data_collector_csv (Optional[str]): A CSV file containing info about the
+            data collectors for the annular eclipse.
+        auto_publish (bool): If `True`, the created record will be automatically published if
+            no failures have occured. Defaults to `False`.
+        delete_failures (bool): If `True`, will delete a created record if there is an
+            error. Defaults to `False`.
+        successful_results_file (Optional[str]): The path to a CSV file to save successful
+            upload results. If file does not exist, one will be created.
+        failure_results_file (Optional[str]): The path to a CSV file to save failed
+            upload results. If file does not exist, one will be created.
+    Returns:
+        None
+    """
+    if not annular_dir and not total_dir:
+        raise ValueError(
+            "Missing directories for the annular and/or total eclipse data"
+        )
+
+    if not annular_data_collector_csv and not total_data_collector_csv:
+        raise ValueError("Missing data collector files")
+
+    if annular_dir and not annular_data_collector_csv:
+        raise ValueError("Missing data collector file for the annular eclipse data")
+
+    if total_dir and not total_data_collector_csv:
+        raise ValueError("Missing data collector file for the total eclipse data")
+
+    logger = get_run_logger()
+
+    if annular_dir:
+        await rename_dir_files(directory=annular_dir)
+
+        annular_upload_data = await get_upload_data(
+            data_dir=annular_dir,
+            data_collectors_file=annular_data_collector_csv,
+            eclipse_type=EclipseType.ANNULAR,
+        )
+
+        if not annular_upload_data:
+            logger.info("No annular eclipse data found")
+
+        # Upload annular eclipse data
+        for data in annular_upload_data:
+            result = await upload_dataset(data=data)
+            await save_result(
+                esid=data.esid,
+                file=data.file,
+                result=result,
+                success_file=successful_results_file,
+                failure_file=failure_results_file,
+            )
+
+    if total_dir:
+        await rename_dir_files(directory=total_dir)
+
+        total_upload_data = await get_upload_data(
+            data_dir=total_dir,
+            data_collectors_file=total_data_collector_csv,
+            eclipse_type=EclipseType.TOTAL,
+        )
+
+        if not total_upload_data:
+            logger.info("No total eclipse data found")
+
+        # Upload total eclipse data
+        for data in total_upload_data:
+            result = await upload_dataset(
+                data=data, delete_failures=delete_failures, auto_publish=auto_publish
+            )
+            await save_result(
+                esid=data.esid,
+                file=data.file,
+                result=result,
+                success_file=successful_results_file,
+                failure_file=failure_results_file,
+            )
+
+
+@flow
+async def save_result(
+    esid: str,
+    file: str,
+    result: APIResult,
+    success_file: Optional[str] = None,
+    failure_file: Optional[str] = None,
+) -> None:
+    """
+    Saves the result of an upload.
+
+    Args:
+        esid (str): A unique AudioMoth ID.
+        file (str): The uploaded file.
+        result (str): The upload result.
+        success_file (APIResult): A CSV file to save successful results.
+        failure_file (APIResult): A CSV file to save failed results.
+
+    Returns:
+        None.
+    """
+    logger = get_run_logger()
+
+    if not esid:
+        raise ValueError("Invalid ESID")
+
+    if not file:
+        raise ValueError("Invalid file")
+
+    file = success_file if result.successful else failure_file
+    persisted_result = PersistedResult(esid=esid)
+
+    if not result.successful:
+        persisted_result.error_type = result.error.type
+        persisted_result.error_message = result.error.error_message
+
+    if not result.api_response:
+        await save_result_csv(
+            file=file,
+            result=persisted_result,
+        )
+    else:
+        response = result.api_response
+        persisted_result.link = response["links"]["self_html"]
+        persisted_result.created = response["created"]
+        persisted_result.updated = response["updated"]
+        persisted_result.state = response["state"]
+        persisted_result.submitted = response["submitted"]
+
+        await save_result_csv(file=file, result=persisted_result)
+
+    if result.successful:
+        # Track sucessfully uploaded files
+        files_block: UploadedFilesBlock = await get_files_block()
+        uploaded_files = files_block.uploaded_files
+        uploaded_files.append(file)
+        await files_block.save(overwrite=True)
+
+
+@flow
+async def get_upload_data(
+    data_dir: str, data_collectors_file: str, eclipse_type: EclipseType
+) -> List[UploadData]:
+    """
+    Retrieves all the datasets to upload in the given directory.
+
+    Args:
+        data_dir (str): A directory containing the AudioMoth datasets.
+        data_collectors_file (str): A CSV file containing info about the
+            data collectors for each dataset.
+        eclipse_type (EclipseType): The type of eclipse for the data collected.
+
+    Returns:
+        List[UploadData]: A list of data to be uploaded.
+    """
+
+    if not data_dir:
+        raise ValueError("Missing data directory")
+
+    if not data_collectors_file:
+        raise ValueError("Missing data collectors file")
+
+    data_collectors: List[DataCollector] = await parse_collectors_csv(
+        csv_file_path=data_collectors_file, eclipse_type=eclipse_type
+    )
+
+    get_run_logger().debug(data_collectors)
+
+    dir_files: List[str] = await list_dir_files(
+        directory=data_dir, file_pattern="*.zip"
+    )
+
+    # skip file if already uploaded
+    files_block: UploadedFilesBlock = await get_files_block()
+    uploaded_files = files_block.uploaded_files
+    dir_files = [file for file in dir_files if file not in uploaded_files]
+
+    # retrieve ESID from file name
+    esid_file_pairs: List[Tuple[str, str]] = await get_esid_file_pairs(files=dir_files)
+
+    return await create_upload_data(
+        esid_file_pairs=esid_file_pairs, data_collectors=data_collectors
+    )
+
+
+@flow(flow_run_name="upload-dataset-esid-{data.esid}")
+async def upload_dataset(
+    data: UploadData,
+    delete_failures: bool = False,
+    auto_publish: bool = False,
+) -> APIResult:
+    """
+    Uploads a dataset to Zenodo.
+
+    Args:
+        data (UploadData): The data to upload.
+        delete_failures (bool): If `True`, will delete a created record if there is an
+            error. Defaults to `False`.
+        auto_publish (bool): If `True`, the created record will be automatically published if
+            no failures have occured. Defaults to `False`.
+    Returns:
+        APIResult: The upload result.
+    """
+
+    logger = get_run_logger()
+
+    # retrieve first and last day of recording from files
+    start_date, end_date = await get_recording_dates(zip_file=data.file)
+
+    # update data collector
+    data.data_collector.first_recording_day = start_date
+    data.data_collector.last_recording_day = end_date
+
+    config: DraftConfig = await get_draft_config(data_collector=data.data_collector)
+
+    result: APIResult = await create_record_files(
+        files=[data.file],
+        config=config,
+        delete_on_failure=delete_failures,
+        auto_publish=auto_publish,
+    )
+
+    return result
