@@ -21,6 +21,12 @@ source prefect-env/bin/active
 pip install -r requirements.txt
 ```
 
+To configure concurrency for the API calls, create a global concurrency limit named `rate-limit:invenio-rdm-api`:
+
+```bash
+prefect gcl create rate-limit:invenio-rdm-api --limit 5 --slot-decay-per-second 1.0
+```
+
 Set environment variables:
 ```bash
 source set_env.sh
@@ -31,9 +37,7 @@ Start the Prefect server:
 prefect server start
 ```
 
-#### File upload concurrency
-To configure concurrency for the API calls, create a global concurrency limit named `rate-limit:invenio-rdm-api`:
-
+Kickoff the upload:
 ```bash
-prefect gcl create rate-limit:invenio-rdm-api --limit 5 --slot-decay-per-second 1.0
+python upload.py
 ```

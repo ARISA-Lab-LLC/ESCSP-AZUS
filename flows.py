@@ -30,19 +30,23 @@ from tasks import (
 
 @flow(name="upload-datasets")
 async def upload_datasets(
+    successful_results_file: str,
+    failure_results_file: str,
     annular_dir: Optional[str] = None,
     total_dir: Optional[str] = None,
     annular_data_collector_csv: Optional[str] = None,
     total_data_collector_csv: Optional[str] = None,
     auto_publish: bool = False,
     delete_failures: bool = False,
-    successful_results_file: Optional[str] = None,
-    failure_results_file: Optional[str] = None,
 ) -> None:
     """
     Uploads local AudioMoth data to Zenodo.
 
-    Args:a
+    Args:
+        successful_results_file (str): The path to a CSV file to save successful
+            upload results. If file does not exist, one will be created.
+        failure_results_file (str): The path to a CSV file to save failed
+            upload results. If file does not exist, one will be created.
         annular_dir (Optional[str]): The directory containing the annular eclipse data.
         total_dir (Optional[str]): The directory containing the total eclipse data.
         annular_data_collector_csv (Optional[str]): A CSV file containing info about the
@@ -53,10 +57,6 @@ async def upload_datasets(
             no failures have occured. Defaults to `False`.
         delete_failures (bool): If `True`, will delete a created record if there is an
             error. Defaults to `False`.
-        successful_results_file (Optional[str]): The path to a CSV file to save successful
-            upload results. If file does not exist, one will be created.
-        failure_results_file (Optional[str]): The path to a CSV file to save failed
-            upload results. If file does not exist, one will be created.
     Returns:
         None
     """
@@ -127,11 +127,7 @@ async def upload_datasets(
 
 @flow
 async def save_result(
-    esid: str,
-    file: str,
-    result: APIResult,
-    success_file: Optional[str] = None,
-    failure_file: Optional[str] = None,
+    esid: str, file: str, result: APIResult, success_file: str, failure_file: str
 ) -> None:
     """
     Saves the result of an upload.
@@ -140,13 +136,12 @@ async def save_result(
         esid (str): A unique AudioMoth ID.
         file (str): The uploaded file.
         result (str): The upload result.
-        success_file (APIResult): A CSV file to save successful results.
-        failure_file (APIResult): A CSV file to save failed results.
+        success_file (str): A CSV file to save successful results.
+        failure_file (str): A CSV file to save failed results.
 
     Returns:
         None.
     """
-    logger = get_run_logger()
 
     if not esid:
         raise ValueError("Invalid ESID")
@@ -154,7 +149,7 @@ async def save_result(
     if not file:
         raise ValueError("Invalid file")
 
-    file = success_file if result.successful else failure_file
+    results_file = success_file if result.successful else failure_file
     persisted_result = PersistedResult(esid=esid)
 
     if not result.successful:
@@ -163,18 +158,12 @@ async def save_result(
 
     if not result.api_response:
         await save_result_csv(
-            file=file,
+            file=results_file,
             result=persisted_result,
         )
     else:
-        response = result.api_response
-        persisted_result.link = response["links"]["self_html"]
-        persisted_result.created = response["created"]
-        persisted_result.updated = response["updated"]
-        persisted_result.state = response["state"]
-        persisted_result.submitted = response["submitted"]
-
-        await save_result_csv(file=file, result=persisted_result)
+        persisted_result.update(result.api_response)
+        await save_result_csv(file=results_file, result=persisted_result)
 
     if result.successful:
         # Track sucessfully uploaded files
@@ -211,8 +200,6 @@ async def get_upload_data(
         csv_file_path=data_collectors_file, eclipse_type=eclipse_type
     )
 
-    get_run_logger().debug(data_collectors)
-
     dir_files: List[str] = await list_dir_files(
         directory=data_dir, file_pattern="*.zip"
     )
@@ -248,8 +235,6 @@ async def upload_dataset(
     Returns:
         APIResult: The upload result.
     """
-
-    logger = get_run_logger()
 
     # retrieve first and last day of recording from files
     start_date, end_date = await get_recording_dates(zip_file=data.file)
