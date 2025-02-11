@@ -362,7 +362,7 @@ async def parse_collectors_csv(
                 ["Totality Start Time (UTC)", "Totality End Time (UTC)"]
             )
 
-        if set(csv_headers) != set(expected_headers):
+        if (len((set(expected_headers) - set(csv_headers))) != 0):
             raise ValueError(
                 f"Expected CSV headers not found: {set(expected_headers) - set(csv_headers)}"
             )
