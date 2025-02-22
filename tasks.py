@@ -148,6 +148,9 @@ async def get_recording_dates(zip_file: str) -> Tuple[str, str]:
                 # Extract date from the filename (YYYYMMDD_HMS format)
                 date_str = os.path.splitext(file)[0].split("_")[0]
                 date = datetime.strptime(date_str, "%Y%m%d").date()
+                if date.year < 2023:
+                    # Do not consider dates of recordings before the year 2023
+                    continue
                 dates.append(date)
             except ValueError:
                 # Ignore files that don't match the expected format
