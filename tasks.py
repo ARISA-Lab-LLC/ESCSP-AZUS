@@ -450,6 +450,13 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
             "code:programmingLanguage": [{"id": "python"}],
             "ac:captureDevice": ["AudioMoth v.1.1.0, Firmware 1.8"],
         },
+        pids={
+            "doi": {
+                "client": "datacite",
+                "identifier": "10.5072/zenodo.175082",
+                "provider": "datacite",
+            }
+        },
     )
 
 
