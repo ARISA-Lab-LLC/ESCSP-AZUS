@@ -32,6 +32,11 @@ Set environment variables:
 source set_env.sh
 ```
 
+For debugging, set the Prefect logging level to DEBUG:
+```bash
+prefect config set PREFECT_LOGGING_LEVEL="DEBUG"
+```
+
 Start the Prefect server:
 ```bash
 prefect server start
