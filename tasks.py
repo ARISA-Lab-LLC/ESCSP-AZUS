@@ -473,7 +473,7 @@ def parse_values_from_str(string: str, delimeter: str = ":") -> List[str]:
         List[str]: A list of strings.
     """
     values = string.split(sep=delimeter)
-    return map(lambda x: x.strip(), values)
+    return [x.strip() for x in values]
 
 
 def get_description(data_collector: DataCollector) -> str:
