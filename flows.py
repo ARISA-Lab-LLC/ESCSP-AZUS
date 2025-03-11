@@ -90,7 +90,9 @@ async def upload_datasets(
 
         # Upload annular eclipse data
         for data in annular_upload_data:
-            result = await upload_dataset(data=data)
+            result = await upload_dataset(
+                data=data, delete_failures=delete_failures, auto_publish=auto_publish
+            )
             await save_result(
                 esid=data.esid,
                 file=data.file,
