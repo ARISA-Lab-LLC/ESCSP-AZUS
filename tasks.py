@@ -358,6 +358,7 @@ async def parse_collectors_csv(
             "Eclipse Maximum (UTC)",
             "Eclipse End Time (UTC)",
             "Version",
+            "Keywords and subjects",
         ]
 
         if eclipse_type == EclipseType.TOTAL:
@@ -365,7 +366,7 @@ async def parse_collectors_csv(
                 ["Totality Start Time (UTC)", "Totality End Time (UTC)"]
             )
 
-        if (len((set(expected_headers) - set(csv_headers))) != 0):
+        if len((set(expected_headers) - set(csv_headers))) != 0:
             raise ValueError(
                 f"Expected CSV headers not found: {set(expected_headers) - set(csv_headers)}"
             )
@@ -408,15 +409,26 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
         )
 
     creators = get_default_creators()
+
+    affiliations = [
+        Affiliation(name=affiliation)
+        for affiliation in parse_values_from_str(data_collector.affiliation)
+    ]
+
     creators.append(
         Creator(
             person_or_org=PersonOrganization(
                 type="personal", given_name="Volunteer", family_name="Scientist"
             ),
             role=Role(id="datacollector"),
-            affiliations=[Affiliation(name=data_collector.affiliation)],
+            affiliations=affiliations,
         )
     )
+
+    subjects = [
+        Subject(subject=subject)
+        for subject in parse_values_from_str(data_collector.subjects)
+    ]
 
     metadata = Metadata(
         resource_type=ResourceType(id="dataset"),
@@ -430,12 +442,7 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
         dates=dates,
         version=data_collector.version,
         publisher="Zenodo",
-        subjects=[
-            Subject(subject="Soundscapes"),
-            Subject(subject="Eclipse"),
-            Subject(subject="Participatory Science"),
-            Subject(subject="Citizen Science"),
-        ],
+        subjects=subjects,
     )
 
     return DraftConfig(
@@ -450,14 +457,23 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
             "code:programmingLanguage": [{"id": "python"}],
             "ac:captureDevice": ["AudioMoth v.1.1.0, Firmware 1.8"],
         },
-        pids={
-            "doi": {
-                "client": "datacite",
-                "identifier": "10.5072/zenodo.175082",
-                "provider": "datacite",
-            }
-        },
+        pids={},
     )
+
+
+def parse_values_from_str(string: str, delimeter: str = ":") -> List[str]:
+    """
+    Parses values from a string that are separated by a delimiter.
+
+    Args:
+        string (str): The string to split.
+        delimeter (str): The delimiter used to split the string.
+
+    Returns:
+        List[str]: A list of strings.
+    """
+    values = string.split(sep=delimeter)
+    return map(lambda x: x.strip(), values)
 
 
 def get_description(data_collector: DataCollector) -> str:
