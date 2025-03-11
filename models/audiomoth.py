@@ -96,6 +96,10 @@ class DataCollector(BaseModel):
         default="N/A",
     )
 
+    subjects: Optional[str] = Field(
+        validation_alias=AliasChoices("subjects", "Keywords and subjects"),
+    )
+
     def eclipse_label(self) -> str:
         """
         Creates a label from the eclipse type.
