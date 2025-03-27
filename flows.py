@@ -1,9 +1,14 @@
 """Flows to publish local AudioMoth data to Zenodo."""
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from prefect import flow, get_run_logger
 
-from prefect_invenio_rdm.flows import create_record_files
+from prefect_invenio_rdm.flows import get_credentials, create_record_files
+from prefect_invenio_rdm.tasks import (
+    search_user_records,
+    search_user_requests,
+    accept_request,
+)
 from prefect_invenio_rdm.models.api import APIResult
 from prefect_invenio_rdm.models.records import DraftConfig
 
@@ -25,6 +30,9 @@ from tasks import (
     get_files_block,
     rename_dir_files,
     get_recording_dates,
+    parse_request_ids_from_response,
+    parse_published_records_from_response,
+    save_dicts_to_json,
 )
 
 
@@ -255,3 +263,64 @@ async def upload_dataset(
     )
 
     return result
+
+
+@flow(flow_run_name="accept-publish-requests")
+async def accept_publish_requests() -> None:
+    """
+    Retrieves all user requests and accepts them for publishing.
+
+    Returns:
+        None.
+    """
+
+    logger = get_run_logger()
+
+    credentials = await get_credentials()
+
+    responses = search_user_requests(
+        credentials=credentials,
+        page=1,
+        sort="newest",
+        size=10,
+        additional_params={"is_open": True, "shared_with_me": False},
+    )
+
+    async for response in responses:
+        request_ids = await parse_request_ids_from_response(response=response)
+        for request_id in request_ids:
+            logger.info("Accepting request ID: %s", request_id)
+            await accept_request(credentials=credentials, request_id=request_id)
+
+
+@flow(flow_run_name="get-published-records")
+async def get_published_records(directory: str) -> List[Dict[str, Any]]:
+    """
+    Retrieves all published user records.
+
+    Args:
+        directory (str): The directory in which to save the JSON file.
+
+    Returns:
+        None.
+    """
+
+    if not directory:
+        raise ValueError("Invalid directory")
+
+    credentials = await get_credentials()
+
+    responses = search_user_records(
+        credentials=credentials,
+        page=1,
+        sort="newest",
+        size=10,
+        additional_params={"shared_with_me": False},
+    )
+
+    async for response in responses:
+        published_records = await parse_published_records_from_response(
+            response=response
+        )
+
+        await save_dicts_to_json(records=published_records, directory=directory)
