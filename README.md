@@ -50,24 +50,24 @@ Open the Prefect dashboard in your browser at http://localhost:4200.
 ### Uploading Datasets
 Specify the datasets (and metadata) to be uploaded by updating the arguments of the `upload_datasets` function call in the `uploads.py` file with the desired values (e.g path to datasets directory and data collector CSV files): 
 ```python
-upload_datasets(
+parameters={
     # the directory containing the annular eclipse datasets (zipped files)
-    annular_dir="/home/user/Desktop/zenodo/test/annular",
+    "annular_dir": "/home/user/Desktop/zenodo/test/annular",
     # the CSV file containing the data collectors information for the annular eclipse data
-    annular_data_collector_csv="/home/user/Desktop/zenodo/2023_annular_info.csv",
+    "annular_data_collector_csv": "/home/user/Desktop/zenodo/2023_annular_info.csv",
     # the directory containing the total eclipse datasets (zipped files)
-    total_dir="/home/user/Desktop/zenodo/test/total",
+    "total_dir": "/home/user/Desktop/zenodo/test/total",
     # the CSV file containing the data collectors information for the total eclipse data
-    total_data_collector_csv="/home/user/Desktop/zenodo/2024_total_info.csv",
+    "total_data_collector_csv": "/home/user/Desktop/zenodo/2024_total_info_updated.csv",
     # a CSV file to save successful results (will be created if does not exist)
-    successful_results_file="/home/user/Desktop/zenodo/results/successul_results.csv",
+    "successful_results_file": "/home/user/Desktop/zenodo/results/successul_results.csv",
     # a CSV file to save failed results (will be created if does not exist)
-    failure_results_file="/home/user/Desktop/zenodo/results/failed_results.csv",
+    "failure_results_file": "/home/user/Desktop/zenodo/results/failed_results.csv",
     # option to automatically delete any failed uploads, defaults to False
-    delete_failures=True,
+    "delete_failures": True,
     # option to automatically publish a successful upload, defaults to False
-    auto_publish=False,
-)
+    "auto_publish": True,
+}
 ```
 All of the parameters are optional (and can be omitted) but at least one directory (annular or total) and its respective data collector CSV file must be specified. 
 
@@ -97,11 +97,16 @@ This starts a long-running process that monitors for work from the Prefect serve
 To run the deployment, navigate to the Prefect dashboard and on the left side panel go to Deployments, select accept-requests-deployment from the list and then click Run and select Quick run from the dropdown. 
 
 ### Retrieving Published Records
+Once the records have been published, the results can be retrieved and saved locally in a JSON format.  
+
+In the `records.py` file, specify in which directory the results should be saved. Depending on the number of published records, multiple JSON files can be created, each of which will contain 10 (configurable) JSON objects and each representing a published record.
+
 In a separate terminal and with `prefect-env` activated, create a deployment:
 ```bash
-python requests.py
+python records.py
 ```
 
 This starts a long-running process that monitors for work from the Prefect server.
 
 To run the deployment, navigate to the Prefect dashboard and on the left side panel go to Deployments, select get-published-records-deployment from the list and then click Run and select Quick run from the dropdown. 
+
