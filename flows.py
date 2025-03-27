@@ -294,12 +294,13 @@ async def accept_publish_requests() -> None:
 
 
 @flow(flow_run_name="get-published-records")
-async def get_published_records(directory: str) -> List[Dict[str, Any]]:
+async def get_published_records(directory: str, size: int = 10) -> List[Dict[str, Any]]:
     """
     Retrieves all published user records.
 
     Args:
         directory (str): The directory in which to save the JSON file.
+        size (int): The number of items to retrieve in each request.
 
     Returns:
         None.
@@ -314,7 +315,7 @@ async def get_published_records(directory: str) -> List[Dict[str, Any]]:
         credentials=credentials,
         page=1,
         sort="newest",
-        size=10,
+        size=size,
         additional_params={"shared_with_me": False},
     )
 
