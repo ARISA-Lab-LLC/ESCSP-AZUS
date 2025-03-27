@@ -97,9 +97,9 @@ This starts a long-running process that monitors for work from the Prefect serve
 To run the deployment, navigate to the Prefect dashboard and on the left side panel go to Deployments, select accept-requests-deployment from the list and then click Run and select Quick run from the dropdown. 
 
 ### Retrieving Published Records
-Once the records have been published, the results can be retrieved and saved locally in a JSON format.  
+Once the records have been published, the results can be retrieved and saved locally as a CSV formatted file.  
 
-In the `records.py` file, specify in which directory the results should be saved. Depending on the number of published records, multiple JSON files can be created, each of which will contain 10 (configurable) JSON objects and each representing a published record.
+In the `records.py` file, specify in which directory the results should be saved. The resulting file will be labelled in the format `records_{timestamp}.csv'. 
 
 In a separate terminal and with `prefect-env` activated, create a deployment:
 ```bash
