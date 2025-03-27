@@ -2,12 +2,13 @@
 
 # pylint: disable=line-too-long
 import os
+import json
 import glob
 import csv
 import zipfile
 import tempfile
 from pathlib import Path
-from typing import List, Tuple, Optional, Final
+from typing import List, Tuple, Optional, Final, Dict, Any
 from datetime import datetime
 from string import Template
 
@@ -649,3 +650,102 @@ def get_default_creators() -> List[Creator]:
             affiliations=[Affiliation(name="ARISA Lab, L.L.C.")],
         ),
     ]
+
+
+@task
+async def parse_request_ids_from_response(response: Dict[str, Any]) -> List[str]:
+    """
+    Parses request IDs from an API response containing a page of user requests.
+
+    Args:
+        response (Dict[str, Any]): The API response.
+
+    Returns:
+        List[str]: A list of request IDs.
+    """
+    logger = get_run_logger()
+
+    if "hits" not in response or "hits" not in response["hits"]:
+        return []
+
+    if "total" in response["hits"]:
+        logger.info("Response contains %d requests", response["hits"]["total"])
+
+    hits: Dict[str, Any] = response["hits"]["hits"]
+    ids = []
+
+    for request_json in hits:
+        if "id" in request_json:
+            ids.append(request_json["id"])
+
+    logger.debug("Parsed request IDs: %s", ids)
+    return ids
+
+
+@task
+async def parse_published_records_from_response(
+    response: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Parses published records from an API response containing page of records.
+
+    Args:
+        response (Dict[str, Any]): The API response.
+
+    Returns:
+        List[str]: A list of records that have been published.
+    """
+    logger = get_run_logger()
+
+    if "hits" not in response or "hits" not in response["hits"]:
+        return []
+
+    if "total" in response["hits"]:
+        logger.info("Response contains %d records", response["hits"]["total"])
+
+    hits: Dict[str, Any] = response["hits"]["hits"]
+    records = []
+
+    for request_json in hits:
+        if "status" in request_json and request_json["status"] == "published":
+            records.append(request_json)
+
+    return records
+
+
+@task
+async def save_dicts_to_json(records: List[Dict[str, Any]], directory: str) -> str:
+    """
+    Saves a list of dictionaries to a JSON file in the specified directory.
+    The file name will be of the form 'records_result_{timestamp}.json'.
+
+    Args:
+        records (List[Dict[str, Any]]): The list of dictionaries to save.
+        directory (str): The directory in which to save the JSON file.
+
+    Returns:
+        str: The full path to the created JSON file.
+    """
+
+    logger = get_run_logger()
+
+    if not records:
+        logger.info("Received empty list of records")
+
+    if not directory:
+        raise ValueError("Invalid directory")
+
+    logger.info(records)
+
+    os.makedirs(directory, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+    file_name = f"records_{timestamp}.json"
+    file_path = os.path.join(directory, file_name)
+
+    with open(file_path, "w", encoding="UTF-8") as f:
+        json.dump(records, f, indent=2)
+
+    logger.info("Saved published records to path: %s", file_path)
+    return file_path
