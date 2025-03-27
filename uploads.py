@@ -1,4 +1,4 @@
-"""Executes flow to upload AudioMoth datasets."""
+"""Creates deployment for uploading datasets to Zenodo."""
 
 from flows import upload_datasets
 
