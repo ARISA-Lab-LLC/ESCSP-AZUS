@@ -571,6 +571,14 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
+        <p><strong>Individual Site Citation</strong></p>
+        <p><strong>Eclipse Soundscapes Team, ARISA Lab</strong>. (2025). $year Solar Eclipse Soundscapes Audio Data [Audio Dataset, ES ID# $esid]. Zenodo. <strong>{List DOI}</strong></p>
+        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
+        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
+        <p><strong>Eclipse Community Citation</strong></p>
+        <p><strong>Eclipse Soundscapes Team, ARISA Lab. (2025)</strong>. 2023 and 2024 Solar Eclipse Soundscapes Audio Data [Collection of Audio Datasets]. <strong>Eclipse Soundscapes Community, Zenodo</strong>. Retrieved from <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a></p>
+        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
+        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
         <p>&nbsp;</p><p></p>
         """
     ).substitute(
@@ -581,6 +589,8 @@ def get_description(data_collector: DataCollector) -> str:
         coverage=data_collector.eclipse_coverage,
         time_date_mode=data_collector.files_date_time_mode,
         location_info=location_info,
+        year=eclipse_dt.year,
+        esid=data_collector.esid,
     )
 
 
