@@ -7,6 +7,6 @@ if __name__ == "__main__":
         name="get-published-records-deployment",
         parameters={
             # specify the directory where retrieved records should be saved
-            "directory": "/Users/mercyiribarren/Downloads/esp/zenodo/results/records/"
+            "directory": "/Users/user/Desktop/zenodo/results/records/"
         },
     )
