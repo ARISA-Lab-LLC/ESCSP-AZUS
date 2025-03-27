@@ -724,38 +724,70 @@ async def parse_published_records_from_response(
 
 
 @task
-async def save_dicts_to_json(records: List[Dict[str, Any]], directory: str) -> str:
+async def parse_values_from_record(
+    values: List[str], records: List[Dict[str, Any]]
+) -> None:
     """
-    Saves a list of dictionaries to a JSON file in the specified directory.
-    The file name will be of the form 'records_result_{timestamp}.json'.
+    Parses the specified values from each record and returns an updated list
+    of records.
 
     Args:
-        records (List[Dict[str, Any]]): The list of dictionaries to save.
-        directory (str): The directory in which to save the JSON file.
+        values (List[str]): A list of values to parse from each record.
+        records (List[Dict[str, Any]]): A list of records.
 
     Returns:
-        str: The full path to the created JSON file.
+        List[Dict[str, Any]]: A list of records with only the specified values.
+    """
+
+    if not values:
+        return records
+
+    if not records:
+        return records
+
+    updated_records = []
+
+    for record in records:
+        updated_record = {}
+        for value in values:
+            if value in record:
+                updated_record[value] = record[value]
+
+        updated_records.append(updated_record)
+
+    return updated_records
+
+
+@task
+async def save_dicts_to_csv(
+    headers: List[str], records: List[Dict[str, Any]], file_path: Path
+) -> None:
+    """
+    Saves a list of dictionaries to a CSV file in the specified file path.
+    The file name will be of the form 'records_{timestamp}.csv'.
+
+    Args:
+        headers (List[str]): The CSV headers.
+        records (List[Dict[str, Any]]): The list of dictionaries to save.
+        file_path (Path): The path to create the CSV file.
+
+    Returns:
+        str: The full path to the created CSV file.
     """
 
     logger = get_run_logger()
 
-    if not records:
-        logger.info("Received empty list of records")
+    new_file = False
+    if not file_path.exists():
+        logger.info("Creating CSV file %s", file_path)
+        new_file = True
+        file_path.parent.mkdir(exist_ok=True, parents=True)
 
-    if not directory:
-        raise ValueError("Invalid directory")
+    with open(file_path, mode="a", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=headers)
 
-    logger.info(records)
+        if new_file:
+            writer.writeheader()
 
-    os.makedirs(directory, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-
-    file_name = f"records_{timestamp}.json"
-    file_path = os.path.join(directory, file_name)
-
-    with open(file_path, "w", encoding="UTF-8") as f:
-        json.dump(records, f, indent=2)
-
-    logger.info("Saved published records to path: %s", file_path)
-    return file_path
+        for record in records:
+            writer.writerow(record)

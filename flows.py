@@ -1,6 +1,9 @@
 """Flows to publish local AudioMoth data to Zenodo."""
 
 from typing import List, Tuple, Optional, Dict, Any
+from pathlib import Path
+from datetime import datetime
+
 from prefect import flow, get_run_logger
 
 from prefect_invenio_rdm.flows import get_credentials, create_record_files
@@ -32,7 +35,8 @@ from tasks import (
     get_recording_dates,
     parse_request_ids_from_response,
     parse_published_records_from_response,
-    save_dicts_to_json,
+    parse_values_from_record,
+    save_dicts_to_csv,
 )
 
 
@@ -306,8 +310,30 @@ async def get_published_records(directory: str, size: int = 10) -> List[Dict[str
         None.
     """
 
+    logger = get_run_logger()
+
     if not directory:
         raise ValueError("Invalid directory")
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    file_name = f"records_{timestamp}.csv"
+    file_path = Path(directory, file_name)
+
+    csv_headers = {
+        "id",
+        "conceptrecid",
+        "doi",
+        "conceptdoi",
+        "doi_url",
+        "title",
+        "recid",
+        "status",
+        "state",
+        "submitted",
+        "created",
+        "modified",
+        "updated",
+    }
 
     credentials = await get_credentials()
 
@@ -319,9 +345,17 @@ async def get_published_records(directory: str, size: int = 10) -> List[Dict[str
         additional_params={"shared_with_me": False},
     )
 
+    logger.info("Saving records to path: %s", file_path)
+
     async for response in responses:
         published_records = await parse_published_records_from_response(
             response=response
         )
 
-        await save_dicts_to_json(records=published_records, directory=directory)
+        updated_records = await parse_values_from_record(
+            values=csv_headers, records=published_records
+        )
+
+        await save_dicts_to_csv(
+            headers=csv_headers, records=updated_records, file_path=file_path
+        )
