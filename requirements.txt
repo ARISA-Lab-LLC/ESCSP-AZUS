@@ -1,2 +1,2 @@
 prefect>=3.0.0
-prefect-invenio-rdm>=0.0.3
+prefect-invenio-rdm>=0.0.6

@@ -2,12 +2,13 @@
 
 # pylint: disable=line-too-long
 import os
+import json
 import glob
 import csv
 import zipfile
 import tempfile
 from pathlib import Path
-from typing import List, Tuple, Optional, Final
+from typing import List, Tuple, Optional, Final, Dict, Any
 from datetime import datetime
 from string import Template
 
@@ -570,6 +571,14 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
+        <p><strong>Individual Site Citation</strong></p>
+        <p><strong>Eclipse Soundscapes Team, ARISA Lab</strong>. (2025). $year Solar Eclipse Soundscapes Audio Data [Audio Dataset, ES ID# $esid]. Zenodo. <strong>{Insert DOI here}</strong></p>
+        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
+        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
+        <p><strong>Eclipse Community Citation</strong></p>
+        <p><strong>Eclipse Soundscapes Team, ARISA Lab. (2025)</strong>. 2023 and 2024 Solar Eclipse Soundscapes Audio Data [Collection of Audio Datasets]. <strong>Eclipse Soundscapes Community, Zenodo</strong>. Retrieved from <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a></p>
+        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
+        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
         <p>&nbsp;</p><p></p>
         """
     ).substitute(
@@ -580,6 +589,8 @@ def get_description(data_collector: DataCollector) -> str:
         coverage=data_collector.eclipse_coverage,
         time_date_mode=data_collector.files_date_time_mode,
         location_info=location_info,
+        year=eclipse_dt.year,
+        esid=data_collector.esid,
     )
 
 
@@ -649,3 +660,134 @@ def get_default_creators() -> List[Creator]:
             affiliations=[Affiliation(name="ARISA Lab, L.L.C.")],
         ),
     ]
+
+
+@task
+async def parse_request_ids_from_response(response: Dict[str, Any]) -> List[str]:
+    """
+    Parses request IDs from an API response containing a page of user requests.
+
+    Args:
+        response (Dict[str, Any]): The API response.
+
+    Returns:
+        List[str]: A list of request IDs.
+    """
+    logger = get_run_logger()
+
+    if "hits" not in response or "hits" not in response["hits"]:
+        return []
+
+    if "total" in response["hits"]:
+        logger.info("Response contains %d requests", response["hits"]["total"])
+
+    hits: Dict[str, Any] = response["hits"]["hits"]
+    ids = []
+
+    for request_json in hits:
+        if "id" in request_json:
+            ids.append(request_json["id"])
+
+    logger.debug("Parsed request IDs: %s", ids)
+    return ids
+
+
+@task
+async def parse_published_records_from_response(
+    response: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Parses published records from an API response containing page of records.
+
+    Args:
+        response (Dict[str, Any]): The API response.
+
+    Returns:
+        List[str]: A list of records that have been published.
+    """
+    logger = get_run_logger()
+
+    if "hits" not in response or "hits" not in response["hits"]:
+        return []
+
+    if "total" in response["hits"]:
+        logger.info("Response contains %d records", response["hits"]["total"])
+
+    hits: Dict[str, Any] = response["hits"]["hits"]
+    records = []
+
+    for request_json in hits:
+        if "status" in request_json and request_json["status"] == "published":
+            records.append(request_json)
+
+    return records
+
+
+@task
+async def parse_values_from_record(
+    values: List[str], records: List[Dict[str, Any]]
+) -> None:
+    """
+    Parses the specified values from each record and returns an updated list
+    of records.
+
+    Args:
+        values (List[str]): A list of values to parse from each record.
+        records (List[Dict[str, Any]]): A list of records.
+
+    Returns:
+        List[Dict[str, Any]]: A list of records with only the specified values.
+    """
+
+    if not values:
+        return records
+
+    if not records:
+        return records
+
+    updated_records = []
+
+    for record in records:
+        updated_record = {}
+        for value in values:
+            if value in record:
+                updated_record[value] = record[value]
+
+        updated_records.append(updated_record)
+
+    return updated_records
+
+
+@task
+async def save_dicts_to_csv(
+    headers: List[str], records: List[Dict[str, Any]], file_path: Path
+) -> None:
+    """
+    Saves a list of dictionaries to a CSV file in the specified file path.
+    The file name will be of the form 'records_{timestamp}.csv'.
+
+    Args:
+        headers (List[str]): The CSV headers.
+        records (List[Dict[str, Any]]): The list of dictionaries to save.
+        file_path (Path): The path to create the CSV file.
+
+    Returns:
+        str: The full path to the created CSV file.
+    """
+
+    logger = get_run_logger()
+
+    new_file = False
+    if not file_path.exists():
+        logger.info("Creating CSV file %s", file_path)
+        new_file = True
+        file_path.parent.mkdir(exist_ok=True, parents=True)
+
+    with open(file_path, mode="a", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=headers)
+
+        if new_file:
+            writer.writeheader()
+
+        for record in records:
+            writer.writerow(record)
