@@ -1,9 +1,17 @@
 """Flows to publish local AudioMoth data to Zenodo."""
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
+from pathlib import Path
+from datetime import datetime
+
 from prefect import flow, get_run_logger
 
-from prefect_invenio_rdm.flows import create_record_files
+from prefect_invenio_rdm.flows import get_credentials, create_record_files
+from prefect_invenio_rdm.tasks import (
+    search_user_records,
+    search_user_requests,
+    accept_request,
+)
 from prefect_invenio_rdm.models.api import APIResult
 from prefect_invenio_rdm.models.records import DraftConfig
 
@@ -25,6 +33,10 @@ from tasks import (
     get_files_block,
     rename_dir_files,
     get_recording_dates,
+    parse_request_ids_from_response,
+    parse_published_records_from_response,
+    parse_values_from_record,
+    save_dicts_to_csv,
 )
 
 
@@ -255,3 +267,95 @@ async def upload_dataset(
     )
 
     return result
+
+
+@flow(flow_run_name="accept-publish-requests")
+async def accept_publish_requests() -> None:
+    """
+    Retrieves all user requests and accepts them for publishing.
+
+    Returns:
+        None.
+    """
+
+    logger = get_run_logger()
+
+    credentials = await get_credentials()
+
+    responses = search_user_requests(
+        credentials=credentials,
+        page=1,
+        sort="newest",
+        size=10,
+        additional_params={"is_open": True, "shared_with_me": False},
+    )
+
+    async for response in responses:
+        request_ids = await parse_request_ids_from_response(response=response)
+        for request_id in request_ids:
+            logger.info("Accepting request ID: %s", request_id)
+            await accept_request(credentials=credentials, request_id=request_id)
+
+
+@flow(flow_run_name="get-published-records")
+async def get_published_records(directory: str, size: int = 10) -> List[Dict[str, Any]]:
+    """
+    Retrieves all published user records.
+
+    Args:
+        directory (str): The directory in which to save the JSON file.
+        size (int): The number of items to retrieve in each request.
+
+    Returns:
+        None.
+    """
+
+    logger = get_run_logger()
+
+    if not directory:
+        raise ValueError("Invalid directory")
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    file_name = f"records_{timestamp}.csv"
+    file_path = Path(directory, file_name)
+
+    csv_headers = {
+        "id",
+        "conceptrecid",
+        "doi",
+        "conceptdoi",
+        "doi_url",
+        "title",
+        "recid",
+        "status",
+        "state",
+        "submitted",
+        "created",
+        "modified",
+        "updated",
+    }
+
+    credentials = await get_credentials()
+
+    responses = search_user_records(
+        credentials=credentials,
+        page=1,
+        sort="newest",
+        size=size,
+        additional_params={"shared_with_me": False},
+    )
+
+    logger.info("Saving records to path: %s", file_path)
+
+    async for response in responses:
+        published_records = await parse_published_records_from_response(
+            response=response
+        )
+
+        updated_records = await parse_values_from_record(
+            values=csv_headers, records=published_records
+        )
+
+        await save_dicts_to_csv(
+            headers=csv_headers, records=updated_records, file_path=file_path
+        )
