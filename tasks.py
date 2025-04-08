@@ -2,7 +2,6 @@
 
 # pylint: disable=line-too-long
 import os
-import json
 import glob
 import csv
 import zipfile
@@ -32,6 +31,7 @@ from models.invenio import (
     AwardTitle,
     Funding,
     Subject,
+    Contributor,
 )
 
 from models.audiomoth import (
@@ -444,6 +444,36 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
         version=data_collector.version,
         publisher="Zenodo",
         subjects=subjects,
+        contributors=[
+            Contributor(
+                person_or_org=PersonOrganization(
+                    type="personal",
+                    given_name="Joel",
+                    family_name="Goncalves",
+                    identifiers=[
+                        Identifier(scheme="orcid", identifier="0009-0009-0945-3544")
+                    ],
+                ),
+                role=Role(id="projectmember"),
+                affiliations=[Affiliation(name="ARISA Lab, L.L.C.")],
+            ),
+            Contributor(
+                person_or_org=PersonOrganization(
+                    type="personal",
+                    given_name="Brent",
+                    family_name="Pease",
+                    identifiers=[
+                        Identifier(scheme="orcid", identifier="0000-0003-1528-6075")
+                    ],
+                ),
+                role=Role(id="researcher"),
+                affiliations=[
+                    Affiliation(
+                        name="Southern Illinois University (SIU), Carbondale, United States"
+                    )
+                ],
+            ),
+        ],
     )
 
     return DraftConfig(
@@ -571,14 +601,10 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
-        <p><strong>Individual Site Citation</strong></p>
-        <p><strong>Eclipse Soundscapes Team, ARISA Lab</strong>. (2025). $year Solar Eclipse Soundscapes Audio Data [Audio Dataset, ES ID# $esid]. Zenodo. <strong>{Insert DOI here}</strong></p>
-        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
-        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
+        <p><strong>Individual Site Citation: APA Citation (7th edition)</strong></p>
+        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientist. (2025). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}<br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
         <p><strong>Eclipse Community Citation</strong></p>
-        <p><strong>Eclipse Soundscapes Team, ARISA Lab. (2025)</strong>. 2023 and 2024 Solar Eclipse Soundscapes Audio Data [Collection of Audio Datasets]. <strong>Eclipse Soundscapes Community, Zenodo</strong>. Retrieved from <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a></p>
-        <p><strong>Collected by</strong>: Volunteer scientists as part of the Eclipse Soundscapes Project</p>
-        <p><strong>Funding</strong>: The Eclipse Soundscapes Project is supported by NASA award No. 80NSSC21M0008.</p>
+        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientists. <i>2023 and 2024 solar eclipse soundscapes audio data</i> [Collection of audio datasets]. Eclipse Soundscapes Community, Zenodo. <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a><br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
         <p>&nbsp;</p><p></p>
         """
     ).substitute(
@@ -644,7 +670,7 @@ def get_default_creators() -> List[Creator]:
                     Identifier(scheme="orcid", identifier="0000-0002-6678-590X")
                 ],
             ),
-            role=Role(id="researcher"),
+            role=Role(id="datamanager"),
             affiliations=[Affiliation(name="ARISA Lab, L.L.C.")],
         ),
         Creator(
