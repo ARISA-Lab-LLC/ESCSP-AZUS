@@ -1,0 +1,19 @@
+{
+  "uploads": {
+    "total": {
+      "dataset_dir": "/home/joel/Desktop/zenodo/test/total",
+      "collectors_csv": "/home/joel/Desktop/zenodo/2024_total_info_updated.csv"
+    },
+    "annular": {
+      "dataset_dir":  "/home/joel/Desktop/zenodo/test/annular",
+      "collectors_csv": "/home/joel/Desktop/zenodo/2023_annular_info.csv"
+    },
+    "successful_results_file": "/home/joel/Desktop/zenodo/results/successul_results.csv",
+    "failure_results_file": "/home/joel/Desktop/zenodo/results/failed_results.csv",
+    "delete_failures": false,
+    "auto_publish": false
+  },
+  "downloads": {
+    "results_dir": "/home/joel/Desktop/zenodo/results/records/"
+  }
+}
