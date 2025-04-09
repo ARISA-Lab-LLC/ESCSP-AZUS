@@ -46,30 +46,68 @@ Open the Prefect dashboard in your browser at http://localhost:4200.
 
 &ast; Note that once the Prefect server has been started, keep the terminal open while the server is running. When needed, the server can be stopped with Ctrl+C. 
 
+## Overview
 
-### Uploading Datasets
-Specify the datasets (and metadata) to be uploaded by updating the arguments of the `upload_datasets` function call in the `uploads.py` file with the desired values (e.g path to datasets directory and data collector CSV files): 
-```python
-parameters={
-    # the directory containing the annular eclipse datasets (zipped files)
-    "annular_dir": "/home/user/Desktop/zenodo/test/annular",
-    # the CSV file containing the data collectors information for the annular eclipse data
-    "annular_data_collector_csv": "/home/user/Desktop/zenodo/2023_annular_info.csv",
-    # the directory containing the total eclipse datasets (zipped files)
-    "total_dir": "/home/user/Desktop/zenodo/test/total",
-    # the CSV file containing the data collectors information for the total eclipse data
-    "total_data_collector_csv": "/home/user/Desktop/zenodo/2024_total_info_updated.csv",
-    # a CSV file to save successful results (will be created if does not exist)
-    "successful_results_file": "/home/user/Desktop/zenodo/results/successul_results.csv",
-    # a CSV file to save failed results (will be created if does not exist)
-    "failure_results_file": "/home/user/Desktop/zenodo/results/failed_results.csv",
-    # option to automatically delete any failed uploads, defaults to False
-    "delete_failures": True,
-    # option to automatically publish a successful upload, defaults to False
-    "auto_publish": True,
+The project consists of two main scripts:
+
+- `uploads.py`: Handles the uploading of datasets to Zenodo.
+- `records.py`: Downloads metadata for already uploaded Zenodo records.
+
+Both scripts are configured using a `config.json` file.
+
+
+## Configuration
+
+The project uses a `config.json` file to control file paths and behavior. Here's an example structure of the configuration file:
+
+```json
+{
+  "uploads": {
+    "total": {
+      "dataset_dir": "/home/joel/Desktop/zenodo/test/total",
+      "collectors_csv": "/home/joel/Desktop/zenodo/2024_total_info_updated.csv"
+    },
+    "annular": {
+      "dataset_dir": "/home/joel/Desktop/zenodo/test/annular",
+      "collectors_csv": "/home/joel/Desktop/zenodo/2023_annular_info.csv"
+    },
+    "successful_results_file": "/home/joel/Desktop/zenodo/results/successul_results.csv",
+    "failure_results_file": "/home/joel/Desktop/zenodo/results/failed_results.csv",
+    "delete_failures": false,
+    "auto_publish": false
+  },
+  "downloads": {
+    "results_dir": "/home/joel/Desktop/zenodo/results/records/"
+  }
 }
 ```
-All of the parameters are optional (and can be omitted) but at least one directory (annular or total) and its respective data collector CSV file must be specified. 
+
+### Configuration Breakdown
+
+#### `uploads`
+
+Controls the upload process handled by `uploads.py`.
+
+- `total.dataset_dir`: Path to the directory containing the **total eclipse dataset**.
+- `total.collectors_csv`: CSV file containing metadata for the total eclipse collectors.
+- `annular.dataset_dir`: Path to the directory containing the **annular eclipse dataset**.
+- `annular.collectors_csv`: CSV file containing metadata for the annular eclipse collectors.
+- `successful_results_file`: File path where successfully uploaded records will be logged.
+- `failure_results_file`: File path to log failed uploads.
+- `delete_failures`: If `true`, files that failed to upload will be deleted.
+- `auto_publish`: If `true`, records will be published automatically after upload.
+
+#### `downloads`
+
+Controls the download process handled by `records.py`.
+
+- `results_dir`: Directory where the downloaded metadata records will be saved.
+
+---
+
+## Usage
+
+### Uploading Datasets
 
 In a separate terminal and with `prefect-env` activated, create a deployment:
 ```bash
@@ -82,24 +120,10 @@ To run the deployment, navigate to the Prefect dashboard and on the left side pa
 
 Once the run has started, each dataset will be uploaded sequentially and can be tracked in the 'Runs' section on the left side panel. 
 
-Note that once a dataset has been uploaded it will be internally tracked so it's skipped in subsequent runs. Each dataset is tracked by it's file path. 
-
-### Accepting and Publishing Requests
-After the datasets have been uploaded, they will need to be reviewed and accepted for publishing since they are submitted to a community (Eclipse Soundscapes Community).
-
-In a separate terminal and with `prefect-env` activated, create a deployment:
-```bash
-python requests.py
-```
-
-This starts a long-running process that monitors for work from the Prefect server.
-
-To run the deployment, navigate to the Prefect dashboard and on the left side panel go to Deployments, select accept-requests-deployment from the list and then click Run and select Quick run from the dropdown. 
+**Note that once a dataset has been uploaded it will be internally tracked so it's skipped in subsequent runs. Each dataset is tracked by it's file path.**
 
 ### Retrieving Published Records
-Once the records have been published, the results can be retrieved and saved locally as a CSV formatted file.  
-
-In the `records.py` file, specify in which directory the results should be saved. The resulting file will be labelled in the format `records_{timestamp}.csv'. 
+Once the records have been published, the results can be retrieved and saved locally as a CSV formatted file which will be named in the following format: `records_{timestamp}`.  
 
 In a separate terminal and with `prefect-env` activated, create a deployment:
 ```bash
@@ -109,4 +133,3 @@ python records.py
 This starts a long-running process that monitors for work from the Prefect server.
 
 To run the deployment, navigate to the Prefect dashboard and on the left side panel go to Deployments, select get-published-records-deployment from the list and then click Run and select Quick run from the dropdown. 
-
