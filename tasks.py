@@ -419,7 +419,7 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
     creators.append(
         Creator(
             person_or_org=PersonOrganization(
-                type="personal", given_name="Volunteer", family_name="Scientist"
+                type="personal", given_name="", family_name="Volunteer Scientist"
             ),
             role=Role(id="datacollector"),
             affiliations=affiliations,
