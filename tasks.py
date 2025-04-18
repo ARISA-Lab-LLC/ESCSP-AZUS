@@ -286,10 +286,14 @@ async def create_upload_data(
         and a list of files that don't have a matching collectors info
     """
 
+    logger = get_run_logger()
+
     if len(esid_file_pairs) > len(data_collectors):
-        raise ValueError(
-            f"The number of ES IDs and data files({len(esid_file_pairs)}) do not match the "
-            f"number of data collectors found({len(data_collectors)}). "
+        logger.warning(
+            "The number of ES IDs and data files(%d) do not match the "
+            "number of data collectors found(%d). ",
+            len(esid_file_pairs),
+            len(data_collectors),
         )
 
     upload_data = []
