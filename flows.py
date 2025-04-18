@@ -95,6 +95,7 @@ async def upload_datasets(
             data_dir=annular_dir,
             data_collectors_file=annular_data_collector_csv,
             eclipse_type=EclipseType.ANNULAR,
+            failure_results_file=failure_results_file,
         )
 
         if not annular_upload_data:
@@ -120,6 +121,7 @@ async def upload_datasets(
             data_dir=total_dir,
             data_collectors_file=total_data_collector_csv,
             eclipse_type=EclipseType.TOTAL,
+            failure_results_file=failure_results_file,
         )
 
         if not total_upload_data:
@@ -189,7 +191,10 @@ async def save_result(
 
 @flow
 async def get_upload_data(
-    data_dir: str, data_collectors_file: str, eclipse_type: EclipseType
+    data_dir: str,
+    data_collectors_file: str,
+    eclipse_type: EclipseType,
+    failure_results_file: str,
 ) -> List[UploadData]:
     """
     Retrieves all the datasets to upload in the given directory.
@@ -199,7 +204,8 @@ async def get_upload_data(
         data_collectors_file (str): A CSV file containing info about the
             data collectors for each dataset.
         eclipse_type (EclipseType): The type of eclipse for the data collected.
-
+        failure_results_file (str): The path to a CSV file to save upload
+            data without a matching collector entry.
     Returns:
         List[UploadData]: A list of data to be uploaded.
     """
@@ -226,9 +232,19 @@ async def get_upload_data(
     # retrieve ESID from file name
     esid_file_pairs: List[Tuple[str, str]] = await get_esid_file_pairs(files=dir_files)
 
-    return await create_upload_data(
+    upload_data, unmatched_ids = await create_upload_data(
         esid_file_pairs=esid_file_pairs, data_collectors=data_collectors
     )
+
+    for esid in unmatched_ids:
+        await save_result_csv(
+            file=failure_results_file,
+            result=PersistedResult(
+                esid=esid, error_message="Unable to find data collector info"
+            ),
+        )
+
+    return upload_data
 
 
 @flow(flow_run_name="upload-dataset-esid-{data.esid}")

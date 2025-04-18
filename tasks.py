@@ -268,7 +268,7 @@ async def get_esid_file_pairs(files: List[str]) -> List[Tuple[str, str]]:
 async def create_upload_data(
     esid_file_pairs: List[Tuple[str, str]],
     data_collectors: List[DataCollector],
-) -> List[UploadData]:
+) -> Tuple[List[UploadData], List[str]]:
     """
     Combines the ES IDs, data files and data collectors into a list of
     organized data for upload.
@@ -282,7 +282,8 @@ async def create_upload_data(
             (ES ID, file) pair.
 
     Returns:
-        List[UploadData]: A list of data for upload.
+        Tuple[List[UploadData], List[str]]: A tuple containing a list of data for upload
+        and a list of files that don't have a matching collectors info
     """
 
     if len(esid_file_pairs) > len(data_collectors):
@@ -311,12 +312,7 @@ async def create_upload_data(
                 UploadData(esid=esid, data_collector=data_collector, file=file)
             )
 
-    if unmatched_ids:
-        raise ValueError(
-            f"Unable to find data collector info for the following ES IDs: {unmatched_ids}"
-        )
-
-    return upload_data
+    return (upload_data, unmatched_ids)
 
 
 @task
