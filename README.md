@@ -24,6 +24,11 @@ export INVENIO_RDM_ACCESS_TOKEN=<access_token>
 export INVENIO_RDM_BASE_URL=<base url>
 ```
 
+## Copyrights, Acknowledgements, and Atrributions
+
+Eclipse Soundscapes is an enterprise of ARISA Lab, LLC and is supported by NASA award No. 80NSSC21M0008. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Aeronautics and Space Administration.
+
+
 ### Local setup
 Create a Python virtual environment and install the project dependencies:
 
