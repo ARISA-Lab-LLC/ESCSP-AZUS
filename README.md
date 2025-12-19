@@ -1,4 +1,15 @@
-# prefect-audiomoth
+# AZUS Automated Zenodo Upload Software
+
+##Description
+
+AZUS is a command-line tool developed by the Eclipse Soundscapes team to automate the batch upload of structured datasets to Zenodo. Built on Zenodo’s Open API, AZUS streamlines the entire data publishing process, which includes metadata assignment, licensing, and DOI generation, and makes it possible to efficiently archive hundreds of large datasets with minimal manual effort. Originally created to support the Eclipse Soundscapes project’s goal of open, long-term data sharing, AZUS now serves as a reusable tool aligned with NASA’s Open Science policies.
+AZUS is designed to:
+* Automate repetitive upload tasks for large volumes of data
+* Ensure each dataset includes standardized metadata and documentation
+* Eliminate Zenodo’s manual one-record-at-a-time upload limitation
+* Support open access, citation, and long-term data preservation
+* AZUS will be released as open-source software on GitHub under a BSD 3-Clause License, with documentation and examples to support adaptation by other participatory science and research teams.
+
 
 ## Getting started
 
