@@ -114,86 +114,16 @@ class DataCollector(BaseModel):
 class UploadData(BaseModel):
     """
     The necessary data to perform an upload.
-    
-    This model has been updated to support the new workflow where files are
-    pre-generated before upload. It now tracks the main ZIP file, README files,
-    and all additional supporting files that need to be uploaded to Zenodo.
 
     Attributes:
         esid (str): A unique AudioMoth ID.
-        data_collector (DataCollector): Data collector information.
-        zip_file (str): Path to the main ZIP file containing WAV audio files.
-        readme_html (Optional[str]): Path to README.html file. This file's content
-            will be used as the Zenodo record description.
-        readme_md (Optional[str]): Path to README.md file (Markdown version).
-        additional_files (List[str]): List of paths to additional files that need
-            to be uploaded. These typically include:
-            - 2024_total_eclipse_data_data_dict.csv
-            - AudioMoth_Operation_Manual.pdf
-            - CONFIG.TXT
-            - CONFIG_data_dict.csv
-            - License.txt
-            - WAV_data_dict.csv
-            - file_list.csv
-            - file_list_data_dict.csv
-            - total_eclipse_data.csv
-    
-    Example:
-        >>> data = UploadData(
-        ...     esid="004",
-        ...     data_collector=collector,
-        ...     zip_file="/path/to/ESID_004.zip",
-        ...     readme_html="/path/to/README.html",
-        ...     readme_md="/path/to/README.md",
-        ...     additional_files=[
-        ...         "/path/to/file_list.csv",
-        ...         "/path/to/CONFIG.TXT",
-        ...         # ... other files
-        ...     ]
-        ... )
-        >>> print(f"Will upload {len(data.all_files)} files")
+        data_collector (DataCollector): A data collector.
+        files (str): The data file.
     """
 
     esid: str
     data_collector: DataCollector
-    zip_file: str
-    readme_html: Optional[str] = None
-    readme_md: Optional[str] = None
-    additional_files: List[str] = []
-    
-    @property
-    def all_files(self) -> List[str]:
-        """
-        Get a complete list of all files to upload.
-        
-        This property assembles all files in the correct order:
-        1. The main ZIP file (always first)
-        2. README.md (if present)
-        3. All additional supporting files
-        
-        Note: README.html is NOT included in the upload list because its
-        content is used as the Zenodo description, not as a separate file.
-        
-        Returns:
-            List[str]: Complete list of file paths to upload to Zenodo.
-        
-        Example:
-            >>> data = UploadData(...)
-            >>> files = data.all_files
-            >>> for f in files:
-            ...     print(f"- {Path(f).name}")
-        """
-        files = [self.zip_file]
-        
-        # Add README.md if available
-        # Note: README.html is used for description, not uploaded as a file
-        if self.readme_md:
-            files.append(self.readme_md)
-        
-        # Add all additional supporting files
-        files.extend(self.additional_files)
-        
-        return files
+    file: str
 
 
 class PersistedResult(BaseModel):
@@ -207,7 +137,7 @@ class PersistedResult(BaseModel):
             When the deposition is published, a DOI is automatically
             registered in DataCite for the upload.
         recid (Optional[str]): Record identifier.
-        created (Optional[str]): The created date.
+        created (Optional[str]): The updated date.
         modified (Optional[str]): Last modification time of deposition.
         updated (Optional[str]): Last modification time of deposition.
         owners (Optional[str]): User identifiers of the owners of the deposition.
@@ -237,9 +167,6 @@ class PersistedResult(BaseModel):
     def update(self, json: Dict[str, Any]) -> None:
         """
         Updates the model with values from a JSON dictionary.
-        
-        Args:
-            json: Dictionary containing upload result data from Zenodo API.
         """
         if "id" in json:
             self.id = json["id"]
@@ -256,7 +183,7 @@ class PersistedResult(BaseModel):
         if "status" in json:
             self.status = json["status"]
         if "state" in json:
-            self.state = json["state"]  # ✅ FIXED: Was incorrectly setting self.created
+            self.created = json["created"]
         if "submitted" in json:
             self.submitted = json["submitted"]
         if "owners" in json:
@@ -268,26 +195,9 @@ class PersistedResult(BaseModel):
 class UploadedFilesBlock(Block):
     """
     Custom Prefect block to store paths of successfully uploaded files.
-    
-    This block is used to track which files have already been uploaded to Zenodo
-    so that they can be skipped in subsequent upload runs. This prevents
-    accidental duplicate uploads.
 
     Attributes:
-        uploaded_files (List[str]): A list of local file paths that have been
-            successfully uploaded to Zenodo.
-    
-    Example:
-        >>> # Load or create the block
-        >>> block = await UploadedFilesBlock.load("uploaded-files")
-        >>> 
-        >>> # Check if a file has been uploaded
-        >>> if "/path/to/file.zip" in block.uploaded_files:
-        ...     print("Already uploaded, skipping")
-        >>> 
-        >>> # Add a newly uploaded file
-        >>> block.uploaded_files.append("/path/to/new_file.zip")
-        >>> await block.save(overwrite=True)
+        uploaded_files (List[str]): A list of local file paths.
     """
 
     uploaded_files: List[str] = []
