@@ -16,7 +16,7 @@ from tasks import (
     list_dir_files,
     parse_collectors_csv,
 )
-from utils import get_dataset_configs
+from azus import get_dataset_configs    
 
 
 @flow
