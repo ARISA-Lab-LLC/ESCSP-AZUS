@@ -393,9 +393,13 @@ async def create_upload_data(
     """
     Combines the ES IDs, data files and data collectors into a list of
     organized data for upload.
+    
+    This function has been updated to support the new workflow where files are
+    pre-generated. It now searches for all associated files (README.html, 
+    README.md, and supporting files) for each dataset.
 
     Args:
-        esid_file_pairs (List[Tuple[str, str]]): A list of (ES ID, file) pairs.
+        esid_file_pairs (List[Tuple[str, str]]): A list of (ES ID, zip_file) pairs.
         data_collectors (List[DataCollector]): A list of data collectors.
 
     Raises:
@@ -404,7 +408,15 @@ async def create_upload_data(
 
     Returns:
         Tuple[List[UploadData], List[str]]: A tuple containing a list of data for upload
-        and a list of files that don't have a matching collectors info
+        and a list of ESIDs that don't have matching collector info.
+        
+    Example:
+        >>> upload_data, unmatched = await create_upload_data(
+        ...     esid_file_pairs=[("004", "/path/ESID_004.zip")],
+        ...     data_collectors=collectors
+        ... )
+        >>> for data in upload_data:
+        ...     print(f"ESID {data.esid}: {len(data.all_files)} files")
     """
 
     logger = get_run_logger()
@@ -419,23 +431,51 @@ async def create_upload_data(
 
     upload_data = []
     unmatched_ids = []
+    
+    # Create lookup dictionary for faster access
+    collector_dict = {dc.esid: dc for dc in data_collectors}
 
-    for esid, file in esid_file_pairs:
-        data_collector = next(
-            (
-                data_collector
-                for data_collector in data_collectors
-                if data_collector.esid == esid
-            ),
-            None,
-        )
-
-        if not data_collector:
+    for esid, zip_file in esid_file_pairs:
+        # Check if we have collector info for this ESID
+        if esid not in collector_dict:
+            logger.warning(f"No collector info found for ESID: {esid}")
             unmatched_ids.append(esid)
-        else:
-            upload_data.append(
-                UploadData(esid=esid, data_collector=data_collector, file=file)
+            continue
+        
+        # Find all associated files for this dataset
+        logger.debug(f"Finding associated files for ESID {esid}")
+        dataset_files = await find_dataset_files(zip_file)
+        
+        # Prepare additional files list (everything except README.html and README.md)
+        # README.html is used for description, README.md is added separately
+        additional_files = [
+            path for filename, path in dataset_files.items()
+            if path and filename not in ["README.html", "README.md"]
+        ]
+        
+        # Create upload data with all files
+        data = UploadData(
+            esid=esid,
+            data_collector=collector_dict[esid],
+            zip_file=zip_file,
+            readme_html=dataset_files.get("README.html"),
+            readme_md=dataset_files.get("README.md"),
+            additional_files=additional_files,
+        )
+        
+        logger.info(
+            f"Prepared upload for ESID {esid}: "
+            f"ZIP + README.md + {len(additional_files)} additional files = "
+            f"{len(data.all_files)} total files"
+        )
+        
+        # Log if README.html is missing (warning since it's needed for description)
+        if not data.readme_html:
+            logger.warning(
+                f"ESID {esid}: README.html not found - will use generated description"
             )
+        
+        upload_data.append(data)
 
     return (upload_data, unmatched_ids)
 
@@ -501,16 +541,53 @@ async def parse_collectors_csv(
 
 
 @task
-async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
+async def get_draft_config(
+    data_collector: DataCollector,
+    readme_html_path: Optional[str] = None
+) -> DraftConfig:
     """
     Create a draft record configuration from the data collector info.
+    
+    This function has been updated to support the new workflow where README.html
+    is pre-generated and used as the Zenodo record description.
 
     Args:
         data_collector (DataCollector): A data collector.
+        readme_html_path (Optional[str]): Path to README.html file. If provided,
+            the content of this file will be used as the Zenodo description.
+            If not provided or file doesn't exist, falls back to generating
+            the description using get_description().
 
     Returns:
         DraftConfig: A draft record configuration.
+        
+    Example:
+        >>> # Use pre-generated README.html
+        >>> config = await get_draft_config(
+        ...     data_collector=collector,
+        ...     readme_html_path="/path/to/README.html"
+        ... )
+        >>> 
+        >>> # Fall back to generated description
+        >>> config = await get_draft_config(data_collector=collector)
     """
+    logger = get_run_logger()
+
+    # Get description from README.html if available, otherwise generate it
+    if readme_html_path and Path(readme_html_path).exists():
+        logger.info(f"Using description from README.html: {readme_html_path}")
+        try:
+            description = Path(readme_html_path).read_text(encoding='utf-8')
+            logger.debug(f"Loaded {len(description)} characters from README.html")
+        except Exception as e:
+            logger.warning(f"Failed to read README.html: {e}, falling back to generated description")
+            description = get_description(data_collector=data_collector)
+    else:
+        if readme_html_path:
+            logger.warning(f"README.html not found at {readme_html_path}, generating description")
+        else:
+            logger.info("No README.html provided, generating description")
+        description = get_description(data_collector=data_collector)
 
     dates: Optional[List[Date]] = []
     if data_collector.first_recording_day:
@@ -557,7 +634,7 @@ async def get_draft_config(data_collector: DataCollector) -> DraftConfig:
         title=f"{data_collector.eclipse_date} {data_collector.eclipse_label()} ESID#{data_collector.esid}",
         publication_date=datetime.now().strftime(UPLOAD_DATE_FORMAT),
         creators=creators,
-        description=get_description(data_collector=data_collector),
+        description=description,  # Now uses README.html content if available
         funding=get_fundings(),
         rights=[License(id="cc-by-4.0")],
         languages=[Language(id="eng")],

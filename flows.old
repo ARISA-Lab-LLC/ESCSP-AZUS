@@ -108,7 +108,7 @@ async def upload_datasets(
             )
             await save_result(
                 esid=data.esid,
-                files=data.all_files,  # Pass all files instead of single file
+                file=data.file,
                 result=result,
                 success_file=successful_results_file,
                 failure_file=failure_results_file,
@@ -134,7 +134,7 @@ async def upload_datasets(
             )
             await save_result(
                 esid=data.esid,
-                files=data.all_files,  # Pass all files instead of single file
+                file=data.file,
                 result=result,
                 success_file=successful_results_file,
                 failure_file=failure_results_file,
@@ -143,43 +143,27 @@ async def upload_datasets(
 
 @flow
 async def save_result(
-    esid: str, 
-    files: List[str], 
-    result: APIResult, 
-    success_file: str, 
-    failure_file: str
+    esid: str, file: str, result: APIResult, success_file: str, failure_file: str
 ) -> None:
     """
     Saves the result of an upload.
-    
-    This function has been updated to track all uploaded files instead of just
-    the main ZIP file.
 
     Args:
         esid (str): A unique AudioMoth ID.
-        files (List[str]): List of all uploaded files.
-        result (APIResult): The upload result.
+        file (str): The uploaded file.
+        result (str): The upload result.
         success_file (str): A CSV file to save successful results.
         failure_file (str): A CSV file to save failed results.
 
     Returns:
         None.
-        
-    Example:
-        >>> await save_result(
-        ...     esid="004",
-        ...     files=data.all_files,
-        ...     result=upload_result,
-        ...     success_file="success.csv",
-        ...     failure_file="failed.csv"
-        ... )
     """
 
     if not esid:
         raise ValueError("Invalid ESID")
 
-    if not files or len(files) == 0:
-        raise ValueError("Invalid files list - must contain at least one file")
+    if not file:
+        raise ValueError("Invalid file")
 
     results_file = success_file if result.successful else failure_file
     persisted_result = PersistedResult(esid=esid)
@@ -198,10 +182,10 @@ async def save_result(
         await save_result_csv(file=results_file, result=persisted_result)
 
     if result.successful:
-        # Track all successfully uploaded files
+        # Track sucessfully uploaded files
         files_block: UploadedFilesBlock = await get_files_block()
         uploaded_files = files_block.uploaded_files
-        uploaded_files.extend(files)  # Add all files instead of just one
+        uploaded_files.append(file)
         await files_block.save(overwrite=True)
 
 
@@ -270,57 +254,29 @@ async def upload_dataset(
     auto_publish: bool = False,
 ) -> APIResult:
     """
-    Uploads a dataset with all associated files to Zenodo.
-    
-    This function has been updated to support the new workflow where files are
-    pre-generated. It now uploads the ZIP file along with all supporting files,
-    and uses README.html content as the Zenodo description.
+    Uploads a dataset to Zenodo.
 
     Args:
-        data (UploadData): The data to upload, including ZIP file, README files,
-            and all additional supporting files.
+        data (UploadData): The data to upload.
         delete_failures (bool): If `True`, will delete a created record if there is an
             error. Defaults to `False`.
         auto_publish (bool): If `True`, the created record will be automatically published if
             no failures have occured. Defaults to `False`.
-            
     Returns:
         APIResult: The upload result.
-        
-    Example:
-        >>> result = await upload_dataset(
-        ...     data=upload_data,
-        ...     delete_failures=True,
-        ...     auto_publish=False
-        ... )
-        >>> if result.successful:
-        ...     print(f"Uploaded to: {result.api_response['links']['self_html']}")
     """
-    logger = get_run_logger()
 
-    # Retrieve first and last day of recording from ZIP file
-    start_date, end_date = await get_recording_dates(zip_file=data.zip_file)
+    # retrieve first and last day of recording from files
+    start_date, end_date = await get_recording_dates(zip_file=data.file)
 
-    # Update data collector with recording dates
+    # update data collector
     data.data_collector.first_recording_day = start_date
     data.data_collector.last_recording_day = end_date
 
-    # Create config with README.html as description
-    config: DraftConfig = await get_draft_config(
-        data_collector=data.data_collector,
-        readme_html_path=data.readme_html  # Use README.html for description
-    )
+    config: DraftConfig = await get_draft_config(data_collector=data.data_collector)
 
-    # Get all files to upload
-    all_files = data.all_files
-    
-    logger.info(f"Uploading {len(all_files)} files for ESID {data.esid}:")
-    for file_path in all_files:
-        logger.info(f"  - {Path(file_path).name}")
-
-    # Upload all files to Zenodo
     result: APIResult = await create_record_files(
-        files=all_files,  # Upload all files instead of just ZIP
+        files=[data.file],
         config=config,
         delete_on_failure=delete_failures,
         auto_publish=auto_publish,
