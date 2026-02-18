@@ -14,7 +14,7 @@ if hostname.lower() == 'Galileo.local'.lower() :
     resources_dir = os.path.join(base_path,"Resources") 
     
 
-output_dir = os.path.join(base_path, "Staging_Area")
+output_dir = os.path.join(base_path, "Staging_Area", "ESID_012")
 
 input_csv_path=os.path.join(output_dir,"total_eclipse_data_4readme.csv") 
 print(input_csv_path)

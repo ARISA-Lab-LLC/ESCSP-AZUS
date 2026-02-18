@@ -1,0 +1,13 @@
+# AZUS Standalone Upload Requirements
+# Minimal dependencies for uploads without Prefect
+
+# Core dependencies
+pydantic>=2.0.0
+requests>=2.28.0
+
+# For Zenodo metadata models
+prefect-invenio-rdm>=0.0.6
+
+# Note: prefect-invenio-rdm is still needed for the models
+# (DraftConfig, Access, etc.) but the Prefect server is not required
+# to run the standalone upload script
