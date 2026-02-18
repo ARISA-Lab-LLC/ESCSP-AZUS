@@ -1,19 +1,20 @@
-"""Tasks to publish local AudioMoth data to Zenodo."""
+"""Standalone tasks for AZUS without Prefect dependencies.
 
-# pylint: disable=line-too-long
+This module contains all the task functions from tasks.py but without
+Prefect decorators, allowing them to run independently.
+"""
+
 import os
 import glob
 import csv
 import zipfile
 import tempfile
 from pathlib import Path
-from typing import List, Tuple, Optional, Final, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime
 from string import Template
 
-from prefect import task, get_run_logger
-from prefect_invenio_rdm.models.records import DraftConfig, Access
-
+# Import models (no Prefect dependency)
 from models.invenio import (
     Metadata,
     Identifier,
@@ -32,6 +33,7 @@ from models.invenio import (
     Funding,
     Subject,
     Contributor,
+    RelatedIdentifier,
 )
 
 from models.audiomoth import (
@@ -39,67 +41,33 @@ from models.audiomoth import (
     DataCollector,
     UploadData,
     PersistedResult,
-    UploadedFilesBlock,
 )
 
-UPLOADED_FILES_BLOCK: Final[str] = "uploaded-files"
-UPLOAD_DATE_FORMAT: Final[str] = "%Y-%m-%d"
+UPLOAD_DATE_FORMAT = "%Y-%m-%d"
 
 
-@task
-async def get_files_block() -> UploadedFilesBlock:
-    """
-    Retrieves a Prefect block tracking files that have been
-    successfully uploaded.
-
-    Note:
-        If the block does not exist, a new one will be created.
-
-    Returns:
-        Returns an instance of UploadedFilesBlock.
-    """
-    logger = get_run_logger()
-
-    try:
-        block = await UploadedFilesBlock.load(UPLOADED_FILES_BLOCK)
-        logger.info("Loaded existing block: %s", UPLOADED_FILES_BLOCK)
-    except ValueError:
-        block = UploadedFilesBlock(uploaded_files=[])
-        await block.save(UPLOADED_FILES_BLOCK)
-        logger.info("Created new block: %s", UPLOADED_FILES_BLOCK)
-
-    return block
-
-
-@task
 async def save_result_csv(file: str, result: PersistedResult) -> None:
     """
-    Saves an upload result to a local CSV file.
-
+    Save an upload result to a local CSV file.
+    
     Args:
-        file (str): The CSV file to add the result.
-        result (PersistedResult): The upload result.
-
-    Returns:
-        None
+        file: The CSV file to add the result
+        result: The upload result
     """
-
-    logger = get_run_logger()
-
     if not file:
         raise ValueError("Invalid file")
-
+    
     output_file = Path(file)
     new_file = False
-
+    
     if not output_file.exists():
-        logger.info("Creating CSV file %s", file)
+        print(f"Creating CSV file {file}")
         new_file = True
         output_file.parent.mkdir(exist_ok=True, parents=True)
-
+    
     result_dict = result.model_dump()
     headers = result_dict.keys()
-
+    
     with open(file, mode="a", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=headers)
         if new_file:
@@ -107,74 +75,132 @@ async def save_result_csv(file: str, result: PersistedResult) -> None:
         writer.writerow(result_dict)
 
 
-@task
 async def get_recording_dates(zip_file: str) -> Tuple[str, str]:
     """
-    Retrieves the start and end date of a dataset recording.
-
+    Retrieve the start and end date of a dataset recording.
+    
+    This function reads WAV filenames from the ZIP without extracting
+    to avoid temp directory space issues.
+    
     Args:
-        zip_file (str): A zipped dataset file.
-
+        zip_file: A zipped dataset file
+        
     Returns:
-        Tuple[str, str]: A tuple containing the start and end date.
+        Tuple containing the start and end date
     """
-
     if not zip_file:
         raise ValueError("Invalid file")
-
+    
     if not os.path.exists(zip_file):
         raise ValueError(f"File does not exist: {zip_file}")
-
-    logger = get_run_logger()
-
-    logger.debug("Extracting files...")
-
-    # 1. Create a temporary directory for extraction
-    with tempfile.TemporaryDirectory() as temp_dir:
-        with zipfile.ZipFile(zip_file, "r") as zip_ref:
-            zip_ref.extractall(temp_dir)
-
-        # 2. List all files inside the unzipped folder
-        extracted_files = zip_ref.namelist()
-
-        # 3. Filter the list for files with a .WAV extension
+    
+    # Open ZIP and read filenames WITHOUT extracting
+    with zipfile.ZipFile(zip_file, "r") as zip_ref:
+        # Get list of files in ZIP
+        all_files = zip_ref.namelist()
+        
+        # Filter for .WAV files
         wav_files = [
-            Path(file).stem for file in extracted_files if file.lower().endswith(".wav")
+            Path(file).stem for file in all_files if file.lower().endswith(".wav")
         ]
-
-        # 4. Parse the file names and extract dates
+        
+        # Parse file names and extract dates
         dates: List[datetime.date] = []
         for file in wav_files:
             try:
-                # Extract date from the filename (YYYYMMDD_HMS format)
-                date_str = os.path.splitext(file)[0].split("_")[0]
+                # Extract date from filename (YYYYMMDD_HMS format)
+                date_str = file.split("_")[0]
                 date = datetime.strptime(date_str, "%Y%m%d").date()
                 if date.year < 2023:
-                    # Do not consider dates of recordings before the year 2023
+                    # Don't consider dates before 2023
                     continue
                 dates.append(date)
-            except ValueError:
-                # Ignore files that don't match the expected format
+            except (ValueError, IndexError):
+                # Ignore files that don't match expected format
                 continue
-
+        
         if not dates:
             raise ValueError("No valid dates found in the .WAV file names.")
-
-        # 5. Find the earliest and latest date (only considering YYYYMMDD)
+        
+        # Find earliest and latest dates
         earliest_date = min(dates)
         latest_date = max(dates)
-
-        # 6. Return the dates as a tuple
-        dates = (
+        
+        # Return formatted dates
+        return (
             earliest_date.strftime(UPLOAD_DATE_FORMAT),
             latest_date.strftime(UPLOAD_DATE_FORMAT),
         )
 
-        logger.debug(dates)
-        return dates
+
+async def read_upload_manifest(
+    manifest_path: Path,
+    dataset_dir: Path
+) -> Dict[str, Optional[str]]:
+    """
+    Read ESID_XXX_to_upload.csv and find all listed files.
+    
+    Args:
+        manifest_path: Path to the manifest CSV
+        dataset_dir: Directory to search for files
+        
+    Returns:
+        Dictionary mapping filenames to their full paths
+    """
+    print(f"📋 Reading upload manifest: {manifest_path.name}")
+    
+    files_to_upload = []
+    
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        
+        if 'File Name' not in reader.fieldnames:
+            raise ValueError(
+                f"Manifest CSV missing 'File Name' column. "
+                f"Found columns: {reader.fieldnames}"
+            )
+        
+        for row in reader:
+            filename = row.get('File Name', '').strip()
+            if filename:
+                files_to_upload.append(filename)
+    
+    print(f"   ✅ Manifest lists {len(files_to_upload)} files to upload")
+    
+    # Find each file
+    found_files = {}
+    missing_files = []
+    
+    for filename in files_to_upload:
+        file_path = dataset_dir / filename
+        
+        if file_path.exists() and file_path.is_file():
+            found_files[filename] = str(file_path)
+        else:
+            found_files[filename] = None
+            missing_files.append(filename)
+    
+    # Log summary
+    found_count = len([f for f in found_files.values() if f is not None])
+    
+    print(f"   ✅ Found {found_count}/{len(files_to_upload)} files")
+    
+    if missing_files:
+        print(f"   ⚠️  Missing {len(missing_files)} files:")
+        for filename in missing_files[:5]:
+            print(f"      - {filename}")
+        if len(missing_files) > 5:
+            print(f"      ... and {len(missing_files) - 5} more")
+        
+        # This is a critical error - files in manifest must exist
+        raise FileNotFoundError(
+            f"Missing {len(missing_files)} files listed in manifest. "
+            f"First missing: {missing_files[0]}"
+        )
+    
+    return found_files
 
 
-@task
 async def find_dataset_files(
     zip_file_path: str,
     required_files: Optional[List[str]] = None
@@ -182,57 +208,16 @@ async def find_dataset_files(
     """
     Find all files associated with a dataset based on the ZIP file location.
     
-    This function searches for all required supporting files in the same directory
-    as the main ZIP file. These files are expected to be pre-generated before the
-    upload workflow is called.
-    
-    The function looks for:
-    - README.html (used as Zenodo description)
-    - README.md (uploaded as a file)
-    - Data dictionary files (.csv)
-    - Documentation files (PDF, TXT)
-    - License file
+    This function now checks for ESID_XXX_to_upload.csv manifest first.
+    If found, uses that to determine files. Otherwise falls back to default behavior.
     
     Args:
-        zip_file_path: Path to the main ZIP file containing WAV audio files.
-        required_files: List of filenames to look for. If None, uses default list
-            of all required files for ESCSP/AudioMoth datasets.
-    
-    Returns:
-        Dictionary mapping filenames to their full paths. If a file is not found,
-        its value will be None.
+        zip_file_path: Path to the main ZIP file
+        required_files: List of filenames to look for (used if no manifest)
         
-        Example return value:
-        {
-            'README.html': '/path/to/README.html',
-            'README.md': '/path/to/README.md',
-            'file_list.csv': '/path/to/file_list.csv',
-            'CONFIG.TXT': None,  # Not found
-            ...
-        }
-    
-    Raises:
-        FileNotFoundError: If the zip_file_path doesn't exist.
-        ValueError: If zip_file_path is not a file.
-    
-    Example:
-        >>> files = await find_dataset_files("/data/ESID_004.zip")
-        >>> if files['README.html']:
-        ...     print(f"Found README at: {files['README.html']}")
-        >>> else:
-        ...     print("WARNING: README.html not found!")
-        >>> 
-        >>> # Get list of only found files
-        >>> found = [path for path in files.values() if path is not None]
-        >>> print(f"Found {len(found)} out of {len(files)} files")
-    
-    Note:
-        - Missing files generate warnings but don't cause the function to fail
-        - The function is permissive - it will work even if some files are missing
-        - Caller should check which files were found and handle missing files
+    Returns:
+        Dictionary mapping filenames to their full paths
     """
-    logger = get_run_logger()
-    
     # Validate input
     zip_path = Path(zip_file_path)
     
@@ -244,9 +229,26 @@ async def find_dataset_files(
     
     # Get the directory containing the ZIP file
     dataset_dir = zip_path.parent
-    logger.debug(f"Searching for files in: {dataset_dir}")
     
-    # Default list of required files for ESCSP/AudioMoth datasets
+    # Extract ESID from ZIP filename (e.g., "ESID_005.zip" -> "005")
+    zip_name = zip_path.stem
+    if zip_name.startswith("ESID_"):
+        esid = zip_name.replace("ESID_", "").split("_")[0]
+    else:
+        esid = None
+    
+    # Look for upload manifest
+    if esid:
+        manifest_path = dataset_dir / f"ESID_{esid}_to_upload.csv"
+        
+        if manifest_path.exists():
+            print(f"✅ Found upload manifest: {manifest_path.name}")
+            return await read_upload_manifest(manifest_path, dataset_dir)
+    
+    # No manifest found, use default file discovery
+    print(f"ℹ️  No upload manifest found, using default file discovery")
+    
+    # Default list of required files
     if required_files is None:
         required_files = [
             "README.html",
@@ -271,189 +273,129 @@ async def find_dataset_files(
         
         if file_path.exists() and file_path.is_file():
             found_files[filename] = str(file_path)
-            logger.debug(f"âœ“ Found: {filename}")
         else:
             found_files[filename] = None
             missing_files.append(filename)
-            logger.warning(f"âœ— Missing: {filename}")
     
     # Log summary
     found_count = len([f for f in found_files.values() if f is not None])
     total_count = len(required_files)
     
-    logger.info(
-        f"Found {found_count}/{total_count} files for {zip_path.name}"
-    )
+    print(f"Found {found_count}/{total_count} files for {zip_path.name}")
     
     if missing_files:
-        logger.warning(
-            f"Missing {len(missing_files)} files for {zip_path.name}: "
-            f"{', '.join(missing_files[:5])}"  # Show first 5 missing files
-            + (f" and {len(missing_files) - 5} more..." if len(missing_files) > 5 else "")
-        )
+        print(f"Warning: Missing {len(missing_files)} files: {', '.join(missing_files[:5])}")
     
     return found_files
 
 
-@task
 async def rename_dir_files(directory: str) -> None:
     """
-    Renames all files in the specified directory (including nested ones)
-    and replaces all '#' character occurences with '_'.
-
+    Rename all files in directory, replacing '#' with '_'.
+    
     Args:
-        directory (str): A local directory.
-
-    Returns:
-        None.
+        directory: A local directory
     """
-
     if not directory:
         raise ValueError("Invalid directory")
-
+    
     if not os.path.isdir(directory):
         raise ValueError(f"Invalid directory: {directory}")
-
+    
     for root, _, files in os.walk(directory):
         for file in files:
             if file.startswith("ESID#") and file.endswith("zip"):
                 old_path = os.path.join(root, file)
-                # Replace only the first occurrence of "#" with "_"
                 new_file_name = file.replace("#", "_")
                 new_path = os.path.join(root, new_file_name)
                 os.rename(old_path, new_path)
 
 
-@task
 async def list_dir_files(
     directory: str, file_pattern: Optional[str] = "*"
 ) -> List[str]:
     """
     Retrieve all files in a directory matching the given pattern.
-
+    
     Args:
-        directory (str): A local directory.
-        file_pattern (Optional[str]): A glob pattern to match file names against.
-
+        directory: A local directory
+        file_pattern: A glob pattern to match file names
+        
     Returns:
-        List[str]: A list of matching files.
+        List of matching files
     """
-
     if not directory:
         raise ValueError("A valid directory path must be provided")
-
+    
     if not os.path.isdir(directory):
         raise ValueError(f"Invalid directory: {directory}")
-
-    logger = get_run_logger()
-
-    logger.info(
-        "Retrieving all matching files in dir: %s with pattern: %s",
-        directory,
-        file_pattern,
-    )
-
+    
     search_pattern = os.path.join(directory, file_pattern)
     matching_files = glob.glob(search_pattern, recursive=False)
-
+    
     # Filter out directories, keeping only files
     files = [file for file in matching_files if os.path.isfile(file)]
-
-    logger.info("Matching files:\n%s", files)
-
+    
     return files
 
 
-@task
 async def get_esid_file_pairs(files: List[str]) -> List[Tuple[str, str]]:
     """
-    Retrieve ES ID from file names and create a pair of ES IDs and their associated file.
-
+    Retrieve ESID from file names and create pairs.
+    
     Args:
-        files (str): A list of file paths.
-
+        files: A list of file paths
+        
     Returns:
-        List[Tuple[str, str]]: A list of (ES ID, file) pair.
+        List of (ESID, file) pairs
     """
-
-    logger = get_run_logger()
-
     pairs = [(Path(file).stem.split("_")[-1].strip(), file) for file in files]
-
-    logger.info("ES ID file pairs: %s", pairs)
-
     return pairs
 
 
-@task
 async def create_upload_data(
     esid_file_pairs: List[Tuple[str, str]],
     data_collectors: List[DataCollector],
 ) -> Tuple[List[UploadData], List[str]]:
     """
-    Combines the ES IDs, data files and data collectors into a list of
-    organized data for upload.
+    Combine ESIDs, data files and collectors into upload data.
     
-    This function has been updated to support the new workflow where files are
-    pre-generated. It now searches for all associated files (README.html, 
-    README.md, and supporting files) for each dataset.
-
     Args:
-        esid_file_pairs (List[Tuple[str, str]]): A list of (ES ID, zip_file) pairs.
-        data_collectors (List[DataCollector]): A list of data collectors.
-
-    Raises:
-        ValueError: If there is no matching `DataCollector` for one or more
-            (ES ID, file) pair.
-
-    Returns:
-        Tuple[List[UploadData], List[str]]: A tuple containing a list of data for upload
-        and a list of ESIDs that don't have matching collector info.
+        esid_file_pairs: List of (ESID, zip_file) pairs
+        data_collectors: List of data collectors
         
-    Example:
-        >>> upload_data, unmatched = await create_upload_data(
-        ...     esid_file_pairs=[("004", "/path/ESID_004.zip")],
-        ...     data_collectors=collectors
-        ... )
-        >>> for data in upload_data:
-        ...     print(f"ESID {data.esid}: {len(data.all_files)} files")
+    Returns:
+        Tuple of upload data list and unmatched ESIDs
     """
-
-    logger = get_run_logger()
-
     if len(esid_file_pairs) > len(data_collectors):
-        logger.warning(
-            "The number of ES IDs and data files(%d) do not match the "
-            "number of data collectors found(%d). ",
-            len(esid_file_pairs),
-            len(data_collectors),
+        print(
+            f"Warning: Number of ES IDs ({len(esid_file_pairs)}) > "
+            f"number of collectors ({len(data_collectors)})"
         )
-
+    
     upload_data = []
     unmatched_ids = []
     
-    # Create lookup dictionary for faster access
+    # Create lookup dictionary
     collector_dict = {dc.esid: dc for dc in data_collectors}
-
+    
     for esid, zip_file in esid_file_pairs:
-        # Check if we have collector info for this ESID
+        # Check if we have collector info
         if esid not in collector_dict:
-            logger.warning(f"No collector info found for ESID: {esid}")
+            print(f"Warning: No collector info found for ESID: {esid}")
             unmatched_ids.append(esid)
             continue
         
-        # Find all associated files for this dataset
-        logger.debug(f"Finding associated files for ESID {esid}")
+        # Find all associated files
         dataset_files = await find_dataset_files(zip_file)
         
-        # Prepare additional files list (everything except README.html and README.md)
-        # README.html is used for description, README.md is added separately
+        # Prepare additional files list
         additional_files = [
             path for filename, path in dataset_files.items()
             if path and filename not in ["README.html", "README.md"]
         ]
         
-        # Create upload data with all files
+        # Create upload data
         data = UploadData(
             esid=esid,
             data_collector=collector_dict[esid],
@@ -463,50 +405,42 @@ async def create_upload_data(
             additional_files=additional_files,
         )
         
-        logger.info(
-            f"Prepared upload for ESID {esid}: "
-            f"ZIP + README.md + {len(additional_files)} additional files = "
-            f"{len(data.all_files)} total files"
+        print(
+            f"Prepared ESID {esid}: "
+            f"ZIP + README.md + {len(additional_files)} files = "
+            f"{len(data.all_files)} total"
         )
         
-        # Log if README.html is missing (warning since it's needed for description)
+        # Warn if README.html missing
         if not data.readme_html:
-            logger.warning(
-                f"ESID {esid}: README.html not found - will use generated description"
-            )
+            print(f"Warning: ESID {esid} - README.html not found")
         
         upload_data.append(data)
-
+    
     return (upload_data, unmatched_ids)
 
 
-@task
 async def parse_collectors_csv(
     csv_file_path: str, eclipse_type: EclipseType
 ) -> List[DataCollector]:
     """
-    Parses a CSV file for all data collectors.
-
+    Parse a CSV file for all data collectors.
+    
     Args:
-        csv_file_path (str): A CSV file.
-        eclipse_type (str): The type of eclipse for the data collected.
-    Raises:
-        FileNotFoundError: If the CSV file does not exist.
-
+        csv_file_path: A CSV file path
+        eclipse_type: The type of eclipse
+        
     Returns:
-        List[DataCollector]: A list of data collecters.
+        List of data collectors
     """
-
-    logger = get_run_logger()
-
     with open(csv_file_path, mode="r", encoding="utf-8") as csv_file:
         csv_reader = csv.DictReader(csv_file)
-
+        
         # Validate headers
         csv_headers = csv_reader.fieldnames
         if not csv_headers:
             raise ValueError("No headers found in the CSV file.")
-
+        
         expected_headers = [
             "ESID",
             "Data Collector Affiliations",
@@ -522,73 +456,53 @@ async def parse_collectors_csv(
             "Version",
             "Keywords and subjects",
         ]
-
+        
         if eclipse_type == EclipseType.TOTAL:
             expected_headers.extend(
                 ["Totality Start Time (UTC) (2nd Contact)", "Totality End Time (UTC) (3rd Contact)"]
             )
-
-        if len((set(expected_headers) - set(csv_headers))) != 0:
-            raise ValueError(
-                f"Expected CSV headers not found: {set(expected_headers) - set(csv_headers)}"
-            )
-
+        
+        missing_headers = set(expected_headers) - set(csv_headers)
+        if missing_headers:
+            raise ValueError(f"Expected CSV headers not found: {missing_headers}")
+        
         data = [DataCollector.model_validate(row) for row in csv_reader]
-
-        logger.info("Parsed %d rows from the CSV", len(data))
-
+        
+        print(f"Parsed {len(data)} rows from CSV")
+        
         return data
 
 
-@task
 async def get_draft_config(
     data_collector: DataCollector,
     readme_html_path: Optional[str] = None
-) -> DraftConfig:
+):
     """
-    Create a draft record configuration from the data collector info.
+    Create a draft record configuration.
     
-    This function has been updated to support the new workflow where README.html
-    is pre-generated and used as the Zenodo record description.
-
     Args:
-        data_collector (DataCollector): A data collector.
-        readme_html_path (Optional[str]): Path to README.html file. If provided,
-            the content of this file will be used as the Zenodo description.
-            If not provided or file doesn't exist, falls back to generating
-            the description using get_description().
-
-    Returns:
-        DraftConfig: A draft record configuration.
+        data_collector: A data collector
+        readme_html_path: Path to README.html file
         
-    Example:
-        >>> # Use pre-generated README.html
-        >>> config = await get_draft_config(
-        ...     data_collector=collector,
-        ...     readme_html_path="/path/to/README.html"
-        ... )
-        >>> 
-        >>> # Fall back to generated description
-        >>> config = await get_draft_config(data_collector=collector)
+    Returns:
+        DraftConfig object
     """
-    logger = get_run_logger()
-
-    # Get description from README.html if available, otherwise generate it
+    # Import here to avoid circular dependency
+    from prefect_invenio_rdm.models.records import DraftConfig, Access
+    
+    # Get description from README.html if available
     if readme_html_path and Path(readme_html_path).exists():
-        logger.info(f"Using description from README.html: {readme_html_path}")
+        print(f"Using description from README.html: {readme_html_path}")
         try:
             description = Path(readme_html_path).read_text(encoding='utf-8')
-            logger.debug(f"Loaded {len(description)} characters from README.html")
         except Exception as e:
-            logger.warning(f"Failed to read README.html: {e}, falling back to generated description")
+            print(f"Warning: Failed to read README.html: {e}")
             description = get_description(data_collector=data_collector)
     else:
         if readme_html_path:
-            logger.warning(f"README.html not found at {readme_html_path}, generating description")
-        else:
-            logger.info("No README.html provided, generating description")
+            print(f"Warning: README.html not found at {readme_html_path}")
         description = get_description(data_collector=data_collector)
-
+    
     dates: Optional[List[Date]] = []
     if data_collector.first_recording_day:
         dates.append(
@@ -606,14 +520,14 @@ async def get_draft_config(
                 description="Day of last recording",
             )
         )
-
+    
     creators = get_default_creators()
-
+    
     affiliations = [
         Affiliation(name=affiliation)
         for affiliation in parse_values_from_str(data_collector.affiliation)
     ]
-
+    
     creators.append(
         Creator(
             person_or_org=PersonOrganization(
@@ -623,18 +537,21 @@ async def get_draft_config(
             affiliations=affiliations,
         )
     )
-
+    
     subjects = [
         Subject(subject=subject)
         for subject in parse_values_from_str(data_collector.subjects)
     ]
-
+    
+    # Get default citations and related works
+    related_identifiers = get_default_related_identifiers()
+    
     metadata = Metadata(
         resource_type=ResourceType(id="dataset"),
         title=f"{data_collector.eclipse_date} {data_collector.eclipse_label()} ESID#{data_collector.esid}",
         publication_date=datetime.now().strftime(UPLOAD_DATE_FORMAT),
         creators=creators,
-        description=description,  # Now uses README.html content if available
+        description=description,
         funding=get_fundings(),
         rights=[License(id="cc-by-4.0")],
         languages=[Language(id="eng")],
@@ -642,6 +559,7 @@ async def get_draft_config(
         version=data_collector.version,
         publisher="Zenodo",
         subjects=subjects,
+        related_identifiers=related_identifiers,
         contributors=[
             Contributor(
                 person_or_org=PersonOrganization(
@@ -671,9 +589,25 @@ async def get_draft_config(
                     )
                 ],
             ),
+            Contributor(
+                person_or_org=PersonOrganization(
+                    type="personal",
+                    given_name="Neil",
+                    family_name="Gilbert",
+                    identifiers=[
+                        Identifier(scheme="orcid", identifier="0000-0003-0949-5612")
+                    ],
+                ),
+                role=Role(id="researcher"),
+                affiliations=[
+                    Affiliation(
+                        name="Oklahoma State University (OSU), Stillwater, United States"
+                    )
+                ],
+            ),
         ],
     )
-
+    
     return DraftConfig(
         record_access=Access.PUBLIC,
         files_access=Access.PUBLIC,
@@ -691,32 +625,15 @@ async def get_draft_config(
 
 
 def parse_values_from_str(string: str, delimeter: str = ":") -> List[str]:
-    """
-    Parses values from a string that are separated by a delimiter.
-
-    Args:
-        string (str): The string to split.
-        delimeter (str): The delimiter used to split the string.
-
-    Returns:
-        List[str]: A list of strings.
-    """
+    """Parse values from a delimited string."""
     values = string.split(sep=delimeter)
     return [x.strip() for x in values]
 
 
 def get_description(data_collector: DataCollector) -> str:
-    """
-    Creates a description for a draft record.
-
-    Args:
-        data_collector (DataCollector): Data collector info.
-
-    Returns:
-        str: A description.
-    """
+    """Create a description for a draft record."""
     eclipse_dt = datetime.strptime(data_collector.eclipse_date, UPLOAD_DATE_FORMAT)
-
+    
     annular_location_info = Template(
         """
         <li>Eclipse Date: $eclipse_location_date</li>
@@ -730,7 +647,7 @@ def get_description(data_collector: DataCollector) -> str:
         max_time=data_collector.eclipse_maximum_time_utc,
         end_time=data_collector.eclipse_end_time_utc,
     )
-
+    
     total_location_info = Template(
         """
         <li>Eclipse Date: $eclipse_location_date</li>
@@ -748,13 +665,13 @@ def get_description(data_collector: DataCollector) -> str:
         totality_end_time=data_collector.eclipse_totality_end_time_utc,
         end_time=data_collector.eclipse_end_time_utc,
     )
-
+    
     location_info = (
         total_location_info
-        if data_collector.eclipse_type == EclipseType.TOTAL
+        if data_collector.eclipse_type == "Total"
         else annular_location_info
     )
-
+    
     return Template(
         """
         <p>These are audio recordings taken by an Eclipse Soundscapes (ES) Data Collector during the week of the $date $eclipse_label.&nbsp;</p>
@@ -790,7 +707,7 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>Latitude &amp; Longitude Information:</strong></p>
         <p>The latitude and longitude for each site was taken manually by data collectors and submitted to the ES team, either via a web form or on paper. It is shared in Decimal Degrees format.</p>
         <p><strong>General Project Information:</strong></p>
-        <p>The Eclipse Soundscapes Project is a NASA Volunteer Science project funded by NASA Science Activation that is studying how eclipses affect life on Earth during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. Eclipse Soundscapes revisits an eclipse study from almost 100 years ago that showed that animals and insects are affected by solar eclipses! Like this study from 100 years ago, ES asked for the publicâ€™s help. ES uses modern technology to continue to study how solar eclipses affect life on Earth! You can learn more at www.EclipseSoundscapes.org.&nbsp;</p>
+        <p>The Eclipse Soundscapes Project is a NASA Volunteer Science project funded by NASA Science Activation that is studying how eclipses affect life on Earth during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. Eclipse Soundscapes revisits an eclipse study from almost 100 years ago that showed that animals and insects are affected by solar eclipses! Like this study from 100 years ago, ES asked for the public's help. ES uses modern technology to continue to study how solar eclipses affect life on Earth! You can learn more at www.EclipseSoundscapes.org.&nbsp;</p>
         <p>Eclipse Soundscapes is an enterprise of ARISA Lab, LLC and is supported by NASA award No. 80NSSC21M0008.&nbsp;</p>
         <p><strong>Eclipse Data Version Definitions</strong></p>
         <p>{1st digit = year, 2nd digit = Eclipse type (1=Total Solar Eclipse, 9=Annular Solar Eclipse, 0=Partial Solar Eclipse), 3rd digit is unused and in place for future use}</p>
@@ -799,6 +716,9 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
+        <p><strong>Data Collector Training and Resources Manual (Archival Copy)</strong></p>
+        <p>This site-level record includes the Eclipse Soundscapes Data Collector Role Training and Resources Manual (2023-2024). The manual documents the participant training, device setup procedures, metadata submission requirements, ES ID system, timestamp protocols, data return workflow, and public archiving processes used during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. The manual is preserved for transparency and reproducibility and reflects the procedures under which this dataset was collected and processed. (DOI 10.5281/zenodo.18623442)</p>
+
         <p><strong>Individual Site Citation: APA Citation (7th edition)</strong></p>
         <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientist. (2025). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}<br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
         <p><strong>Eclipse Community Citation</strong></p>
@@ -819,12 +739,7 @@ def get_description(data_collector: DataCollector) -> str:
 
 
 def get_fundings() -> List[Funding]:
-    """
-    Retrieves a list of project fundings.
-
-    Returns:
-        List[Funding]: A list of fundings.
-    """
+    """Retrieve project fundings."""
     return [
         Funding(
             funder=Funder(id="027ka1x80"),
@@ -842,13 +757,51 @@ def get_fundings() -> List[Funding]:
     ]
 
 
-def get_default_creators() -> List[Creator]:
+def get_default_related_identifiers() -> List[RelatedIdentifier]:
     """
-    Retrieves the default list of creators.
-
+    Retrieve the default list of related identifiers (citations and related works).
+    
+    This includes:
+    - Papers citing the Eclipse Soundscapes project
+    - Related datasets
+    - Project website and resources
+    
+    To add more citations:
+    1. Add a new RelatedIdentifier to this list
+    2. Use relation_type="cites" for papers you're citing
+    3. Use relation_type="references" for general references
+    4. Use relation_type="isSupplementTo" for related datasets/resources
+    
     Returns:
-        List[Creator]: A list of creators.
+        List of RelatedIdentifier objects
     """
+    return [
+        # Project website
+        RelatedIdentifier(
+            identifier="https://eclipsesoundscapes.org",
+            scheme="url",
+            relation_type="isSupplementTo"
+        ),
+
+        RelatedIdentifier(
+             identifier="10.2307/20023118",
+             scheme="doi",
+             relation_type="cites",
+             resource_type=ResourceType(id="publication-article")
+         ),
+
+        # Add additional citations here as needed:
+        # RelatedIdentifier(
+        #     identifier="YOUR_DOI_HERE",
+        #     scheme="doi",
+        #     relation_type="cites",
+        #     resource_type=ResourceType(id="publication-article")
+        # ),
+    ]
+
+
+def get_default_creators() -> List[Creator]:
+    """Retrieve the default list of creators."""
     return [
         Creator(
             person_or_org=PersonOrganization(
@@ -884,134 +837,3 @@ def get_default_creators() -> List[Creator]:
             affiliations=[Affiliation(name="ARISA Lab, L.L.C.")],
         ),
     ]
-
-
-@task
-async def parse_request_ids_from_response(response: Dict[str, Any]) -> List[str]:
-    """
-    Parses request IDs from an API response containing a page of user requests.
-
-    Args:
-        response (Dict[str, Any]): The API response.
-
-    Returns:
-        List[str]: A list of request IDs.
-    """
-    logger = get_run_logger()
-
-    if "hits" not in response or "hits" not in response["hits"]:
-        return []
-
-    if "total" in response["hits"]:
-        logger.info("Response contains %d requests", response["hits"]["total"])
-
-    hits: Dict[str, Any] = response["hits"]["hits"]
-    ids = []
-
-    for request_json in hits:
-        if "id" in request_json:
-            ids.append(request_json["id"])
-
-    logger.debug("Parsed request IDs: %s", ids)
-    return ids
-
-
-@task
-async def parse_published_records_from_response(
-    response: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    """
-    Parses published records from an API response containing page of records.
-
-    Args:
-        response (Dict[str, Any]): The API response.
-
-    Returns:
-        List[str]: A list of records that have been published.
-    """
-    logger = get_run_logger()
-
-    if "hits" not in response or "hits" not in response["hits"]:
-        return []
-
-    if "total" in response["hits"]:
-        logger.info("Response contains %d records", response["hits"]["total"])
-
-    hits: Dict[str, Any] = response["hits"]["hits"]
-    records = []
-
-    for request_json in hits:
-        if "status" in request_json and request_json["status"] == "published":
-            records.append(request_json)
-
-    return records
-
-
-@task
-async def parse_values_from_record(
-    values: List[str], records: List[Dict[str, Any]]
-) -> None:
-    """
-    Parses the specified values from each record and returns an updated list
-    of records.
-
-    Args:
-        values (List[str]): A list of values to parse from each record.
-        records (List[Dict[str, Any]]): A list of records.
-
-    Returns:
-        List[Dict[str, Any]]: A list of records with only the specified values.
-    """
-
-    if not values:
-        return records
-
-    if not records:
-        return records
-
-    updated_records = []
-
-    for record in records:
-        updated_record = {}
-        for value in values:
-            if value in record:
-                updated_record[value] = record[value]
-
-        updated_records.append(updated_record)
-
-    return updated_records
-
-
-@task
-async def save_dicts_to_csv(
-    headers: List[str], records: List[Dict[str, Any]], file_path: Path
-) -> None:
-    """
-    Saves a list of dictionaries to a CSV file in the specified file path.
-    The file name will be of the form 'records_{timestamp}.csv'.
-
-    Args:
-        headers (List[str]): The CSV headers.
-        records (List[Dict[str, Any]]): The list of dictionaries to save.
-        file_path (Path): The path to create the CSV file.
-
-    Returns:
-        str: The full path to the created CSV file.
-    """
-
-    logger = get_run_logger()
-
-    new_file = False
-    if not file_path.exists():
-        logger.info("Creating CSV file %s", file_path)
-        new_file = True
-        file_path.parent.mkdir(exist_ok=True, parents=True)
-
-    with open(file_path, mode="a", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=headers)
-
-        if new_file:
-            writer.writeheader()
-
-        for record in records:
-            writer.writerow(record)

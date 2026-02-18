@@ -21,7 +21,7 @@ output_dir = os.path.join(base_path, "Staging_Area")
 input_csv_path=os.path.join(resources_dir,"2024_Total_Zenodo_Form_Spreadsheet.csv") 
 
 output_csv_path=os.path.join(output_dir,"total_eclipse_data.csv") 
-esid_value="004"
+esid_value="012"
 error_log_path=os.path.join(output_dir,"csv_extract_error.txt")
 
 #Section to rename CSV headers based on a mapping dictionary defined by the README template fields to CSV header fields.

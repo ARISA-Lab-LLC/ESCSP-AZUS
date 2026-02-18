@@ -15,7 +15,7 @@ hostname = socket.gethostname()
 if hostname.lower() == 'Galileo.local'.lower() :
     base_path = "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace"
     resources_dir = os.path.join(base_path,"Resources")
-    zipPath="/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Staging_Area/ESID_004_Staging/ESID_004_files2zip" 
+    zipPath="/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Staging_Area/ESID_012/" 
     
 
 output_dir = os.path.join(base_path, "Staging_Area")
