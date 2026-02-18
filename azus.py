@@ -184,6 +184,8 @@ def create_file_list(
 
                 writer.writerow(out_row)
 
+    print(base_dir)
+    print(out_path)
     append_wav_files_with_sequence(directory_path=base_dir,                  # directory to scan
                                     existing_csv_path=out_path,    # MUST already exist
                                     recursive=False)
