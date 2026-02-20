@@ -233,6 +233,43 @@ class Subject(BaseModel):
     subject: Optional[str] = None
 
 
+class RelatedIdentifier(BaseModel):
+    """
+    Identifiers of related resources (for citations and related works).
+    
+    This allows you to link your dataset to papers, datasets, software, or other
+    resources. Used for citing papers, linking to related datasets, etc.
+    
+    Attributes:
+        identifier: The identifier value (e.g., DOI, URL, arXiv ID)
+        scheme: The identifier scheme (e.g., "doi", "url", "arxiv", "isbn", "pmid")
+        relation_type: The relationship to this record (e.g., "cites", "isSupplementTo", "references")
+        resource_type: Optional type of the related resource
+        
+    Common relation_type values:
+        - "cites": This record cites the related resource
+        - "references": This record references the related resource  
+        - "isSupplementTo": This record supplements the related resource
+        - "isSupplementedBy": This record is supplemented by the related resource
+        - "isPartOf": This record is part of the related resource
+        - "hasPart": This record has the related resource as a part
+        - "isDerivedFrom": This record is derived from the related resource
+        
+    Common scheme values:
+        - "doi": Digital Object Identifier
+        - "url": Web URL
+        - "arxiv": arXiv identifier
+        - "isbn": ISBN book identifier
+        - "pmid": PubMed ID
+        - "handle": Handle identifier
+    """
+    
+    identifier: str
+    scheme: str
+    relation_type: str
+    resource_type: Optional[ResourceType] = None
+
+
 class Community(BaseModel):
     """
     A community associated with a record.
@@ -263,6 +300,8 @@ class Metadata(BaseModel):
     funding: Optional[List[Funding]] = None
     subjects: Optional[List[Subject]] = None
     communities: Optional[List[Community]] = None
+    related_identifiers: Optional[List[RelatedIdentifier]] = None
+    references: Optional[List[str]] = None
     custom_fields: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:

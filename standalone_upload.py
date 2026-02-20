@@ -217,6 +217,8 @@ async def upload_dataset(
     data: UploadData,
     delete_failures: bool = False,
     auto_publish: bool = False,
+    related_identifiers_csv: Optional[str] = None,
+    references_csv: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Upload a single dataset to Zenodo.
@@ -225,6 +227,8 @@ async def upload_dataset(
         data: The upload data
         delete_failures: Delete record if upload fails
         auto_publish: Auto-publish after successful upload
+        related_identifiers_csv: Path to CSV with related identifiers
+        references_csv: Path to CSV with bibliographic references
         
     Returns:
         Dictionary with success status and response
@@ -245,7 +249,9 @@ async def upload_dataset(
         # Create draft configuration
         config = await get_draft_config(
             data_collector=data.data_collector,
-            readme_html_path=data.readme_html
+            readme_html_path=data.readme_html,
+            related_identifiers_csv=related_identifiers_csv,
+            references_csv=references_csv
         )
         
         # Upload to Zenodo
@@ -283,6 +289,8 @@ async def upload_datasets(
     total_dir: Optional[str] = None,
     annular_data_collector_csv: Optional[str] = None,
     total_data_collector_csv: Optional[str] = None,
+    related_identifiers_csv: Optional[str] = None,
+    references_csv: Optional[str] = None,
     auto_publish: bool = False,
     delete_failures: bool = False,
 ) -> Dict[str, int]:
@@ -296,6 +304,8 @@ async def upload_datasets(
         total_dir: Directory with total eclipse data
         annular_data_collector_csv: CSV with annular collector info
         total_data_collector_csv: CSV with total collector info
+        related_identifiers_csv: CSV with related identifiers (citations, related works)
+        references_csv: CSV with bibliographic references
         auto_publish: Auto-publish successful uploads
         delete_failures: Delete failed records
         
@@ -347,7 +357,9 @@ async def upload_datasets(
             result = await upload_dataset(
                 data=data,
                 delete_failures=delete_failures,
-                auto_publish=auto_publish
+                auto_publish=auto_publish,
+                related_identifiers_csv=related_identifiers_csv,
+                references_csv=references_csv
             )
             
             stats['total_processed'] += 1
@@ -398,7 +410,9 @@ async def upload_datasets(
             result = await upload_dataset(
                 data=data,
                 delete_failures=delete_failures,
-                auto_publish=auto_publish
+                auto_publish=auto_publish,
+                related_identifiers_csv=related_identifiers_csv,
+                references_csv=references_csv
             )
             
             stats['total_processed'] += 1
@@ -479,6 +493,10 @@ async def main():
     if 'total' in uploads_config:
         total_dir = uploads_config['total'].get('dataset_dir', '')
         total_csv = uploads_config['total'].get('collectors_csv', '')
+    
+    # Extract optional CSV files for related identifiers and references
+    related_identifiers_csv = uploads_config.get('related_identifiers_csv', '')
+    references_csv = uploads_config.get('references_csv', '')
     
     # Check credentials
     try:
@@ -562,6 +580,8 @@ async def main():
             annular_data_collector_csv=annular_csv,
             total_dir=total_dir,
             total_data_collector_csv=total_csv,
+            related_identifiers_csv=related_identifiers_csv,
+            references_csv=references_csv,
             successful_results_file=uploads_config.get('successful_results_file'),
             failure_results_file=uploads_config.get('failure_results_file'),
             delete_failures=uploads_config.get('delete_failures', False),
