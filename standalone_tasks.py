@@ -475,7 +475,9 @@ async def parse_collectors_csv(
 
 async def get_draft_config(
     data_collector: DataCollector,
-    readme_html_path: Optional[str] = None
+    readme_html_path: Optional[str] = None,
+    related_identifiers_csv: Optional[str] = None,
+    references_csv: Optional[str] = None
 ):
     """
     Create a draft record configuration.
@@ -483,6 +485,8 @@ async def get_draft_config(
     Args:
         data_collector: A data collector
         readme_html_path: Path to README.html file
+        related_identifiers_csv: Path to CSV with related identifiers (citations, related works)
+        references_csv: Path to CSV with bibliographic references
         
     Returns:
         DraftConfig object
@@ -543,8 +547,11 @@ async def get_draft_config(
         for subject in parse_values_from_str(data_collector.subjects)
     ]
     
-    # Get default citations and related works
-    related_identifiers = get_default_related_identifiers()
+    # Load related identifiers from CSV (if provided)
+    related_identifiers = read_related_identifiers_from_csv(related_identifiers_csv)
+    
+    # Load references from CSV (if provided)
+    references = read_references_from_csv(references_csv)
     
     metadata = Metadata(
         resource_type=ResourceType(id="dataset"),
@@ -559,7 +566,8 @@ async def get_draft_config(
         version=data_collector.version,
         publisher="Zenodo",
         subjects=subjects,
-        related_identifiers=related_identifiers,
+        related_identifiers=related_identifiers if related_identifiers else None,
+        references=references if references else None,
         contributors=[
             Contributor(
                 person_or_org=PersonOrganization(
@@ -586,22 +594,6 @@ async def get_draft_config(
                 affiliations=[
                     Affiliation(
                         name="Southern Illinois University (SIU), Carbondale, United States"
-                    )
-                ],
-            ),
-            Contributor(
-                person_or_org=PersonOrganization(
-                    type="personal",
-                    given_name="Neil",
-                    family_name="Gilbert",
-                    identifiers=[
-                        Identifier(scheme="orcid", identifier="0000-0003-0949-5612")
-                    ],
-                ),
-                role=Role(id="researcher"),
-                affiliations=[
-                    Affiliation(
-                        name="Oklahoma State University (OSU), Stillwater, United States"
                     )
                 ],
             ),
@@ -716,9 +708,6 @@ def get_description(data_collector: DataCollector) -> str:
         <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
-        <p><strong>Data Collector Training and Resources Manual (Archival Copy)</strong></p>
-        <p>This site-level record includes the Eclipse Soundscapes Data Collector Role Training and Resources Manual (2023-2024). The manual documents the participant training, device setup procedures, metadata submission requirements, ES ID system, timestamp protocols, data return workflow, and public archiving processes used during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. The manual is preserved for transparency and reproducibility and reflects the procedures under which this dataset was collected and processed. (DOI 10.5281/zenodo.18623442)</p>
-
         <p><strong>Individual Site Citation: APA Citation (7th edition)</strong></p>
         <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientist. (2025). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}<br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
         <p><strong>Eclipse Community Citation</strong></p>
@@ -757,47 +746,139 @@ def get_fundings() -> List[Funding]:
     ]
 
 
-def get_default_related_identifiers() -> List[RelatedIdentifier]:
+def read_related_identifiers_from_csv(csv_path: Optional[str]) -> List[RelatedIdentifier]:
     """
-    Retrieve the default list of related identifiers (citations and related works).
+    Read related identifiers (citations, related works) from a CSV file.
     
-    This includes:
-    - Papers citing the Eclipse Soundscapes project
-    - Related datasets
-    - Project website and resources
+    The CSV should have these columns:
+    - identifier: The identifier value (DOI, URL, arXiv ID, etc.)
+    - scheme: The identifier scheme (doi, url, arxiv, isbn, pmid, handle, urn)
+    - relation_type: The relationship type (cites, references, isSupplementTo, etc.)
+    - resource_type: (Optional) The resource type (publication-article, dataset, software, etc.)
     
-    To add more citations:
-    1. Add a new RelatedIdentifier to this list
-    2. Use relation_type="cites" for papers you're citing
-    3. Use relation_type="references" for general references
-    4. Use relation_type="isSupplementTo" for related datasets/resources
-    
+    Args:
+        csv_path: Path to the CSV file. If None or empty, returns empty list.
+        
     Returns:
-        List of RelatedIdentifier objects
+        List of RelatedIdentifier objects, or empty list if file doesn't exist
+        
+    Example CSV:
+        identifier,scheme,relation_type,resource_type
+        10.1038/s41597-024-03940-2,doi,cites,publication-article
+        https://eclipsesoundscapes.org,url,isSupplementTo,
+        10.5281/zenodo.1234567,doi,references,dataset
     """
-    return [
-        # Project website
-        RelatedIdentifier(
-            identifier="https://eclipsesoundscapes.org",
-            scheme="url",
-            relation_type="isSupplementTo"
-        ),
+    # Return empty list if no path provided
+    if not csv_path or not csv_path.strip():
+        return []
+    
+    csv_file = Path(csv_path)
+    
+    # Return empty list if file doesn't exist
+    if not csv_file.exists():
+        print(f"ℹ️  Related identifiers CSV not found: {csv_path}")
+        return []
+    
+    related_identifiers = []
+    
+    try:
+        with open(csv_file, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            
+            # Validate required columns
+            required_cols = {"identifier", "scheme", "relation_type"}
+            if not required_cols.issubset(set(reader.fieldnames or [])):
+                print(f"⚠️  Related identifiers CSV missing required columns: {required_cols}")
+                print(f"   Found columns: {reader.fieldnames}")
+                return []
+            
+            for row_num, row in enumerate(reader, start=2):  # Start at 2 (header is 1)
+                # Skip empty rows
+                if not row.get("identifier") or not row.get("identifier").strip():
+                    continue
+                
+                # Get resource type if provided
+                resource_type = None
+                resource_type_str = row.get("resource_type", "").strip()
+                if resource_type_str:
+                    resource_type = ResourceType(id=resource_type_str)
+                
+                try:
+                    related_id = RelatedIdentifier(
+                        identifier=row["identifier"].strip(),
+                        scheme=row["scheme"].strip(),
+                        relation_type=row["relation_type"].strip(),
+                        resource_type=resource_type
+                    )
+                    related_identifiers.append(related_id)
+                except Exception as e:
+                    print(f"⚠️  Error parsing related identifier on row {row_num}: {e}")
+                    print(f"   Row data: {row}")
+                    continue
+        
+        print(f"✅ Loaded {len(related_identifiers)} related identifier(s) from {csv_file.name}")
+        
+    except Exception as e:
+        print(f"⚠️  Error reading related identifiers CSV {csv_path}: {e}")
+        return []
+    
+    return related_identifiers
 
-        RelatedIdentifier(
-             identifier="10.2307/20023118",
-             scheme="doi",
-             relation_type="cites",
-             resource_type=ResourceType(id="publication-article")
-         ),
 
-        # Add additional citations here as needed:
-        # RelatedIdentifier(
-        #     identifier="YOUR_DOI_HERE",
-        #     scheme="doi",
-        #     relation_type="cites",
-        #     resource_type=ResourceType(id="publication-article")
-        # ),
-    ]
+def read_references_from_csv(csv_path: Optional[str]) -> List[str]:
+    """
+    Read references (bibliographic citations) from a CSV file.
+    
+    The CSV should have one column:
+    - reference: The full citation string
+    
+    Args:
+        csv_path: Path to the CSV file. If None or empty, returns empty list.
+        
+    Returns:
+        List of reference strings, or empty list if file doesn't exist
+        
+    Example CSV:
+        reference
+        "Henshaw, W. D., et al. (2024). Eclipse Soundscapes Project Data. Scientific Data, 11(1), 1098."
+        "Pease, B. P., et al. (2024). Audiovisual data during the April 8, 2024 total solar eclipse."
+    """
+    # Return empty list if no path provided
+    if not csv_path or not csv_path.strip():
+        return []
+    
+    csv_file = Path(csv_path)
+    
+    # Return empty list if file doesn't exist
+    if not csv_file.exists():
+        print(f"ℹ️  References CSV not found: {csv_path}")
+        return []
+    
+    references = []
+    
+    try:
+        with open(csv_file, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            
+            # Check for reference column
+            if "reference" not in (reader.fieldnames or []):
+                print(f"⚠️  References CSV missing 'reference' column")
+                print(f"   Found columns: {reader.fieldnames}")
+                return []
+            
+            for row_num, row in enumerate(reader, start=2):
+                # Skip empty rows
+                ref = row.get("reference", "").strip()
+                if ref:
+                    references.append(ref)
+        
+        print(f"✅ Loaded {len(references)} reference(s) from {csv_file.name}")
+        
+    except Exception as e:
+        print(f"⚠️  Error reading references CSV {csv_path}: {e}")
+        return []
+    
+    return references
 
 
 def get_default_creators() -> List[Creator]:

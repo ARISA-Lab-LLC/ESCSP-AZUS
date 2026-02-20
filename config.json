@@ -1,16 +1,18 @@
 {
   "uploads": {
     "total": {
-      "dataset_dir": "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Staging_Area",
-      "collectors_csv": "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Resources/2024_Total_Zenodo_Form_Spreadsheet.csv"
+      "dataset_dir": "",
+      "collectors_csv": ""
     },
-    "successful_results_file": "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Records/successul_results.csv",
-    "failure_results_file": "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Records/failed_results.csv",
+    "related_identifiers_csv": "",
+    "references_csv": "",
+    "successful_results_file": "",
+    "failure_results_file": "",
     "delete_failures": false,
     "auto_publish": false
   },
 
   "downloads": {
-    "results_dir": "/Volumes/DB_Library/Dropbox/programs/ESCSP_Data/AZUS_Workspace/Records/"
+    "results_dir": ""
   }
 }
