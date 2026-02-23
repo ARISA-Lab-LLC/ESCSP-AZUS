@@ -104,7 +104,6 @@ class DataCollector(BaseModel):
         """
         Creates a label from the eclipse type.
         """
-        # Note: use_enum_values=True means eclipse_type is already a string
         return (
             "Total Solar Eclipse"
             if self.eclipse_type == "Total"
@@ -257,7 +256,7 @@ class PersistedResult(BaseModel):
         if "status" in json:
             self.status = json["status"]
         if "state" in json:
-            self.state = json["state"]  # âœ… FIXED: Was incorrectly setting self.created
+            self.state = json["state"]  # ✅ FIXED: Was incorrectly setting self.created
         if "submitted" in json:
             self.submitted = json["submitted"]
         if "owners" in json:

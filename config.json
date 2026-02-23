@@ -1,0 +1,18 @@
+{
+  "uploads": {
+    "total": {
+      "dataset_dir": "",
+      "collectors_csv": ""
+    },
+    "related_identifiers_csv": "",
+    "references_csv": "",
+    "successful_results_file": "",
+    "failure_results_file": "",
+    "delete_failures": false,
+    "auto_publish": false
+  },
+
+  "downloads": {
+    "results_dir": ""
+  }
+}
