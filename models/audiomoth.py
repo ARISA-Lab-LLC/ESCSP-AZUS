@@ -58,22 +58,22 @@ class DataCollector(BaseModel):
     )
 
     eclipse_type: EclipseType = Field(
-        validation_alias=AliasChoices("eclipse_type", "Type of Eclipse")
+        validation_alias=AliasChoices("eclipse_type", "Local Eclipse Type")
     )
 
     eclipse_coverage: str = Field(
-        validation_alias=AliasChoices("eclipse_coverage", "Eclipse %")
+        validation_alias=AliasChoices("eclipse_coverage", "Eclipse Percent (%)")
     )
 
     eclipse_start_time_utc: str = Field(
         validation_alias=AliasChoices(
-            "eclipse_start_time_utc", "Eclipse Start Time (UTC)"
+            "eclipse_start_time_utc", "Eclipse Start Time (UTC) (1st Contact)"
         )
     )
 
     eclipse_totality_start_time_utc: Optional[str] = Field(
         validation_alias=AliasChoices(
-            "eclipse_totality_start_time_utc", "Totality Start Time (UTC)"
+            "eclipse_totality_start_time_utc", "Totality Start Time (UTC) (2nd Contact)"
         ),
         default="N/A",
     )
@@ -86,13 +86,13 @@ class DataCollector(BaseModel):
 
     eclipse_totality_end_time_utc: Optional[str] = Field(
         validation_alias=AliasChoices(
-            "eclipse_totality_end_time_utc", "Totality End Time (UTC)"
+            "eclipse_totality_end_time_utc", "Totality End Time (UTC) (3rd Contact)"
         ),
         default="N/A",
     )
 
     eclipse_end_time_utc: Optional[str] = Field(
-        validation_alias=AliasChoices("eclipse_end_time_utc", "Eclipse End Time (UTC)"),
+        validation_alias=AliasChoices("eclipse_end_time_utc", "Eclipse End Time (UTC) (4th Contact)"),
         default="N/A",
     )
 
@@ -104,9 +104,10 @@ class DataCollector(BaseModel):
         """
         Creates a label from the eclipse type.
         """
+        # Note: use_enum_values=True means eclipse_type is already a string
         return (
             "Total Solar Eclipse"
-            if self.eclipse_type == EclipseType.TOTAL
+            if self.eclipse_type == "Total"
             else "Annular Solar Eclipse"
         )
 
@@ -256,7 +257,7 @@ class PersistedResult(BaseModel):
         if "status" in json:
             self.status = json["status"]
         if "state" in json:
-            self.state = json["state"]  # ✅ FIXED: Was incorrectly setting self.created
+            self.state = json["state"]  # âœ… FIXED: Was incorrectly setting self.created
         if "submitted" in json:
             self.submitted = json["submitted"]
         if "owners" in json:

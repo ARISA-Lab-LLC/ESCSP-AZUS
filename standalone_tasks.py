@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime
-from string import Template
 
 # Import models (no Prefect dependency)
 from models.invenio import (
@@ -477,7 +476,8 @@ async def get_draft_config(
     data_collector: DataCollector,
     readme_html_path: Optional[str] = None,
     related_identifiers_csv: Optional[str] = None,
-    references_csv: Optional[str] = None
+    references_csv: Optional[str] = None,
+    reserve_doi: bool = False
 ):
     """
     Create a draft record configuration.
@@ -487,6 +487,7 @@ async def get_draft_config(
         readme_html_path: Path to README.html file
         related_identifiers_csv: Path to CSV with related identifiers (citations, related works)
         references_csv: Path to CSV with bibliographic references
+        reserve_doi: Whether to reserve a DOI for this record (default: False)
         
     Returns:
         DraftConfig object
@@ -494,18 +495,30 @@ async def get_draft_config(
     # Import here to avoid circular dependency
     from prefect_invenio_rdm.models.records import DraftConfig, Access
     
-    # Get description from README.html if available
-    if readme_html_path and Path(readme_html_path).exists():
-        print(f"Using description from README.html: {readme_html_path}")
-        try:
-            description = Path(readme_html_path).read_text(encoding='utf-8')
-        except Exception as e:
-            print(f"Warning: Failed to read README.html: {e}")
-            description = get_description(data_collector=data_collector)
-    else:
-        if readme_html_path:
-            print(f"Warning: README.html not found at {readme_html_path}")
-        description = get_description(data_collector=data_collector)
+    # Get description from README.html - REQUIRED
+    if not readme_html_path:
+        raise ValueError(
+            "README.html path is required but was not provided.\n"
+            "Please run prepare_dataset.py first to generate README.html,\n"
+            "or provide a valid readme_html_path parameter."
+        )
+    
+    if not Path(readme_html_path).exists():
+        raise FileNotFoundError(
+            f"README.html file not found at: {readme_html_path}\n"
+            f"Please run prepare_dataset.py to generate README.html before uploading.\n"
+            f"Expected location: {readme_html_path}"
+        )
+    
+    print(f"✅ Using description from README.html: {readme_html_path}")
+    try:
+        description = Path(readme_html_path).read_text(encoding='utf-8')
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to read README.html file at {readme_html_path}\n"
+            f"Error: {e}\n"
+            f"Please verify the file exists and has read permissions."
+        )
     
     dates: Optional[List[Date]] = []
     if data_collector.first_recording_day:
@@ -552,6 +565,16 @@ async def get_draft_config(
     
     # Load references from CSV (if provided)
     references = read_references_from_csv(references_csv)
+    
+    # Configure DOI reservation based on parameter
+    if reserve_doi:
+        # Request DOI reservation from Zenodo
+        pids = {"doi": {"provider": "datacite", "client": "zenodo"}}
+        print(f"🔗 DOI reservation: ENABLED (Zenodo will assign a DOI)")
+    else:
+        # Do not request DOI reservation
+        pids = {}
+        print(f"🔗 DOI reservation: DISABLED (no DOI will be assigned)")
     
     metadata = Metadata(
         resource_type=ResourceType(id="dataset"),
@@ -612,7 +635,7 @@ async def get_draft_config(
             "code:programmingLanguage": [{"id": "python"}],
             "ac:captureDevice": ["AudioMoth v.1.1.0, Firmware 1.8"],
         },
-        pids={},
+        pids=pids,  # Use configured DOI reservation setting
     )
 
 
@@ -620,111 +643,6 @@ def parse_values_from_str(string: str, delimeter: str = ":") -> List[str]:
     """Parse values from a delimited string."""
     values = string.split(sep=delimeter)
     return [x.strip() for x in values]
-
-
-def get_description(data_collector: DataCollector) -> str:
-    """Create a description for a draft record."""
-    eclipse_dt = datetime.strptime(data_collector.eclipse_date, UPLOAD_DATE_FORMAT)
-    
-    annular_location_info = Template(
-        """
-        <li>Eclipse Date: $eclipse_location_date</li>
-        <li>Eclipse Start Time (UTC): $start_time</li>
-        <li>Eclipse Maximum [when the most possible amount of the Sun in blocked] (UTC): $max_time (This is Annularity if on eclipse path)</li>
-        <li>Eclipse End Time (UTC): [N/A if partial eclipse] $end_time</li>
-        """
-    ).substitute(
-        eclipse_location_date=eclipse_dt.strftime("%m/%d/%Y"),
-        start_time=data_collector.eclipse_start_time_utc,
-        max_time=data_collector.eclipse_maximum_time_utc,
-        end_time=data_collector.eclipse_end_time_utc,
-    )
-    
-    total_location_info = Template(
-        """
-        <li>Eclipse Date: $eclipse_location_date</li>
-        <li>Eclipse Start Time (UTC): $start_time</li>
-        <li>Totality Start Time (UTC): [N/A if partial eclipse] $totality_start_time</li>
-        <li>Eclipse Maximum [when the most possible amount of the Sun in blocked] (UTC): $max_time</li>
-        <li>Totality End Time (UTC): [N/A if partial eclipse] $totality_end_time</li>
-        <li>Eclipse End Time (UTC): [N/A if partial eclipse] $end_time</li>
-        """
-    ).substitute(
-        eclipse_location_date=eclipse_dt.strftime("%m/%d/%Y"),
-        start_time=data_collector.eclipse_start_time_utc,
-        totality_start_time=data_collector.eclipse_totality_start_time_utc,
-        max_time=data_collector.eclipse_maximum_time_utc,
-        totality_end_time=data_collector.eclipse_totality_end_time_utc,
-        end_time=data_collector.eclipse_end_time_utc,
-    )
-    
-    location_info = (
-        total_location_info
-        if data_collector.eclipse_type == "Total"
-        else annular_location_info
-    )
-    
-    return Template(
-        """
-        <p>These are audio recordings taken by an Eclipse Soundscapes (ES) Data Collector during the week of the $date $eclipse_label.&nbsp;</p>
-        <p><strong>Data Site location information:</strong></p>
-        <ul>
-        <li>Latitude: $latitude&nbsp;</li>
-        <li>Longitude:&nbsp; $longitude</li>
-        <li>Type of Eclipse: $eclipse_label</li>
-        <li>Eclipse %: $coverage</li>
-        <li>WAV files Time &amp; Date Settings: $time_date_mode</li>
-        </ul>
-        <p><strong>Included Data:</strong></p>
-        <ul>
-        <li>
-        <p><strong>Audio files in WAV format</strong>&nbsp;with the date and time in UTC within the file name: YYYYMMDD_HHMMSS meaning YearMonthDay_HourMinuteSecond<br>For example, 20240411_141600.WAV means that this audio file starts on April 11, 2024 at 14:16:00 Coordinated Universal Time (UTC)</p>
-        </li>
-        <li>
-        <p><strong>CONFIG Text file:&nbsp;</strong>Includes AudioMoth device setting information, such as sample rate in Hertz (Hz), gain, firmware, etc.&nbsp;</p>
-        </li>
-        </ul>
-        <p><strong>Eclipse Information for this location:</strong></p>
-        <ul>
-        $location_info
-        </ul>
-        <p><strong>Audio Data Collection During Eclipse Week&nbsp;</strong></p>
-        <p>ES Data Collectors used AudioMoth devices to record audio data, known as soundscapes, over a 5-day period during the eclipse week: 2 days before the eclipse, the day of the eclipse, and 2 days after. The complete raw audio data collected by the Data Collector at the location mentioned above is provided here. This data may or may not cover the entire requested timeframe due to factors such as availability, technical issues, or other unforeseen circumstances.&nbsp;</p>
-        <p><strong>ES ID# Information:</strong></p>
-        <p>Each AudioMoth recording device was assigned a unique Eclipse Soundscapes Identification Number (ES ID#). This identifier connects the audio data, submitted via a MicroSD card, with the latitude and longitude information provided by the data collector through an online form. The ES team used the ES ID# to link the audio data with its corresponding location information and then uploaded this raw audio data and location details to Zenodo. This process ensures the anonymity of the ES Data Collectors while allowing them to easily search for and access their audio data on Zenodo.&nbsp;</p>
-        <p><strong>TimeStamp Information:</strong></p>
-        <p>The ES team and the Data Collectors took care to set the date and time on the AudioMoth recording devices using an AudioMoth time chime before deployment, ensuring that the recordings would have an automatic timestamp. However, participants also manually noted the date and start time as a backup in case the time chime setup failed. The notes above indicate whether the WAV audio files for this site were timestamped manually or with the automated AudioMoth time chime.&nbsp;</p>
-        <p><strong>Common Timestamp Error:</strong></p>
-        <p>Some AudioMoth devices experienced a malfunction where the timestamp on audio files reverted to a date in 1970 or before, even after initially recording correctly. Despite this issue, the affected data was still included in this ES site's collected raw audio dataset.</p>
-        <p><strong>Latitude &amp; Longitude Information:</strong></p>
-        <p>The latitude and longitude for each site was taken manually by data collectors and submitted to the ES team, either via a web form or on paper. It is shared in Decimal Degrees format.</p>
-        <p><strong>General Project Information:</strong></p>
-        <p>The Eclipse Soundscapes Project is a NASA Volunteer Science project funded by NASA Science Activation that is studying how eclipses affect life on Earth during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. Eclipse Soundscapes revisits an eclipse study from almost 100 years ago that showed that animals and insects are affected by solar eclipses! Like this study from 100 years ago, ES asked for the public's help. ES uses modern technology to continue to study how solar eclipses affect life on Earth! You can learn more at www.EclipseSoundscapes.org.&nbsp;</p>
-        <p>Eclipse Soundscapes is an enterprise of ARISA Lab, LLC and is supported by NASA award No. 80NSSC21M0008.&nbsp;</p>
-        <p><strong>Eclipse Data Version Definitions</strong></p>
-        <p>{1st digit = year, 2nd digit = Eclipse type (1=Total Solar Eclipse, 9=Annular Solar Eclipse, 0=Partial Solar Eclipse), 3rd digit is unused and in place for future use}</p>
-        <p><strong>2023.9.0&nbsp;</strong>= Week of October 14, 2023 Annular Eclipse Audio Data, Path of Annularity (Annular Eclipse)</p>
-        <p><strong>2023.0.0&nbsp;</strong>= Week of October 14, 2023 Annular Eclipse Audio Data, OFF the Path of Annularity (Partial Eclipse)</p>
-        <p><strong>2024.1.0</strong>&nbsp;= Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)</p>
-        <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
-        <p><em>*Please note that this dataset's version number is listed below.</em></p>
-        <p><strong>Individual Site Citation: APA Citation (7th edition)</strong></p>
-        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientist. (2025). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}<br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
-        <p><strong>Eclipse Community Citation</strong></p>
-        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientists. <i>2023 and 2024 solar eclipse soundscapes audio data</i> [Collection of audio datasets]. Eclipse Soundscapes Community, Zenodo. <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a><br>Collected by volunteer scientists as part of the Eclipse Soundscapes Project.</br>This project is supported by NASA award No. 80NSSC21M0008.</p>
-        <p>&nbsp;</p><p></p>
-        """
-    ).substitute(
-        date=eclipse_dt.strftime("%B %d, %Y"),
-        eclipse_label=data_collector.eclipse_label(),
-        latitude=data_collector.latitude,
-        longitude=data_collector.longitude,
-        coverage=data_collector.eclipse_coverage,
-        time_date_mode=data_collector.files_date_time_mode,
-        location_info=location_info,
-        year=eclipse_dt.year,
-        esid=data_collector.esid,
-    )
 
 
 def get_fundings() -> List[Funding]:

@@ -219,6 +219,7 @@ async def upload_dataset(
     auto_publish: bool = False,
     related_identifiers_csv: Optional[str] = None,
     references_csv: Optional[str] = None,
+    reserve_doi: bool = False,
 ) -> Dict[str, Any]:
     """
     Upload a single dataset to Zenodo.
@@ -229,6 +230,7 @@ async def upload_dataset(
         auto_publish: Auto-publish after successful upload
         related_identifiers_csv: Path to CSV with related identifiers
         references_csv: Path to CSV with bibliographic references
+        reserve_doi: Whether to reserve a DOI for this record
         
     Returns:
         Dictionary with success status and response
@@ -251,7 +253,8 @@ async def upload_dataset(
             data_collector=data.data_collector,
             readme_html_path=data.readme_html,
             related_identifiers_csv=related_identifiers_csv,
-            references_csv=references_csv
+            references_csv=references_csv,
+            reserve_doi=reserve_doi
         )
         
         # Upload to Zenodo
@@ -293,6 +296,7 @@ async def upload_datasets(
     references_csv: Optional[str] = None,
     auto_publish: bool = False,
     delete_failures: bool = False,
+    reserve_doi: bool = False,
 ) -> Dict[str, int]:
     """
     Main upload function - uploads all datasets.
@@ -308,6 +312,7 @@ async def upload_datasets(
         references_csv: CSV with bibliographic references
         auto_publish: Auto-publish successful uploads
         delete_failures: Delete failed records
+        reserve_doi: Reserve a DOI for each record
         
     Returns:
         Dictionary with upload statistics
@@ -359,7 +364,8 @@ async def upload_datasets(
                 delete_failures=delete_failures,
                 auto_publish=auto_publish,
                 related_identifiers_csv=related_identifiers_csv,
-                references_csv=references_csv
+                references_csv=references_csv,
+                reserve_doi=reserve_doi
             )
             
             stats['total_processed'] += 1
@@ -412,7 +418,8 @@ async def upload_datasets(
                 delete_failures=delete_failures,
                 auto_publish=auto_publish,
                 related_identifiers_csv=related_identifiers_csv,
-                references_csv=references_csv
+                references_csv=references_csv,
+                reserve_doi=reserve_doi
             )
             
             stats['total_processed'] += 1
@@ -498,6 +505,9 @@ async def main():
     related_identifiers_csv = uploads_config.get('related_identifiers_csv', '')
     references_csv = uploads_config.get('references_csv', '')
     
+    # Extract DOI reservation setting (default: False for safety)
+    reserve_doi = uploads_config.get('reserve_doi', False)
+    
     # Check credentials
     try:
         credentials = get_credentials_from_env()
@@ -520,6 +530,7 @@ async def main():
     logger.info(f"Total directory: {total_dir or 'Not configured'}")
     logger.info(f"Auto-publish: {uploads_config.get('auto_publish', False)}")
     logger.info(f"Delete failures: {uploads_config.get('delete_failures', False)}")
+    logger.info(f"Reserve DOI: {reserve_doi}")
     logger.info("=" * 70)
     
     # Validate CSV files before proceeding
@@ -586,6 +597,7 @@ async def main():
             failure_results_file=uploads_config.get('failure_results_file'),
             delete_failures=uploads_config.get('delete_failures', False),
             auto_publish=uploads_config.get('auto_publish', False),
+            reserve_doi=reserve_doi,
         )
         
         # Display summary
