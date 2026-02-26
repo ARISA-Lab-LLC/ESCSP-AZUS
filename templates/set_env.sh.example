@@ -1,0 +1,7 @@
+#!/bin/bash
+# AZUS Environment Variables
+# Copy this file to Resources/set_env.sh and fill in your credentials.
+# Usage: source Resources/set_env.sh
+
+export INVENIO_RDM_ACCESS_TOKEN=""
+export INVENIO_RDM_BASE_URL="https://zenodo.org/api/"

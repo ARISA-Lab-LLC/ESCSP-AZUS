@@ -1,29 +1,18 @@
-# AZUS Test Upload Guide - Step by Step
+# AZUS Test Upload Guide
 
-**Version:** Current (Feb 22, 2026)  
-**Purpose:** Upload a test dataset to Zenodo using ESCSP-AZUS  
-**Time Required:** 30-60 minutes  
+**Version:** 3.0 (Feb 25, 2026)
+**Purpose:** Upload a test dataset to Zenodo using AZUS
+**Time Required:** 30–60 minutes
 **Skill Level:** Intermediate (command line experience helpful)
 
----
-
-## Prerequisites
-
-### ✅ Required Software
-- Python 3.9 or higher
-- Git (optional, for cloning repository)
-- Text editor (for editing config files)
-- Terminal/command line access
-
-### ✅ Required Accounts
-- Zenodo account (create at https://zenodo.org)
-- Zenodo API token (generate from your Zenodo account)
-
-### ✅ Test Data Requirements
-For this guide, you'll need:
-- **Test audio files:** 5-10 WAV files (AudioMoth recordings or any WAV files)
-- **CONFIG.TXT file:** AudioMoth configuration file (can create a simple one)
-- **Collector metadata:** Information about the recording site
+**What changed in v3.0:**
+- Entry point corrected: `standalone_tasks.py` (not `standalone_upload.py`)
+- Requirements file: `requirements-standalone.txt`
+- Credentials file: `Resources/set_env.sh`
+- Config format: `"datasets": [...]` list (not `"total": {...}` key)
+- `prepare_dataset.py` now accepts `--config` to avoid duplicating the `collectors_csv` path
+- `CONFIG.TXT` section corrected: comes from the AudioMoth device, not created manually
+- `reserve_doi` reinstated as a config option
 
 ---
 
@@ -33,14 +22,14 @@ For this guide, you'll need:
 
 ```bash
 # Navigate to AZUS directory
-cd /path/to/ESCSP-AZUS
+cd /path/to/azus
 
 # Create virtual environment (recommended)
 python3 -m venv azus-env
-source azus-env/bin/activate  # On Windows: azus-env\Scripts\activate
+source azus-env/bin/activate       # On Windows: azus-env\Scripts\activate
 
 # Install requirements
-pip install -r requirements.txt
+pip install -r requirements-standalone.txt
 ```
 
 **Expected output:**
@@ -51,33 +40,34 @@ Successfully installed pydantic-2.x.x requests-2.x.x ...
 ### Step 1.2: Set Up Zenodo API Credentials
 
 **Get your Zenodo API token:**
-1. Go to https://zenodo.org (or https://sandbox.zenodo.org for testing)
+1. Go to https://sandbox.zenodo.org (for testing) or https://zenodo.org (production)
 2. Click your username → Applications → Personal access tokens
 3. Click "New token"
-4. Name: "AZUS Test"
-5. Scopes: Select `deposit:write` and `deposit:actions`
-6. Click "Create"
-7. **Copy the token** (you won't see it again!)
+4. Name: `AZUS Test`
+5. Scopes: select `deposit:write` and `deposit:actions`
+6. Click "Create" — **copy the token immediately** (it won't be shown again)
 
-**Configure credentials:**
+**Configure credentials in `Resources/set_env.sh`:**
 
-Edit `set_env.sh`:
 ```bash
 #!/bin/bash
-# Zenodo API Configuration
+# Zenodo API credentials — DO NOT commit this file to version control
 
-# For TESTING: Use Zenodo Sandbox
+# For TESTING: Zenodo Sandbox
 export INVENIO_RDM_BASE_URL="https://sandbox.zenodo.org/api"
-export INVENIO_RDM_ACCESS_TOKEN="your-token-here"
+export INVENIO_RDM_ACCESS_TOKEN="your-sandbox-token-here"
 
-# For PRODUCTION: Use Real Zenodo (commented out for safety)
+# For PRODUCTION: uncomment and fill in (keep sandbox lines commented out)
 # export INVENIO_RDM_BASE_URL="https://zenodo.org/api"
 # export INVENIO_RDM_ACCESS_TOKEN="your-production-token-here"
 ```
 
+> ⚠️ `Resources/set_env.sh` must never be committed to git. Confirm it is in
+> `.gitignore` before working in a repository.
+
 **Load credentials:**
 ```bash
-source set_env.sh
+source Resources/set_env.sh
 ```
 
 **Verify:**
@@ -86,705 +76,442 @@ echo $INVENIO_RDM_BASE_URL
 # Should output: https://sandbox.zenodo.org/api
 ```
 
+### Step 1.3: Confirm project_config.json
+
+`Resources/project_config.json` holds the project identity (creators, funding, license,
+community ID, etc.). For the Eclipse Soundscapes project this file is already populated.
+For a new project, copy `templates/project_config.json.example` and fill it in before
+continuing.
+
 ---
 
 ## Part 2: Prepare Test Data
 
-### Step 2.1: Create Test Data Directory Structure
+### Step 2.1: Create Test Directory Structure
 
 ```bash
-# Create workspace
-mkdir -p ~/AZUS_Test_Workspace/{Raw_Data,Staging_Area,Resources,Records}
-
-# Create test ESID folder
-mkdir -p ~/AZUS_Test_Workspace/Raw_Data/ESID_999
+mkdir -p ~/AZUS_Test_Workspace/{Raw_Data/ESID_999,Staging_Area,Records}
 ```
 
-**Directory structure:**
+**Structure:**
 ```
 ~/AZUS_Test_Workspace/
 ├── Raw_Data/
-│   └── ESID_999/          # Your test audio files go here
-├── Staging_Area/          # Prepared datasets (auto-created)
-├── Resources/             # CSV files and templates
-└── Records/               # Upload results logs
+│   └── ESID_999/          ← your test audio files go here
+├── Staging_Area/          ← prepared datasets (auto-created by prepare_dataset.py)
+└── Records/               ← upload result logs
 ```
 
 ### Step 2.2: Add Test Audio Files
 
-**Option A: Use Real AudioMoth Files**
+**Option A — Use real AudioMoth recordings:**
 ```bash
-# Copy your WAV files
 cp /path/to/your/wav/files/*.WAV ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
 ```
 
-**Option B: Create Dummy WAV Files (for testing only)**
+**Option B — Create dummy WAV files (testing only, requires ffmpeg):**
 ```bash
-# Create small test WAV files (requires sox or ffmpeg)
 cd ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
-
-# Using ffmpeg (if installed):
 ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_120000.WAV
 ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_120500.WAV
 ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_121000.WAV
 ```
 
-### Step 2.3: Create CONFIG.TXT File
+### Step 2.3: CONFIG.TXT
 
+`CONFIG.TXT` is **generated automatically by the AudioMoth device** when it records.
+It will already be present in any genuine AudioMoth recording folder.
+
+If you are testing with dummy WAV files (Option B above) and do not have a real
+`CONFIG.TXT`, you can omit it — `prepare_dataset.py` will log a warning but will
+proceed and create the ZIP without it. Do not create a fake `CONFIG.TXT` by hand;
+any values you invent will be incorrect metadata in the Zenodo record.
+
+**To verify a real CONFIG.TXT is present:**
 ```bash
-cd ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
-
-cat > CONFIG.TXT << 'EOF'
-Device ID                : 24A7E5F31D2B9C40
-Battery state            : 4.8V
-Sample rate (Hz)         : 48000
-Gain setting             : Medium (2)
-Recording duration (s)   : 300
-Sleep duration (s)       : 0
-Recording period         : Always
-Filter                   : Low pass
-Firmware                 : AudioMoth-Firmware-Basic 1.8.0
-EOF
+ls ~/AZUS_Test_Workspace/Raw_Data/ESID_999/CONFIG.TXT
 ```
 
 ### Step 2.4: Create Collector CSV
 
-```bash
-cd ~/AZUS_Test_Workspace/Resources/
+The collector CSV must use the current column headers exactly. `prepare_dataset.py`
+validates headers before processing and will print a clear diff if anything is wrong.
 
-cat > test_collectors.csv << 'EOF'
-ESID,Latitude,Longitude,Local Eclipse Type,Eclipse Percent (%),Eclipse Date,Eclipse Start Time (UTC) (1st Contact),Eclipse Maximum (UTC),Eclipse End Time (UTC) (4th Contact),Totality Start Time (UTC) (2nd Contact),Totality End Time (UTC) (3rd Contact),WAV Files Time & Date Settings,Version,Subjects
-999,42.3601,-71.0589,Total Solar Eclipse,100,2024-04-08,18:15:00,19:30:45,20:45:00,19:29:00,19:32:30,AudioMoth Time Chime,2024.1.0,Solar Eclipse:Audio Recording:Citizen Science:Soundscape
+```bash
+cat > ~/AZUS_Test_Workspace/Resources/test_collectors.csv << 'EOF'
+ESID,Data Collector Affiliations,Latitude,Longitude,Local Eclipse Type,Eclipse Percent (%),WAV Files Time & Date Settings,Data Collector Start Time Notes,Eclipse Date,Eclipse Start Time (UTC) (1st Contact),Totality Start Time (UTC) (2nd Contact),Eclipse Maximum (UTC),Totality End Time (UTC) (3rd Contact),Eclipse End Time (UTC) (4th Contact),Version,Keywords and subjects,year
+999,Test Organization,42.3601,-71.0589,Total,100,Set with Automated AudioMoth Time chime,,2024-04-08,18:15:00,19:29:00,19:30:45,19:32:30,20:45:00,2024.1.0,Solar Eclipse:Audio Recording:Citizen Science:Soundscape,2024
 EOF
 ```
 
-**Explanation of fields:**
-- **ESID:** Eclipse Soundscapes ID (use 999 for testing)
-- **Latitude/Longitude:** Recording location (example: Boston, MA)
-- **Eclipse type/percent:** Total/100 or Annular/90, etc.
-- **Eclipse Date:** YYYY-MM-DD format
-- **Times:** All in UTC (HH:MM:SS format)
-- **Version:** 2024.1.0 for total, 2023.9.0 for annular
-- **Subjects:** Colon-separated keywords
+**Field notes:**
+- `ESID`: Use `999` for test uploads
+- `Latitude`/`Longitude`: Boston, MA shown as an example
+- `Eclipse Date`: `YYYY-MM-DD` format
+- All times in UTC (`HH:MM:SS`)
+- `Keywords and subjects`: colon-separated list
+- `Version`: `2024.1.0` for total eclipse; `2023.9.0` for annular
 
-### Step 2.5: Create Citations CSV (Optional)
+### Step 2.5: Create Citations CSVs (Optional)
 
+Place these in the `Resources/` directory to apply them globally to every record,
+or inside a specific `ESID_XXX/` staging directory to apply them to that record only
+(the per-record file takes precedence).
+
+**related_identifiers.csv:**
 ```bash
-cd ~/AZUS_Test_Workspace/Resources/
-
-cat > related_identifiers.csv << 'EOF'
+cat > ~/AZUS_Test_Workspace/Resources/related_identifiers.csv << 'EOF'
 identifier,scheme,relation_type,resource_type
 10.1038/s41597-024-03940-2,doi,cites,publication-article
 https://eclipsesoundscapes.org,url,isSupplementTo,
 EOF
 ```
 
-### Step 2.6: Create References CSV (Optional)
-
+**references.csv:**
 ```bash
-cd ~/AZUS_Test_Workspace/Resources/
-
-cat > references.csv << 'EOF'
+cat > ~/AZUS_Test_Workspace/Resources/references.csv << 'EOF'
 reference
 "Henshaw, W. D., et al. (2024). Eclipse Soundscapes Project Data. Scientific Data, 11(1), 1098."
 EOF
 ```
 
-### Step 2.7: Verify Test Data
+### Step 2.6: Verify Test Data
 
 ```bash
-# Check files are in place
 ls -lh ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
-
-# Should show:
-# CONFIG.TXT
-# 20240408_120000.WAV
-# 20240408_120500.WAV
-# 20240408_121000.WAV
+# Should show WAV files and optionally CONFIG.TXT
 ```
 
 ---
 
-## Part 3: Prepare Dataset for Upload
+## Part 3: Configure config.json
 
-### Step 3.1: Run Dataset Preparation Script
+Create `Resources/config.json` for the test workspace. Note that `collectors_csv`
+here is the **same path** that `prepare_dataset.py` will read via `--config` — there
+is only one place to set it.
 
 ```bash
-cd /path/to/ESCSP-AZUS
+cat > Resources/config_test.json << EOF
+{
+    "_comment": "Test config — points to AZUS_Test_Workspace",
+    "project_config": "Resources/project_config.json",
+    "readme_template": "Resources/README_template.html",
 
-python prepare_dataset.py \
-  ~/AZUS_Test_Workspace/Raw_Data/ESID_999 \
-  --collector-csv ~/AZUS_Test_Workspace/Resources/test_collectors.csv \
-  --eclipse-type total \
-  --output-dir ~/AZUS_Test_Workspace/Staging_Area/ESID_999
+    "uploads": {
+        "datasets": [
+            {
+                "name": "Test Total Eclipse",
+                "dataset_dir": "$HOME/AZUS_Test_Workspace/Staging_Area",
+                "collectors_csv": "$HOME/AZUS_Test_Workspace/Resources/test_collectors.csv",
+                "dataset_category": "Total"
+            }
+        ],
+        "related_identifiers_csv": "$HOME/AZUS_Test_Workspace/Resources/related_identifiers.csv",
+        "references_csv": "$HOME/AZUS_Test_Workspace/Resources/references.csv",
+        "successful_results_file": "$HOME/AZUS_Test_Workspace/Records/successful_results.csv",
+        "failure_results_file": "$HOME/AZUS_Test_Workspace/Records/failed_results.csv",
+        "delete_failures": false,
+        "auto_publish": false,
+        "reserve_doi": false
+    },
+
+    "downloads": {
+        "results_dir": "$HOME/AZUS_Test_Workspace/Records/"
+    }
+}
+EOF
 ```
 
-**What this does:**
-1. ✅ Creates ESID_999.zip (all WAV files + CONFIG.TXT)
-2. ✅ Generates README.html (Zenodo description)
-3. ✅ Generates README.md (markdown version)
-4. ✅ Creates file_list.csv (file manifest with SHA-512 hashes)
-5. ✅ Creates data dictionaries
-6. ✅ Copies resource files
+> `reserve_doi: false` is correct for Sandbox — Sandbox DOIs are not registered
+> with DataCite. Only set this to `true` on production Zenodo for real datasets.
+
+**Validate the JSON is well-formed:**
+```bash
+python3 -c "import json; json.load(open('Resources/config_test.json'))" && echo "Valid JSON"
+```
+
+---
+
+## Part 4: Prepare Dataset for Upload
+
+`prepare_dataset.py` handles everything in one step: creates the ZIP, generates
+README.html, creates the upload manifest, and assembles all metadata files.
+
+### Step 4.1: Run Dataset Preparation
+
+Use `--config` to read `collectors_csv` directly from `config_test.json` — no need
+to supply the path twice:
+
+```bash
+python prepare_dataset.py \
+    ~/AZUS_Test_Workspace/Raw_Data/ESID_999 \
+    --config Resources/config_test.json \
+    --eclipse-type total \
+    --output-dir ~/AZUS_Test_Workspace/Staging_Area/ESID_999
+```
+
+You can also supply `--collector-csv` directly if you prefer (it overrides `--config`):
+```bash
+python prepare_dataset.py \
+    ~/AZUS_Test_Workspace/Raw_Data/ESID_999 \
+    --collector-csv ~/AZUS_Test_Workspace/Resources/test_collectors.csv \
+    --eclipse-type total \
+    --output-dir ~/AZUS_Test_Workspace/Staging_Area/ESID_999
+```
 
 **Expected output:**
 ```
 ======================================================================
 AZUS DATASET PREPARATION
 ======================================================================
-
 ESID:           999
 Source:         /Users/you/AZUS_Test_Workspace/Raw_Data/ESID_999
 Output:         /Users/you/AZUS_Test_Workspace/Staging_Area/ESID_999
 Collector CSV:  /Users/you/AZUS_Test_Workspace/Resources/test_collectors.csv
+  (path read from config.json)
 Eclipse type:   total
-
-📦 Creating ZIP file: ESID_999.zip
-   ✅ Added CONFIG.TXT
-   ... added 3 WAV files
-
-📄 Creating README.html
-   ✅ Created: README.html
-
-📄 Creating README.md
-   ✅ Created: README.md
-
-📋 Creating file_list.csv
-   ✅ Created: file_list.csv
-
+...
+DATASET PREPARATION COMPLETE
 ======================================================================
-✅ DATASET PREPARATION COMPLETE
-======================================================================
-
-📁 Output directory: /Users/you/AZUS_Test_Workspace/Staging_Area/ESID_999
-
-Files created:
-   ✅ ESID_999.zip                                          (  0.15 MB)
-   ✅ README.html                                           (  0.01 MB)
-   ✅ README.md                                             (  0.01 MB)
-   ✅ file_list.csv                                         (  0.00 MB)
-   ✅ total_eclipse_data.csv                                (  0.00 MB)
-   ✅ License.txt                                           (  0.00 MB)
-
-📦 Ready for upload to Zenodo!
-
-Next steps:
-  1. Verify files in: /Users/you/AZUS_Test_Workspace/Staging_Area/ESID_999
-  2. Update config.json to point to: /Users/you/AZUS_Test_Workspace/Staging_Area
-  3. Run: python standalone_upload.py
 ```
 
-### Step 3.2: Verify Prepared Dataset
+> If you see "Collector CSV has incorrect or missing column headers" — check
+> your CSV against the headers in Step 2.4 and see `Guides/CSV_FIX_GUIDE.md`.
+
+### Step 4.2: Verify Prepared Dataset
 
 ```bash
-# Check all files were created
 ls -lh ~/AZUS_Test_Workspace/Staging_Area/ESID_999/
+```
 
-# View README.html (optional)
-cat ~/AZUS_Test_Workspace/Staging_Area/ESID_999/README.html
-
-# Check file_list.csv
-cat ~/AZUS_Test_Workspace/Staging_Area/ESID_999/file_list.csv
+**You should see:**
+```
+ESID_999.zip
+ESID_999_to_upload.csv
+README.html
+README.md
+file_list.csv
+total_eclipse_data.csv
+total_eclipse_data_data_dict.csv
+CONFIG_data_dict.csv
+WAV_data_dict.csv
+file_list_data_dict.csv
+AudioMoth_Operation_Manual.pdf
+License.txt
 ```
 
 ---
 
-## Part 4: Configure Upload Settings
+## Part 5: Dry Run
 
-### Step 4.1: Create/Update config.json
-
-```bash
-cd /path/to/ESCSP-AZUS
-
-cat > config_test.json << EOF
-{
-  "uploads": {
-    "total": {
-      "dataset_dir": "$HOME/AZUS_Test_Workspace/Staging_Area",
-      "collectors_csv": "$HOME/AZUS_Test_Workspace/Resources/test_collectors.csv"
-    },
-    "related_identifiers_csv": "$HOME/AZUS_Test_Workspace/Resources/related_identifiers.csv",
-    "references_csv": "$HOME/AZUS_Test_Workspace/Resources/references.csv",
-    "successful_results_file": "$HOME/AZUS_Test_Workspace/Records/successful_results.csv",
-    "failure_results_file": "$HOME/AZUS_Test_Workspace/Records/failed_results.csv",
-    "delete_failures": false,
-    "auto_publish": false,
-    "reserve_doi": false
-  },
-  
-  "downloads": {
-    "results_dir": "$HOME/AZUS_Test_Workspace/Records/"
-  }
-}
-EOF
-```
-
-**Important settings:**
-- **dataset_dir:** Points to Staging_Area (parent of ESID folders)
-- **auto_publish:** `false` for testing (creates draft, doesn't publish)
-- **delete_failures:** `false` (keeps failed records for debugging)
-- **reserve_doi:** `false` for testing (no DOI assigned - safer for tests)
-
-### Step 4.2: Understanding the `reserve_doi` Setting
-
-⚠️ **IMPORTANT: DOI Reservation Control**
-
-The `reserve_doi` setting controls whether Zenodo assigns a permanent DOI (Digital Object Identifier) to your records.
-
-**`reserve_doi: false` (RECOMMENDED FOR TESTING)**
-- ✅ No DOI assigned to draft records
-- ✅ Safer for test uploads
-- ✅ Drafts can be deleted without wasting DOIs
-- ✅ No placeholder DOI shown in record
-- ⚠️ Record will NOT have a DOI until you manually reserve one in Zenodo UI
-
-**`reserve_doi: true` (FOR PRODUCTION USE)**
-- 🔗 Zenodo assigns a DOI immediately when draft is created
-- 📌 DOI is permanent and cannot be deleted (only new versions can be created)
-- ✅ DOI can be cited before publication
-- ⚠️ **Use only for records you intend to publish**
-
-**Example output during upload:**
-
-With `reserve_doi: false`:
-```
-🔗 DOI reservation: DISABLED (no DOI will be assigned)
-```
-
-With `reserve_doi: true`:
-```
-🔗 DOI reservation: ENABLED (Zenodo will assign a DOI)
-```
-
-**When to use each setting:**
-
-| Scenario | Setting | Reason |
-|----------|---------|--------|
-| Testing uploads | `false` | Can delete drafts freely |
-| Practice runs | `false` | Doesn't waste DOIs |
-| Real datasets (pre-publication) | `true` | Get DOI for citations |
-| Production uploads | `true` | Professional publishing |
-
----
-
-## Part 5: Upload to Zenodo (DRY RUN)
-
-### Step 5.1: Test Upload (No actual upload)
+The dry run validates your config and credentials without making any network calls
+to Zenodo.
 
 ```bash
-cd /path/to/ESCSP-AZUS
-
-# Make sure credentials are loaded
-source set_env.sh
-
-# Run dry-run
-python standalone_upload.py --config config_test.json --dry-run
-```
-
-**What to expect:**
-```
-📋 Loading configuration from: config_test.json
-✅ Zenodo credentials loaded from environment
-
-======================================================================
-AZUS STANDALONE UPLOAD
-======================================================================
-Configuration file: config_test.json
-Annular directory: Not configured
-Total directory: /Users/you/AZUS_Test_Workspace/Staging_Area
-Auto-publish: False
-Delete failures: False
-Reserve DOI: False
-======================================================================
-
-🔍 DRY RUN MODE - No uploads will be performed
-
-======================================================================
-VALIDATING CSV FILES
-======================================================================
-
-📋 Checking total CSV: test_collectors.csv
-   ✅ Valid - 1 records
-
-======================================================================
-PROCESSING TOTAL ECLIPSE DATA
-======================================================================
-
-📦 Found 1 dataset(s) to process
-
-Dataset 1/1: ESID_999
-  ZIP file:    ESID_999.zip (0.15 MB)
-  README:      README.html (0.01 MB)
-  Files:       file_list.csv, total_eclipse_data.csv, README.md
-  
-✅ DRY RUN COMPLETE - No files were uploaded
-```
-
-**Common errors at this stage:**
-- ❌ "README.html not found" → Run prepare_dataset.py again
-- ❌ "Credentials not found" → Run `source set_env.sh`
-- ❌ "ESID not in CSV" → Check test_collectors.csv has ESID 999
-
----
-
-## Part 6: Upload to Zenodo (REAL UPLOAD)
-
-### Step 6.1: Perform Actual Upload
-
-⚠️ **This will create a real record on Zenodo Sandbox**
-
-```bash
-cd /path/to/ESCSP-AZUS
-
-# Make sure credentials are loaded
-source set_env.sh
-
-# Run actual upload
-python standalone_upload.py --config config_test.json
+python standalone_tasks.py --config Resources/config_test.json --dry-run
 ```
 
 **Expected output:**
 ```
-📋 Loading configuration from: config_test.json
-✅ Zenodo credentials loaded from environment
-
 ======================================================================
 AZUS STANDALONE UPLOAD
 ======================================================================
+Project:             Eclipse Soundscapes
+Datasets configured: 1
+  • Test Total Eclipse → .../Staging_Area
+Auto-publish:        False
+Delete failures:     False
+Reserve DOI:         False
+======================================================================
+Dry run complete — configuration is valid
+```
+
+---
+
+## Part 6: Upload
+
+### Step 6.1: Run the Upload
+
+```bash
+source Resources/set_env.sh
+python standalone_tasks.py --config Resources/config_test.json
+```
+
+AZUS will automatically run a **Zenodo connection check** (verifying connectivity
+and write permissions) before proceeding. If this fails, a detailed error report
+is printed and the upload is aborted cleanly.
+
+After the connection check passes you will see a confirmation prompt:
+
+```
+⚠️  You are about to upload datasets to Zenodo.
+   This will create REAL records on Zenodo.
+
+Proceed? (yes/no):
+```
+
+Type `yes` to proceed.
+
+**Expected output:**
+```
+======================================================================
+ZENODO CONNECTION CHECK
+======================================================================
+  [PASS] Connectivity check (HTTP 200)
+  [PASS] Write permission check (HTTP 201)
+Connection check passed — proceeding to upload
+======================================================================
 ...
-
-======================================================================
-PROCESSING TOTAL ECLIPSE DATA
-======================================================================
-
-📦 Processing 1/1: ESID 999
-
-🚀 Starting upload for ESID 999
-   ZIP file: ESID_999.zip
-   Total files: 5
-
-✅ Using description from README.html: .../README.html
-✅ Loaded 2 related identifier(s) from related_identifiers.csv
-✅ Loaded 1 reference(s) from references.csv
-🔗 DOI reservation: DISABLED (no DOI will be assigned)
-
-📤 Uploading to Zenodo...
-   Creating draft record...
-   ✅ Draft created: https://sandbox.zenodo.org/records/1234567
-
-   Uploading files...
-   📤 Uploading ESID_999.zip (0.15 MB)...
-      ✅ Uploaded (0.15 MB)
-   📤 Uploading README.md (0.01 MB)...
-      ✅ Uploaded (0.01 MB)
-   📤 Uploading file_list.csv (0.00 MB)...
-      ✅ Uploaded (0.00 MB)
-   
-   ✅ All files uploaded successfully
-
-   Updating metadata...
-   ✅ Metadata updated
-
-✅ Upload successful for ESID 999
-
 ======================================================================
 UPLOAD SUMMARY
 ======================================================================
 Total processed: 1
-✅ Successful:   1
-❌ Failed:       0
-⏭️  Skipped:      0
+Successful:      1
+Failed:          0
+Skipped:         0
 ======================================================================
-
-✅ 1 upload(s) successful
-   Results saved to: .../successful_results.csv
 ```
 
-### Step 6.2: Verify Upload Results
+### Step 6.2: Verify Results
 
-**Check results CSV:**
 ```bash
 cat ~/AZUS_Test_Workspace/Records/successful_results.csv
-```
-
-**Output:**
-```
-esid,zenodo_id,zenodo_url,zip_file,uploaded_at
-999,1234567,https://sandbox.zenodo.org/records/1234567,ESID_999.zip,2026-02-22T21:00:00
 ```
 
 ---
 
 ## Part 7: Review on Zenodo
 
-### Step 7.1: View Draft Record
-
-1. **Copy the Zenodo URL** from the output (e.g., `https://sandbox.zenodo.org/records/1234567`)
-2. **Open in browser**
-3. **Log in to Zenodo Sandbox** (if not already logged in)
+1. Copy the Zenodo URL from the output (e.g., `https://sandbox.zenodo.org/records/1234567`)
+2. Open in browser and log in to Zenodo Sandbox
 
 **What you should see:**
-- ✅ Record is in DRAFT status (not published)
-- ✅ Title: "2024-04-08 Total Solar Eclipse ESID#999"
-- ✅ Description: HTML from README.html
-- ✅ Files: ESID_999.zip, README.md, file_list.csv, etc.
-- ✅ Metadata: Creators, funding, license, dates
-- ✅ Related works: Citations from CSV
-- ✅ References: Bibliography from CSV
+- Record is in **DRAFT** status (not published)
+- Title in correct format
+- Description: HTML content from README.html
+- Files: ESID_999.zip, README.md, file_list.csv, etc.
+- Metadata: Creators, funding, license, dates
+- Related works and references (if CSVs were provided)
 
-### Step 7.2: Check Draft Record Details
-
-**Click on the draft record to verify:**
-
-**Files Section:**
-- [ ] ESID_999.zip (contains all WAV files + CONFIG.TXT)
-- [ ] README.md
-- [ ] file_list.csv
-- [ ] total_eclipse_data.csv
-- [ ] All data dictionaries
-- [ ] License.txt
-
-**Metadata:**
-- [ ] Title: Correct format
-- [ ] Creators: ARISA Lab, etc.
+**Checklist:**
+- [ ] ESID_999.zip present
+- [ ] README.md present
+- [ ] file_list.csv present
+- [ ] total_eclipse_data.csv present
+- [ ] All data dictionaries present
+- [ ] License.txt present
+- [ ] Title correct
+- [ ] Creators correct
 - [ ] Funding: NASA Award No. 80NSSC21M0008
 - [ ] License: CC-BY-4.0
-- [ ] Keywords/Subjects: Listed correctly
-
-**Related Works:**
-- [ ] Citation to Eclipse Soundscapes paper (DOI)
-- [ ] Link to eclipsesoundscapes.org
-
-**References:**
-- [ ] Full bibliographic citations
+- [ ] Keywords/Subjects listed
 
 ---
 
 ## Part 8: Publish or Delete
 
-### Option A: Publish the Record (Makes it public)
+### Option A — Publish (makes the record public)
 
-⚠️ **Once published, records CANNOT be deleted, only new versions created**
+> ⚠️ Once published, records **cannot be deleted**, only versioned.
 
-**In Zenodo web interface:**
-1. Click "Publish" button
-2. Confirm publication
-3. Record gets a permanent DOI
-4. Record becomes publicly accessible
+Via web interface: click "Publish" and confirm.
 
-**Or via AZUS (if auto_publish was true):**
+Via AZUS (set `auto_publish: true` in config, then re-run):
 ```bash
-# Set auto_publish: true in config_test.json
-# Then run upload again
-python standalone_upload.py --config config_test.json
+python standalone_tasks.py --config Resources/config_test.json
 ```
 
-### Option B: Delete Draft Record (Recommended for tests)
+### Option B — Delete Draft (recommended for test uploads)
 
-**In Zenodo web interface:**
-1. Click "Delete" button
-2. Confirm deletion
-3. Draft is permanently removed
-
-**This is recommended for test uploads** - keeps your account clean.
+Via the Zenodo web interface: click "Delete" on the draft record. This keeps
+your account clean.
 
 ---
 
 ## Part 9: Troubleshooting
 
-### Common Issues
+### "Collector CSV has incorrect or missing column headers"
 
-#### Issue 1: "README.html not found"
+Your CSV uses old column names (e.g., `ESID#` instead of `ESID`, `Type of Eclipse`
+instead of `Local Eclipse Type`). The error output will show exactly which columns
+are missing and which were found. See `Guides/CSV_FIX_GUIDE.md` for the full mapping.
 
-**Error:**
+### "Configuration file not found"
+
 ```
-FileNotFoundError: README.html file not found at: .../README.html
-Please run prepare_dataset.py to generate README.html before uploading.
+ERROR - Configuration file not found: Resources/config_test.json
 ```
 
-**Solution:**
+Check the filename matches exactly — `config_test.json` vs `config.json`.
+
+### "Extra data" JSON parse error
+
+```
+json.decoder.JSONDecodeError: Extra data
+```
+
+Your config.json is missing the opening `{` or closing `}`. Validate with:
 ```bash
-# Run prepare_dataset.py again
-python prepare_dataset.py ~/AZUS_Test_Workspace/Raw_Data/ESID_999 \
-  --collector-csv ~/AZUS_Test_Workspace/Resources/test_collectors.csv \
-  --eclipse-type total \
-  --output-dir ~/AZUS_Test_Workspace/Staging_Area/ESID_999
+python3 -c "import json; json.load(open('Resources/config_test.json'))" && echo "Valid JSON"
 ```
 
-#### Issue 2: "Zenodo credentials not found"
+### "ZENODO CONNECTION CHECK FAILED"
 
-**Error:**
 ```
-❌ INVENIO_RDM_ACCESS_TOKEN not set
-   Please set INVENIO_RDM_ACCESS_TOKEN and INVENIO_RDM_BASE_URL
-   Run: source set_env.sh
+[FAIL] Connectivity check — 401 Unauthorized
 ```
 
-**Solution:**
-```bash
-# Load credentials
-source set_env.sh
+Token is invalid or not loaded. Run `source Resources/set_env.sh` and check
+the token in `Resources/set_env.sh` matches what was generated on Zenodo.
 
-# Verify
-echo $INVENIO_RDM_ACCESS_TOKEN
+### "No collector data found for ESID 999"
+
+```
+ERROR - No collector data found for ESID 999
 ```
 
-#### Issue 3: "ESID not found in CSV"
+The CSV loaded successfully (headers are correct) but row 999 is missing.
+Check: `grep "^999," ~/AZUS_Test_Workspace/Resources/test_collectors.csv`
 
-**Error:**
-```
-❌ ESID 999 not found in collector CSV
-```
+### "HTTP 500 from Zenodo"
 
-**Solution:**
-```bash
-# Check CSV has ESID 999
-grep "^999," ~/AZUS_Test_Workspace/Resources/test_collectors.csv
-
-# If not found, add it or fix the ESID
-```
-
-#### Issue 4: "Invalid CSV format"
-
-**Error:**
-```
-⚠️  CSV validation failed!
-Missing required column: ESID
-```
-
-**Solution:**
-```bash
-# Check CSV headers
-head -1 ~/AZUS_Test_Workspace/Resources/test_collectors.csv
-
-# Should be:
-# ESID,Latitude,Longitude,Local Eclipse Type,...
-
-# Fix headers to match expected format
-```
-
-#### Issue 5: "API authentication failed"
-
-**Error:**
-```
-❌ Zenodo API error: 401 Unauthorized
-```
-
-**Solutions:**
-1. Check token is correct in set_env.sh
-2. Token might be expired - generate new one
-3. Check INVENIO_RDM_BASE_URL is correct
-4. Verify token has deposit:write scope
+Zenodo server error — not a problem on your end. Check
+https://status.zenodo.org, then simply re-run. AZUS skips already-uploaded
+records, so only the failed one will be retried.
 
 ---
 
 ## Part 10: Cleanup
 
-### After Testing
-
 ```bash
 # Remove test workspace (optional)
 rm -rf ~/AZUS_Test_Workspace
-
-# Delete draft on Zenodo (via web interface)
-# or leave it as a test record
 
 # Deactivate virtual environment
 deactivate
 ```
 
----
-
-## Summary Checklist
-
-### ✅ Before Upload:
-- [ ] Python 3.9+ installed
-- [ ] AZUS code downloaded
-- [ ] Dependencies installed (`pip install -r requirements.txt`)
-- [ ] Zenodo account created
-- [ ] API token generated
-- [ ] Credentials configured in set_env.sh
-- [ ] Test data prepared (WAV files, CONFIG.TXT)
-- [ ] Collector CSV created
-- [ ] Citations CSV created (optional)
-
-### ✅ Dataset Preparation:
-- [ ] Ran prepare_dataset.py successfully
-- [ ] ESID_999 folder created in Staging_Area
-- [ ] All files present (ZIP, README.html, file_list.csv, etc.)
-- [ ] README.html looks correct
-
-### ✅ Upload:
-- [ ] config_test.json created and configured
-- [ ] Dry-run completed successfully
-- [ ] Actual upload completed
-- [ ] Draft record created on Zenodo
-- [ ] Files uploaded correctly
-- [ ] Metadata looks correct
-
-### ✅ Verification:
-- [ ] Viewed draft record on Zenodo
-- [ ] All files present
-- [ ] Description shows correctly
-- [ ] Citations appear
-- [ ] Metadata complete
-
-### ✅ Cleanup:
-- [ ] Deleted draft record (if test)
-- [ ] Or published record (if keeping)
-- [ ] Saved successful_results.csv for reference
+Delete any draft records from your Zenodo Sandbox account via the web interface.
 
 ---
 
-## Next Steps
-
-### For Production Use:
-
-1. **Switch to Production Zenodo:**
-   ```bash
-   # In set_env.sh
-   export INVENIO_RDM_BASE_URL="https://zenodo.org/api"
-   export INVENIO_RDM_ACCESS_TOKEN="your-production-token"
-   ```
-
-2. **Use Real ESIDs:**
-   - Replace test ESID 999 with actual ESIDs
-   - Use real collector data from Eclipse Soundscapes
-
-3. **Enable DOI Reservation (Recommended for Production):**
-   ```json
-   "reserve_doi": true
-   ```
-   ⚠️ This assigns permanent DOIs - only use for real datasets
-
-4. **Enable Auto-Publish (Optional):**
-   ```json
-   "auto_publish": true
-   ```
-
-5. **Batch Upload Multiple Datasets:**
-   - Prepare multiple ESID folders
-   - All will upload in sequence
-
----
-
-## Quick Reference Commands
+## Quick Reference
 
 ```bash
-# Setup
-source set_env.sh
-source azus-env/bin/activate
+# Load credentials
+source Resources/set_env.sh
 
-# Prepare dataset
-python prepare_dataset.py ESID_999_folder \
-  --collector-csv collectors.csv \
-  --eclipse-type total
+# Prepare dataset (reads collectors_csv from config.json)
+python prepare_dataset.py Raw_Data/ESID_999 \
+    --config Resources/config_test.json \
+    --eclipse-type total \
+    --output-dir Staging_Area/ESID_999
 
-# Dry run (test)
-python standalone_upload.py --config config.json --dry-run
+# Dry run
+python standalone_tasks.py --config Resources/config_test.json --dry-run
 
-# Real upload
-python standalone_upload.py --config config.json
+# Upload
+python standalone_tasks.py --config Resources/config_test.json
 
 # Check results
 cat Records/successful_results.csv
@@ -793,8 +520,28 @@ cat Records/failed_results.csv
 
 ---
 
-**Guide Version:** 1.0 (Feb 22, 2026)  
-**AZUS Version:** Standalone (post-Prefect)  
-**Tested On:** Python 3.9+, macOS/Linux
+## Production Checklist
 
-**Questions?** Check the troubleshooting section or review the code documentation.
+Before switching from Sandbox to production Zenodo:
+
+1. **Switch credentials in `Resources/set_env.sh`:**
+   ```bash
+   export INVENIO_RDM_BASE_URL="https://zenodo.org/api"
+   export INVENIO_RDM_ACCESS_TOKEN="your-production-token"
+   ```
+
+2. **Enable DOI reservation (recommended for production):**
+   ```json
+   "reserve_doi": true
+   ```
+   > ⚠️ Reserved DOIs are permanent — only enable for real datasets you intend to publish.
+
+3. **Use real ESIDs and real collector data.**
+
+4. **Consider `auto_publish: true`** only after thorough review of draft records.
+
+---
+
+**Guide Version:** 3.0 (Feb 25, 2026)
+**AZUS Version:** Standalone (post-Prefect refactor)
+**Tested On:** Python 3.9+, macOS/Linux

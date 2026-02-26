@@ -1,0 +1,45 @@
+{
+    "_comment": "AZUS Configuration File — Copy to Resources/config.json and fill in your paths",
+
+    "project_config": "Resources/project_config.json",
+    "readme_template": "Resources/README_template.html",
+
+    "uploads": {
+        "datasets": [
+            {
+                "_comment": "Add one entry per dataset category. Use multiple entries for mixed batches.",
+                "name": "My Dataset Category",
+                "dataset_dir": "/path/to/Staging_Area",
+                "collectors_csv": "/path/to/collectors_spreadsheet.csv",
+                "dataset_category": "Total"
+            }
+        ],
+
+        "_comment_citations": [
+            "Global citation files — applied to every record in the batch.",
+            "To override for a specific record, place related_identifiers.csv",
+            "and/or references.csv directly inside that ESID_XXX/ staging directory.",
+            "AZUS checks the ESID directory first, then falls back to these paths.",
+            "Leave empty string to skip citations entirely."
+        ],
+        "related_identifiers_csv": "Resources/related_identifiers.csv",
+        "references_csv": "Resources/references.csv",
+
+        "successful_results_file": "Records/successful_results.csv",
+        "failure_results_file": "Records/failed_results.csv",
+        "delete_failures": false,
+        "auto_publish": false,
+
+        "_comment_reserve_doi": [
+            "reserve_doi: Reserve a DataCite DOI at draft creation time.",
+            "The DOI is assigned immediately but stays pending until the record is published.",
+            "Only meaningful for production Zenodo — Sandbox DOIs are not registered",
+            "with DataCite. Set to false (default) for test uploads."
+        ],
+        "reserve_doi": false
+    },
+
+    "downloads": {
+        "results_dir": "Records/"
+    }
+}

@@ -1,3 +1,0 @@
-prefect>=3.0.0
-prefect-invenio-rdm>=0.0.6
-html-to-markdown>=1.8.0

@@ -1,0 +1,46 @@
+<!--
+  AZUS README Template
+  ====================
+  Copy this file to Resources/README_template.html and customize for your project.
+
+  This HTML file is used in two ways:
+    1. Its content becomes the Zenodo record "description" field.
+    2. It is saved as README.html alongside each dataset.
+
+  Available template variables (Python string.Template $variable syntax):
+    $esid              - Dataset identifier (e.g., "005")
+    $date              - Formatted eclipse/event date (e.g., "April 08, 2024")
+    $year              - Four-digit year (e.g., "2024")
+    $eclipse_label     - Label from the eclipse_label() method (e.g., "Total Solar Eclipse")
+    $latitude          - Site latitude in decimal degrees
+    $longitude         - Site longitude in decimal degrees
+    $coverage          - Eclipse coverage percentage
+    $time_date_mode    - WAV file timestamp mode (e.g., "AudioMoth Time Chime")
+    $first_contact     - Eclipse start time UTC
+    $second_contact    - Totality start time UTC (may be "N/A")
+    $maximum_time      - Eclipse maximum time UTC
+    $third_contact     - Totality end time UTC (may be "N/A")
+    $fourth_contact    - Eclipse end time UTC (may be "N/A")
+    $start_time_notes  - Data collector start time notes
+
+  You may add, remove, or rename variables to match your CSV column data.
+  Variables that are not found in the collector data will be left as-is.
+-->
+
+<p>This dataset was collected at site $esid on $date.</p>
+
+<h2>Site Information</h2>
+<ul>
+  <li><strong>Site ID:</strong> $esid</li>
+  <li><strong>Latitude:</strong> $latitude</li>
+  <li><strong>Longitude:</strong> $longitude</li>
+</ul>
+
+<h2>Data Description</h2>
+<p>Describe the data collected at this site. Edit this template to match your project.</p>
+
+<h2>Project Information</h2>
+<p>Describe your citizen science project here. Include funding acknowledgments, project website, and contact information.</p>
+
+<h2>Citation</h2>
+<p>Provide a citation template for datasets uploaded using this template.</p>

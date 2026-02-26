@@ -1,0 +1,82 @@
+{
+    "_comment": "AZUS Project Identity Configuration Template",
+    "_doc": "Copy this file to Resources/project_config.json and fill in your project-specific values. AZUS reads this file to populate Zenodo record metadata. All fields are required unless marked optional.",
+
+    "project_name": "",
+
+    "title_template": "$eclipse_date $eclipse_label ESID#$esid",
+    "_title_template_doc": "Python string.Template format. Available variables depend on your CSV columns. Use $esid for the dataset ID. Customize to match your naming convention.",
+
+    "creators": [
+        {
+            "_doc": "Each creator must have: type (personal|organizational), role (see Zenodo roles). Personal creators need given_name + family_name. Organizational creators need name.",
+            "type": "organizational",
+            "name": "",
+            "role": "hostinginstitution",
+            "affiliations": []
+        },
+        {
+            "type": "personal",
+            "given_name": "",
+            "family_name": "",
+            "orcid": "",
+            "role": "datamanager",
+            "affiliations": []
+        }
+    ],
+
+    "contributors": [
+        {
+            "_doc": "Optional. Same structure as creators. Common roles: projectmember, researcher, datacollector, supervisor.",
+            "type": "personal",
+            "given_name": "",
+            "family_name": "",
+            "orcid": "",
+            "role": "projectmember",
+            "affiliations": []
+        }
+    ],
+
+    "funding": [
+        {
+            "_doc": "Optional. funder_id is the ROR ID of the funding agency. award_number is the grant number.",
+            "funder_id": "",
+            "award_title": "",
+            "award_number": "",
+            "award_url": ""
+        }
+    ],
+
+    "community_id": "",
+    "_community_id_doc": "Optional. The Zenodo community ID to submit records to. Leave empty to skip community submission.",
+
+    "custom_fields": {},
+    "_custom_fields_doc": "Optional. Zenodo custom metadata fields. Format varies by field type. See Zenodo documentation.",
+
+    "license": "cc-by-4.0",
+    "_license_doc": "SPDX license identifier. Common: cc-by-4.0, cc-by-sa-4.0, cc0-1.0, mit",
+
+    "publisher": "Zenodo",
+    "languages": ["eng"],
+    "_languages_doc": "ISO 639-3 language codes. Common: eng, spa, fra, deu, zho",
+
+    "resource_type": "dataset",
+    "_resource_type_doc": "Zenodo resource type ID. Common: dataset, software, publication-article, image-photo",
+
+    "volunteer_creator_label": "Volunteer Scientist",
+    "_volunteer_creator_label_doc": "Label for the volunteer/citizen scientist added as a creator per dataset. Set to empty string to disable.",
+
+    "volunteer_creator_role": "datacollector",
+
+    "csv_required_headers": [],
+    "_csv_required_headers_doc": "List of column headers that MUST be present in every collectors CSV. Used for validation.",
+
+    "csv_conditional_headers": {},
+    "_csv_conditional_headers_doc": "Headers required only for specific dataset categories. Key = category name (from 'Local Eclipse Type' column), Value = list of additional required headers.",
+
+    "default_required_files": [],
+    "_default_required_files_doc": "List of filenames expected alongside each dataset ZIP. Used for file discovery when no upload manifest (ESID_XXX_to_upload.csv) is present.",
+
+    "minimum_recording_year": 2000,
+    "_minimum_recording_year_doc": "Minimum year for valid recordings. Files with dates before this year are skipped when extracting recording dates from ZIP archives."
+}

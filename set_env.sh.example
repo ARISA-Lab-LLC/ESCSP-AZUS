@@ -1,3 +1,0 @@
-#!/bin/bash
-export INVENIO_RDM_ACCESS_TOKEN=" "
-export INVENIO_RDM_BASE_URL=" "

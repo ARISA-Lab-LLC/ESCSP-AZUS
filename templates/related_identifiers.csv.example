@@ -1,0 +1,6 @@
+identifier,scheme,relation_type,resource_type
+10.1038/s41597-024-03940-2,doi,cites,publication-article
+https://example.org/project-homepage,url,isSupplementTo,
+10.5281/zenodo.1234567,doi,references,dataset
+2401.12345,arxiv,cites,publication-preprint
+https://github.com/your-org/your-repo,url,references,software
