@@ -338,10 +338,10 @@ def parse_collectors_csv(
 #      invenio_rdm_records/fixtures/data/vocabularies/resource_types.yaml
 _RESOURCE_TYPE_MAP: Dict[str, str] = {
     # Audio / Video
-    "video/audio":              "audiovisual",
-    "audiovisual":              "audiovisual",
-    "audio":                    "audiovisual",
-    "video":                    "audiovisual",
+    "video/audio":              "video",
+    "audiovisual":              "video",
+    "audio":                    "audio",
+    "video":                    "video",
     # Publications
     "publication-article":      "publication-article",
     "journal article":          "publication-article",
@@ -1084,15 +1084,28 @@ def save_result_csv(file: str, result: PersistedResult) -> None:
 class UploadTracker:
     """Track which files have already been uploaded to avoid duplicates.
 
-    Persists the list of uploaded file paths to a simple text file.
+    Persists the list of uploaded file paths to a plain-text file
+    (``uploaded_files.txt``) inside the Records directory, alongside
+    ``successful_results.csv`` and ``failed_results.csv``.  One absolute
+    ZIP file path per line — easy to inspect and edit in any text editor.
+
+    To force a re-upload of a specific record, open ``uploaded_files.txt``
+    in the Records directory, delete the line containing that record's ZIP
+    path, and re-run the uploader.
 
     Attributes:
         tracker_file: Path to the tracker persistence file.
         uploaded_files: Set of previously uploaded file paths.
     """
 
-    def __init__(self, tracker_file: str = ".uploaded_files.txt"):
+    #: Default filename — no leading dot, visible in any file browser.
+    DEFAULT_FILENAME = "uploaded_files.txt"
+
+    def __init__(self, tracker_file: str = DEFAULT_FILENAME):
         self.tracker_file = Path(tracker_file)
+        # Ensure the parent directory exists (Records/ may not exist yet
+        # on a fresh install).
+        self.tracker_file.parent.mkdir(parents=True, exist_ok=True)
         self.uploaded_files = self._load()
 
     def _load(self) -> set:
@@ -1498,8 +1511,17 @@ def upload_datasets(
     if not datasets:
         raise ValueError("No datasets configured for upload")
 
-    tracker = UploadTracker()
-    logger.info("Upload tracker: %d file(s) previously uploaded", tracker.get_count())
+    # Derive the Records directory from the results file path so the tracker
+    # sits alongside the other output CSVs (successful_results.csv, etc.).
+    # This keeps all upload bookkeeping in one visible, well-known location
+    # instead of a hidden dotfile scattered wherever the script was run from.
+    records_dir = Path(successful_results_file).parent
+    tracker_path = str(records_dir / UploadTracker.DEFAULT_FILENAME)
+    tracker = UploadTracker(tracker_file=tracker_path)
+    logger.info(
+        "Upload tracker: %s — %d file(s) previously uploaded",
+        tracker_path, tracker.get_count(),
+    )
 
     stats = {"total_processed": 0, "successful": 0, "failed": 0, "skipped": 0}
 

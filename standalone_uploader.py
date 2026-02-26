@@ -216,6 +216,94 @@ def delete_draft(credentials: Credentials, record_id: str) -> None:
     response.raise_for_status()
 
 
+def _create_community_review_request(
+    credentials: Credentials,
+    record_id: str,
+    community_id: str,
+) -> Dict[str, Any]:
+    """Create a community review request on a draft record.
+
+    InvenioRDM requires an explicit review request object to be created
+    before ``submit-review`` can be called.  Including
+    ``parent.communities.ids`` in the draft creation POST only *associates*
+    the community — it does NOT create the review request object.
+
+    This is step 2 of the 3-step community submission flow:
+        1. Create draft with ``parent.communities.ids``
+        2. **POST /draft/review** ← this function
+        3. POST /draft/actions/submit-review
+
+    Args:
+        credentials: Zenodo credentials.
+        record_id: Draft record ID.
+        community_id: Zenodo community UUID or slug.
+
+    Returns:
+        API response from the review creation endpoint.
+
+    Raises:
+        HTTPError: If the review request creation fails.
+    """
+    url = f"{credentials.base_url}records/{record_id}/draft/review"
+    payload = {
+        "receiver": {"community": community_id},
+        "type": "community-submission",
+    }
+    response = requests.put(
+        url,
+        json=payload,
+        headers=_auth_headers(credentials, content_type="application/json"),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def submit_to_community_review(
+    credentials: Credentials,
+    record_id: str,
+    community_id: str,
+) -> Dict[str, Any]:
+    """Create and submit a draft record to the community review queue.
+
+    InvenioRDM community submission requires two steps after all files
+    are uploaded:
+
+    1. **Create review request** — ``PUT /draft/review`` with the community
+       ID establishes the review object that links this draft to the
+       community's queue.
+    2. **Submit review** — ``POST /draft/actions/submit-review`` moves the
+       draft into the queue so a community manager can accept or decline it.
+
+    This function performs both steps in sequence.  It is only called when
+    ``community_id`` is set in ``project_config.json``; non-community
+    uploads skip it entirely.
+
+    Args:
+        credentials: Zenodo credentials.
+        record_id: Draft record ID (returned by ``create_draft_record``).
+        community_id: Zenodo community UUID or slug from project config.
+
+    Returns:
+        API response dictionary from the final submit-review step.
+
+    Raises:
+        HTTPError: If either API step fails.
+    """
+    # Step 1: Create the review request object linking draft → community
+    logger.info("  Creating community review request...")
+    _create_community_review_request(credentials, record_id, community_id)
+
+    # Step 2: Submit the draft into the community review queue
+    logger.info("  Submitting to community review queue...")
+    url = f"{credentials.base_url}records/{record_id}/draft/actions/submit-review"
+    response = requests.post(
+        url,
+        headers=_auth_headers(credentials, content_type="application/json"),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 # ===================================================================
 #  High-level upload orchestration
 # ===================================================================
@@ -345,6 +433,22 @@ def upload_to_zenodo(
 
         logger.info("All files uploaded successfully")
 
+        # --- Submit to community review queue (if a community is configured) ---
+        # Including parent.communities.ids at draft creation only *associates*
+        # the community; this second call moves the draft into the community's
+        # review queue so a manager can accept it.  Skipped when community_id
+        # is blank, so non-community uploads are completely unaffected.
+        review_response = None
+        if config.community_id:
+            logger.info("Submitting draft to community review queue...")
+            review_response = submit_to_community_review(
+                credentials, record_id, config.community_id
+            )
+            logger.info(
+                "  Submitted to community review — status: %s",
+                review_response.get("status", "unknown"),
+            )
+
         # --- Publish if requested ---
         if auto_publish:
             logger.info("Publishing record...")
@@ -359,7 +463,9 @@ def upload_to_zenodo(
         logger.info("Record created as draft (not published)")
         return {
             "successful": True,
-            "api_response": draft_response,
+            # Return the review response when available — it contains richer
+            # community state info than the original draft creation response.
+            "api_response": review_response if review_response else draft_response,
             "error": None,
         }
 

@@ -190,7 +190,7 @@ If upload fails:
 **Standalone:**
 ```bash
 # If interrupted (Ctrl+C, crash, etc.):
-# 1. .uploaded_files.txt tracks completed uploads
+# 1. Records/uploaded_files.txt tracks completed uploads
 # 2. Simply run again:
 python standalone_upload.py
 
@@ -213,10 +213,10 @@ python standalone_upload.py
 **Standalone:**
 ```bash
 # View uploaded files
-cat .uploaded_files.txt
+cat Records/uploaded_files.txt
 
 # Count uploads
-wc -l .uploaded_files.txt
+wc -l Records/uploaded_files.txt
 
 # Check results
 cat successful_results.csv

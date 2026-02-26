@@ -110,7 +110,7 @@ The standalone version uses the same `config.json` format as the Prefect version
 
 The standalone version automatically tracks uploaded files to prevent duplicates:
 
-- **Tracker File:** `.uploaded_files.txt` (created automatically)
+- **Tracker File:** `Records/uploaded_files.txt` (created automatically)
 - **Location:** Current directory
 - **Format:** One file path per line
 
@@ -290,14 +290,14 @@ Before uploading all datasets, test with a single one:
 tail -f azus_upload.log
 
 # Check uploaded files
-wc -l .uploaded_files.txt
+wc -l Records/uploaded_files.txt
 ```
 
 ### Resume After Interruption
 
 If the upload is interrupted:
 
-1. Already uploaded files are tracked in `.uploaded_files.txt`
+1. Already uploaded files are tracked in `Records/uploaded_files.txt`
 2. Simply run `python standalone_upload.py` again
 3. Previously uploaded files will be skipped automatically
 
@@ -344,7 +344,7 @@ If uploading very large files (>1GB):
 To migrate from Prefect-based uploads to standalone:
 
 1. **No data migration needed** - Configuration stays the same
-2. **Upload tracking:** Prefect blocks → `.uploaded_files.txt`
+2. **Upload tracking:** Prefect blocks → `Records/uploaded_files.txt`
 3. **Logs:** Prefect logs → `azus_upload.log`
 4. **Monitoring:** Web dashboard → Console output
 
@@ -356,7 +356,7 @@ You can run both in parallel - they track uploads independently.
 
 ```python
 # Edit standalone_upload.py
-tracker = UploadTracker(tracker_file="/custom/path/.uploaded_files.txt")
+tracker = UploadTracker(tracker_file="Records/uploaded_files.txt")
 ```
 
 ### Modify Logging

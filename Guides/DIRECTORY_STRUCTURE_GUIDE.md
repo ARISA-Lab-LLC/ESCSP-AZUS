@@ -268,7 +268,7 @@ printed and the upload is aborted cleanly.
 6. Draft record created on Zenodo with full metadata
 7. Files uploaded one by one
 8. Results saved to `Records/successful_results.csv` or `failed_results.csv`
-9. Uploaded ZIPs tracked in `.uploaded_files.txt` to prevent re-uploads on re-runs
+9. Uploaded ZIPs tracked in `Records/uploaded_files.txt` to prevent re-uploads on re-runs
 
 ---
 
@@ -285,7 +285,7 @@ standalone_tasks.py scans dataset_dir
     │       └── if no manifest: falls back to default_required_files
     │               from Resources/project_config.json
     │
-    └── skips any ESID whose ZIP is already in .uploaded_files.txt
+    └── skips any ESID whose ZIP is already in Records/uploaded_files.txt
 ```
 
 ---
@@ -403,7 +403,7 @@ python prepare_dataset.py Raw_Data/ESID#005 --collector-csv Resources/collectors
 python standalone_tasks.py --config Resources/config.json
 ```
 
-Already-uploaded ZIPs are tracked in `.uploaded_files.txt` and skipped on re-runs.
+Already-uploaded ZIPs are tracked in `Records/uploaded_files.txt` and skipped on re-runs.
 
 ---
 
