@@ -1,0 +1,34 @@
+# AZUS Resource Files List
+# ============================================================
+# This file controls which companion files are:
+#   1. Copied from Resources/ into each dataset staging folder
+#   2. Listed in file_list.csv (with SHA-512 hash and size)
+#   3. Added to the ZIP archive under the ESID_XXX/ subfolder
+#   4. Uploaded separately to Zenodo
+#
+# HOW TO ADD A NEW COMPANION FILE:
+#   1. Place the file in your Resources/ folder
+#   2. Add one row below with its name, type, description, and
+#      associated data dictionary (use N/A if none)
+#   3. Run prepare_dataset.py as normal — no code changes needed
+#
+# COLUMNS:
+#   File Name                 — exact filename (must match file in Resources/)
+#   File Type                 — human-readable format label
+#   Description               — one sentence describing the file's purpose
+#   Associated Data Dictionary — filename of companion data dict, or N/A
+#
+# DO NOT INCLUDE in this list:
+#   - README.md               (auto-generated from README_template.html)
+#   - total_eclipse_data.csv  (auto-generated from collector CSV)
+#   - file_list.csv           (auto-generated — the file list itself)
+#   - CONFIG.TXT              (comes from AudioMoth device, not Resources/)
+#   - *.WAV files             (come from AudioMoth device, not Resources/)
+#   - related_identifiers.csv (managed separately — see CITATIONS_USER_GUIDE.md)
+#   - references.csv          (managed separately — see CITATIONS_USER_GUIDE.md)
+#
+# ============================================================
+File Name,File Type,Description,Associated Data Dictionary
+your_data_dict.csv,Comma Separated Variable (.CSV),Data dictionary for your primary data file.,N/A
+License.txt,Plain Text (.txt),Creative Commons Attribution 4.0 International (CC BY 4.0) license text.,N/A
+YourDevice_Operation_Manual.pdf,Portable Document Format (.PDF),Device operation manual.,N/A

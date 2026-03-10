@@ -1,9 +1,19 @@
 # AZUS Test Upload Guide
 
-**Version:** 3.0 (Feb 25, 2026)
+**Version:** 4.0 (Feb 28, 2026)
 **Purpose:** Upload a test dataset to Zenodo using AZUS
 **Time Required:** 30–60 minutes
 **Skill Level:** Intermediate (command line experience helpful)
+
+**AZUS Design Goal:** Make uploading structured datasets to Zenodo as easy as
+possible for non-programmer scientists and citizen science project coordinators.
+Adding new companion files or adapting AZUS for a new project requires editing
+only human-readable CSV and JSON files — never Python code.
+
+**What changed in v4.0:**
+- `resource_files_list.csv` replaces the hardcoded file list in Python code
+- New setup step (Step 1.4) to configure companion files
+- Guide updated to reflect CSV-driven resource file workflow
 
 **What changed in v3.0:**
 - Entry point corrected: `standalone_tasks.py` (not `standalone_upload.py`)
@@ -82,6 +92,28 @@ echo $INVENIO_RDM_BASE_URL
 community ID, etc.). For the Eclipse Soundscapes project this file is already populated.
 For a new project, copy `templates/project_config.json.example` and fill it in before
 continuing.
+
+### Step 1.4: Confirm resource_files_list.csv
+
+`Resources/resource_files_list.csv` controls which companion files (data dictionaries,
+license, device manuals, etc.) are copied into every dataset, added to the ZIP archive,
+and uploaded to Zenodo. For the Eclipse Soundscapes project this file is already populated.
+
+For a new project, copy the template and edit it:
+
+```bash
+cp templates/resource_files_list.csv.example Resources/resource_files_list.csv
+# Edit Resources/resource_files_list.csv — add one row per companion file
+```
+
+**To add a new companion file to every dataset (no Python changes needed):**
+1. Place the file in `Resources/`
+2. Add one row to `Resources/resource_files_list.csv`
+3. Run `prepare_dataset.py` as normal
+
+> ⚠️ Do **not** add auto-generated files here (README.md, total_eclipse_data.csv,
+> file_list.csv) or raw data files (WAVs, CONFIG.TXT). See the example template
+> for the full exclusion list.
 
 ---
 
@@ -292,6 +324,7 @@ README.html
 README.md
 file_list.csv
 total_eclipse_data.csv
+related_identifiers.csv
 total_eclipse_data_data_dict.csv
 CONFIG_data_dict.csv
 WAV_data_dict.csv
@@ -299,6 +332,9 @@ file_list_data_dict.csv
 AudioMoth_Operation_Manual.pdf
 License.txt
 ```
+
+> The companion files (data dicts, License.txt, manual) are controlled by
+> `Resources/resource_files_list.csv`. Add rows there to include additional files.
 
 ---
 
@@ -542,6 +578,6 @@ Before switching from Sandbox to production Zenodo:
 
 ---
 
-**Guide Version:** 3.0 (Feb 25, 2026)
-**AZUS Version:** Standalone (post-Prefect refactor)
+**Guide Version:** 4.0 (Feb 28, 2026)
+**AZUS Version:** Standalone (post-Prefect refactor) + CSV-driven resource files
 **Tested On:** Python 3.9+, macOS/Linux

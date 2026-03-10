@@ -1,0 +1,123 @@
+{
+  "_comment": "AZUS Project Identity \u2014 Eclipse Soundscapes (ARISA Lab, LLC)",
+  "_doc": "This file contains ALL project-specific metadata for Zenodo uploads. Edit this file to customize AZUS for your citizen science project. See templates/project_config.json.example for field documentation.",
+  "project_name": "Eclipse Soundscapes",
+  "title_template": "$eclipse_date $eclipse_label ES ID # $esid",
+  "creators": [
+    {
+      "type": "personal",
+      "given_name": "Henry",
+      "family_name": "Winter",
+      "orcid": "0000-0002-6678-590X",
+      "role": "datamanager",
+      "affiliations": [
+        "ARISA Lab, L.L.C."
+      ]
+    },
+    {
+      "type": "personal",
+      "given_name": "MaryKay",
+      "family_name": "Severino",
+      "orcid": "0000-0002-2363-7421",
+      "role": "projectleader",
+      "affiliations": [
+        "ARISA Lab, L.L.C."
+      ]
+    }
+  ],
+  "contributors": [
+    {
+      "type": "personal",
+      "given_name": "Joel",
+      "family_name": "Goncalves",
+      "orcid": "0009-0009-0945-3544",
+      "role": "projectmember",
+      "affiliations": [
+        "ARISA Lab, L.L.C."
+      ]
+    },
+    {
+      "type": "personal",
+      "given_name": "Brent",
+      "family_name": "Pease",
+      "orcid": "0000-0003-1528-6075",
+      "role": "researcher",
+      "affiliations": [
+        "Oklahoma State University (OSU), Stillwater, United States"
+      ]
+    },
+    {
+      "type": "personal",
+      "given_name": "Neil",
+      "family_name": "Gilbert",
+      "orcid": "0000-0003-0949-5612",
+      "role": "researcher",
+      "affiliations": [
+        "Oklahoma State University (OSU), Stillwater, United States"
+      ]
+    }
+  ],
+  "funding": [
+    {
+      "funder_id": "027ka1x80",
+      "award_title": "Eclipse Soundscapes: Citizen Science Project",
+      "award_number": "80NSSC21M0008",
+      "award_url": "https://science.nasa.gov/sciact-team/eclipse-soundscapes/"
+    }
+  ],
+  "community_id": "2ca990ba-e151-4741-a456-6b80da71c69d",
+  "custom_fields": {
+    "code:codeRepository": "https://github.com/ARISA-Lab-LLC/ESCSP",
+    "code:developmentStatus": {
+      "id": "wip"
+    },
+    "code:programmingLanguage": [
+      {
+        "id": "python"
+      }
+    ]
+  },
+  "license": "cc-by-4.0",
+  "publisher": "Zenodo",
+  "languages": [
+    "eng"
+  ],
+  "resource_type": "dataset",
+  "volunteer_creator_label": "Volunteer Scientist",
+  "volunteer_creator_role": "datacollector",
+  "csv_required_headers": [
+    "ESID",
+    "Data Collector Affiliations",
+    "Latitude",
+    "Longitude",
+    "Local Eclipse Type",
+    "Eclipse Percent (%)",
+    "WAV Files Time & Date Settings",
+    "Eclipse Date",
+    "Eclipse Start Time (UTC) (1st Contact)",
+    "Eclipse Maximum (UTC)",
+    "Eclipse End Time (UTC) (4th Contact)",
+    "Version",
+    "Keywords and subjects"
+  ],
+  "csv_conditional_headers": {
+    "Total": [
+      "Totality Start Time (UTC) (2nd Contact)",
+      "Totality End Time (UTC) (3rd Contact)"
+    ]
+  },
+  "default_required_files": [
+    "README.html",
+    "README.md",
+    "2024_total_eclipse_data_data_dict.csv",
+    "AudioMoth_Operation_Manual.pdf",
+    "CONFIG.TXT",
+    "CONFIG_data_dict.csv",
+    "License.txt",
+    "WAV_data_dict.csv",
+    "file_list.csv",
+    "file_list_data_dict.csv",
+    "total_eclipse_data.csv"
+  ],
+  "minimum_recording_year": 2023
+}

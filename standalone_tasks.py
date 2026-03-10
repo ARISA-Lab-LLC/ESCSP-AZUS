@@ -10,6 +10,8 @@ is hardcoded in this file.
 
 Usage:
     python standalone_tasks.py [--config Resources/config.json] [--dry-run]
+    python standalone_tasks.py --config Resources/config.json --esid 004
+    python standalone_tasks.py --config Resources/config.json --esid 004 007 012
 
 Design notes for future Prefect integration:
     Every public function in this module is a plain synchronous function.
@@ -1401,8 +1403,14 @@ def get_upload_data(
     failure_results_file: str,
     tracker: UploadTracker,
     project_config: Optional[Dict[str, Any]] = None,
+    esid_filter: Optional[List[str]] = None,
 ) -> List[UploadData]:
-    """Discover and prepare all datasets in a directory for upload.
+    """Discover and prepare datasets in a directory for upload.
+
+    When ``esid_filter`` is provided, only ESIDs in that list are processed;
+    all others are silently skipped.  ESID numbers are compared as
+    zero-padded three-digit strings so ``'4'``, ``'04'``, and ``'004'`` all
+    match a folder named ``ESID_004``.
 
     Args:
         data_dir: Directory containing ESID subdirectories with ZIP files.
@@ -1411,6 +1419,9 @@ def get_upload_data(
         failure_results_file: CSV path for logging failures.
         tracker: UploadTracker to skip already-uploaded files.
         project_config: Parsed project_config.json.
+        esid_filter: Optional list of ESID number strings to upload.
+            If ``None`` or empty, all discovered ESIDs are processed.
+            Example: ``['004', '007', '012']``.
 
     Returns:
         List of UploadData objects ready for upload.
@@ -1419,6 +1430,16 @@ def get_upload_data(
         raise ValueError("Missing data directory")
     if not data_collectors_file:
         raise ValueError("Missing data collectors file")
+
+    # Normalize filter values to zero-padded 3-digit strings so that
+    # '4', '04', and '004' all resolve to '004' for comparison.
+    normalized_filter: Optional[set] = None
+    if esid_filter:
+        normalized_filter = {str(e).strip().zfill(3) for e in esid_filter}
+        logger.info(
+            "ESID filter active — restricting upload to: %s",
+            ", ".join(sorted(normalized_filter)),
+        )
 
     logger.info("Loading data collectors from: %s", data_collectors_file)
     data_collectors = parse_collectors_csv(
@@ -1437,10 +1458,22 @@ def get_upload_data(
         if subdir.is_dir() and (
             subdir.name.startswith("ESID_") or subdir.name.startswith("ESID#")
         ):
+            # Apply ESID filter before adding to the work list.
+            # Extract the numeric portion of the folder name and compare
+            # against the normalized filter set.
+            if normalized_filter is not None:
+                folder_esid = subdir.name.replace("ESID_", "").replace("ESID#", "")
+                folder_esid_normalized = folder_esid.strip().zfill(3)
+                if folder_esid_normalized not in normalized_filter:
+                    logger.debug(
+                        "  Skipping %s (not in --esid filter)", subdir.name
+                    )
+                    continue
+
             for zip_file in subdir.glob("ESID_*.zip"):
                 dir_files.append(str(zip_file))
 
-    logger.info("Found %d ZIP files in ESID subdirectories", len(dir_files))
+    logger.info("Found %d ZIP file(s) matching criteria", len(dir_files))
 
     # Skip already-uploaded files
     original_count = len(dir_files)
@@ -1485,8 +1518,9 @@ def upload_datasets(
     delete_failures: bool = False,
     reserve_doi: bool = False,
     project_config: Optional[Dict[str, Any]] = None,
+    esid_filter: Optional[List[str]] = None,
 ) -> Dict[str, int]:
-    """Upload all configured datasets to Zenodo.
+    """Upload configured datasets to Zenodo.
 
     Iterates over the ``datasets`` list from config.json.  Each entry
     specifies a directory, collectors CSV, and dataset category.  This
@@ -1503,6 +1537,9 @@ def upload_datasets(
         delete_failures: Delete draft records on failure.
         reserve_doi: Reserve a DataCite DOI at draft creation time.
         project_config: Parsed project_config.json.
+        esid_filter: Optional list of ESID number strings to upload.
+            If ``None`` or empty, all discovered ESIDs are processed.
+            Passed through to :func:`get_upload_data`.
 
     Returns:
         Dictionary with upload statistics:
@@ -1552,6 +1589,7 @@ def upload_datasets(
             failure_results_file=failure_results_file,
             tracker=tracker,
             project_config=project_config,
+            esid_filter=esid_filter,
         )
 
         for i, data in enumerate(category_upload_data, 1):
@@ -1616,6 +1654,14 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Validate configuration without uploading",
     )
+    parser.add_argument(
+        "--esid", nargs="+", metavar="ESID",
+        help=(
+            "Upload only the specified ESID(s). Accepts one or more values. "
+            "Leading zeros are optional: '4', '04', and '004' all match ESID_004. "
+            "Example: --esid 004  or  --esid 004 007 012"
+        ),
+    )
     args = parser.parse_args()
 
     # --- Configure logging ---
@@ -1673,6 +1719,10 @@ def main() -> None:
     logger.info("Auto-publish: %s", uploads_config.get("auto_publish", False))
     logger.info("Delete failures: %s", uploads_config.get("delete_failures", False))
     logger.info("Reserve DOI: %s", uploads_config.get("reserve_doi", False))
+    if args.esid:
+        logger.info("ESID filter:  %s (all others will be skipped)", ", ".join(args.esid))
+    else:
+        logger.info("ESID filter:  none (all discovered ESIDs will be uploaded)")
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -1724,6 +1774,7 @@ def main() -> None:
             delete_failures=uploads_config.get("delete_failures", False),
             reserve_doi=uploads_config.get("reserve_doi", False),
             project_config=project_config,
+            esid_filter=args.esid,
         )
 
         # --- Display summary ---

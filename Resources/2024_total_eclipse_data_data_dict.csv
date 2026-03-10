@@ -1,0 +1,22 @@
+Variable Name,Description,Data Type,Units,Size KB,Source,Code Meaning,Notes 1,Notes 2,Notes 3,Notes 4
+ESID,Eclipse Soundscapes (ES) assigned a 3-digit identification number that served as a privacy-protecting intermediary that links an AudioMoth device serial number to a data collection location.  ,Integer,,,Eclipse Soundscapes Data Collector Report,,,,,
+Data Collector Affiliations,"If applicable, the group affiliation of the data collector. ",String,,,,,,,,
+Latitude ,Latitude of the AudioMoth device during data collection.,Float,Decimal Degrees,Latitude of the AudioMoth device during the observations.,Eclipse Soundscapes Data Collector Report,,,,,
+Longitude,Longitude of the AudioMoth device during data collection.  ,Float,Decimal Degrees,,Eclipse Soundscapes Data Collector Report,,,,,
+Local Eclipse Type,"Description of the type of solar eclipse experienced at the location of data recording (partial eclipse, total eclipse, or annular eclipse) at the location of data collection. ",String,,,Eclipse Soundscapes' Eclipse Phase Timing Tool ,"Total = Local area experienced a total eclipse, Partial = Local area experienced a partial eclipse.",,,,
+Eclipse Percent (%),Percentage of the Sun that is blocked by the Moon at the maximum part of the eclipse at the location of data collection.,Float,,,Eclipse Soundscapes' Eclipse Phase Timing Tool ,,,,,
+WAV Files Time & Date Settings,Variable describing if the data was automatically set by the time chime system or if it needs to be manually set.,String,,,,,,,,
+Data Collector Start Time Notes,"If the AudioMoth's clock was not set correctly using the time chime, notes from the Data Collector are provided to allow the start time to be manually set.",String,"Time (local), Hours:Minutes:Seconds (12 hour time), TimeZone",,,N/A = Not Applicable (AudioMoth time set by Time Chime),"Unlike other time variables, this one does not use the 24 hour time format ",,,
+Eclipse Date,Date that the eclipse occurred.,String,Date,,,,,,,
+Eclipse Start Time (UTC) (1st Contact),The moment when the moon first begins to block the Sun at the location of data collection.,String,"Time (UTC), Hours:Minutes:Seconds",,Eclipse Soundscapes' Eclipse Phase Timing Tool ,UTC: Coordinated Universal Time,,,,
+Totality Start Time (UTC) (2nd Contact),"During a total solar eclipse, it is the moment when the moon completely blocks the Sun and totality begins at the location of data collection.",String,"Time (UTC), Hours:Minutes:Seconds",,Eclipse Soundscapes' Eclipse Phase Timing Tool ,UTC: Coordinated Universal Time,,,,
+Eclipse Maximum (UTC),The time at which the most possible amount of the Sun is blocked by the Moon at the location of the data collection.,String,"Time (UTC), Hours:Minutes:Seconds",,Eclipse Soundscapes' Eclipse Phase Timing Tool ,UTC: Coordinated Universal Time,,,,
+Totality End Time (UTC) (3rd Contact),"During a total solar eclipse, it is the moment when the moon no longer completely blocks the Sun and totality ends at the location of data collection.",String,"Time (UTC), Hours:Minutes:Seconds",,Eclipse Soundscapes' Eclipse Phase Timing Tool ,UTC: Coordinated Universal Time,,,,
+Eclipse End Time (UTC) (4th Contact),The moment when the moon no longer blocks any part of the Sun at the location of data collection.,String,"Time (UTC), Hours:Minutes:Seconds",,Eclipse Soundscapes' Eclipse Phase Timing Tool ,UTC: Coordinated Universal Time,,,,
+Version,Version code that defines in which year the eclipse was observed and what local eclipse type at the location of data collection,String,,,Eclipse Soundscapes Data Entry,"{1st digit = year, 2nd digit = Eclipse type (1=Total Solar Eclipse, 9=Annular Solar Eclipse, 0=Partial Solar Eclipse), 3rd digit is unused and in place for future use}
+2023.9.0 = Week of October 14, 2023 Annular Eclipse Audio Data, Path of Annularity (Annular Eclipse)
+2023.0.0 = Week of October 14, 2023 Annular Eclipse Audio Data, OFF the Path of Annularity (Partial Eclipse)
+2024.1.0 = Week of April 8, 2024 Total Solar Eclipse Audio Data, Path of Totality (Total Solar Eclipse)
+2024.0.0 =  Week of April 8, 2024 Total Solar Eclipse Audio Data, OFF the Path of Totality (Partial Solar Eclipse)",,,,
+Keywords and subjects,"Denotes the year of the data collection, if the site was used a data analysis site by the ES team, and the Data Collector affiliation if known. These keywords can be used as a sorting function in the Eclipse Soundscapes Comunity Records page under the term subjects in Zenodo.",String,,,,,,,,
+year,Year of the eclipse,String,time: year,,,,,,,

@@ -1,86 +1,61 @@
- Python artifacts
+# AZUS — Automated Zenodo Upload System
+# .gitignore
+
+# =============================================================
+# SECURITY — NEVER COMMIT THESE
+# =============================================================
+# API credentials and local paths
+Resources/set_env.sh
+Resources/config.json
+
+# =============================================================
+# GENERATED OUTPUT — do not commit
+# =============================================================
+# Prepared dataset staging directories
+Staging_Area/
+Raw_Data/
+
+# Upload result logs (auto-generated; track separately if needed)
+Records/successful_results.csv
+Records/failed_results.csv
+Records/uploaded_files.txt
+
+# =============================================================
+# PYTHON
+# =============================================================
 __pycache__/
 *.py[cod]
 *$py.class
-*.egg-info/
+*.pyo
+.Python
 *.egg
-build/
+*.egg-info/
 dist/
-sdist/
+build/
+.eggs/
 
-# Test artifacts
-.benchmarks/
-.coverage
-.coverage.*.*
-.prefect-results
-.pytest_cache/
-
-# Type checking artifacts
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.pyre/
-
-# IPython
-profile_default/
-ipython_config.py
-*.ipynb_checkpoints/*
-
-# Profiling
-/prof
-
-# Environments
-.python-version
-.env
-.venv
-env/
+# Virtual environments
 venv/
+env/
+azus-env/
 prefect-env/
+.venv/
 
-# Documentation artifacts
-# gschema.json
-site/
-.cache/
-src/mkdocs-material
+# =============================================================
+# LOGS
+# =============================================================
+*.log
+azus_upload.log
 
-# UI artifacts
-src/prefect/server/ui/*
-src/prefect/server/ui_build/*
-**/node_modules
-
-# Databases
-*.db
-
-# API artifacts
-
-
-# MacOS
+# =============================================================
+# OS / EDITOR
+# =============================================================
 .DS_Store
-
-# Dask
-dask-worker-space/
-
-# Editors
+.DS_Store?
+._*
+Thumbs.db
 .idea/
 .vscode/
-!ui/.vscode/
-
-# Prefect files
-prefect.toml
-prefect.yaml
-
-# Deployment recipes
-!src/prefect/deployments/recipes/*/**
-
-# For development doc server if link
-libcairo.2.dylib
-
-# setuptools-scm generated files
-src/integrations/*/**/_version.py
-*.log
-
-# sh scripts
-*.sh
-
-#JSON files
-*.json
+*.swp
+*.swo
+*~

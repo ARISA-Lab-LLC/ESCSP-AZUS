@@ -1,7 +1,18 @@
 # AZUS Directory Structure Guide
 
-**Version:** 2.0 (Feb 25, 2026)  
-**Reflects:** Post-Prefect standalone refactor
+**Version:** 2.1 (Feb 28, 2026)
+**Reflects:** Post-Prefect standalone refactor + CSV-driven resource files
+
+---
+
+## Design Goal
+
+**Make uploading structured datasets to Zenodo as easy as possible for
+non-programmer scientists and citizen science project coordinators.**
+
+Adding new companion files, changing citations, or adapting AZUS for a new
+project should require editing only human-readable CSV and JSON files — never
+Python code.
 
 ---
 
@@ -31,6 +42,7 @@ azus/
 │   ├── project_config.json              ← Project identity (creators, funding, etc.)
 │   ├── config.json                      ← Upload configuration (YOU CREATE THIS)
 │   ├── set_env.sh                       ← API credentials (YOU CREATE THIS)
+│   ├── resource_files_list.csv          ← ★ Companion files list (add files here)
 │   ├── README_template.html             ← Template for Zenodo record descriptions
 │   ├── related_identifiers.csv          ← Global citations/related works (optional)
 │   ├── references.csv                   ← Global bibliography (optional)
@@ -53,6 +65,7 @@ azus/
 │   ├── config.json.example
 │   ├── project_config.json.example
 │   ├── README_template.html.example
+│   ├── resource_files_list.csv.example  ← ★ Template for companion files list
 │   ├── related_identifiers.csv.example
 │   ├── references.csv.example
 │   └── set_env.sh.example
@@ -67,6 +80,32 @@ azus/
 > ⚠️ **`Resources/config.json` and `Resources/set_env.sh` are NOT included in the
 > repository** — they contain personal paths and API credentials. Create them from
 > the `.example` templates in `templates/`.
+
+---
+
+## Adding a New Companion File
+
+To include a new file (documentation, data dictionary, device manual, etc.)
+in every dataset upload — **no Python code changes required:**
+
+1. **Place the file** in `Resources/`
+2. **Add one row** to `Resources/resource_files_list.csv`:
+
+   ```csv
+   My_New_Manual.pdf,Portable Document Format (.PDF),Description of the file.,N/A
+   ```
+
+3. **Run `prepare_dataset.py`** as normal
+
+The file will automatically be:
+- Copied into each dataset's staging directory
+- Listed in `file_list.csv` with its SHA-512 hash
+- Added to the `ESID_XXX/` subfolder inside the ZIP archive
+- Uploaded as a standalone file to Zenodo
+
+See `templates/resource_files_list.csv.example` for the full column reference
+and a list of files that should **not** be added here (auto-generated files,
+WAVs, CONFIG.TXT, etc.).
 
 ---
 
@@ -114,13 +153,29 @@ Staging_Area/
 
 ### ZIP archive contents
 
+All files are stored inside an `ESID_XXX/` subfolder within the archive, so
+extracting the ZIP produces a single self-contained directory:
+
 ```
-ESID_004.zip contains:
-├── 20240408_120000.WAV
-├── 20240408_120500.WAV
-├── ... (all WAV files)
-└── CONFIG.TXT
+ESID_004.zip
+└── ESID_004/
+    ├── 20240408_120000.WAV      ← audio recordings
+    ├── 20240408_120500.WAV
+    ├── ... (all WAV files)
+    ├── CONFIG.TXT               ← AudioMoth device config
+    ├── README.md                ← dataset documentation
+    ├── file_list.csv            ← internal version (no ZIP row)
+    ├── total_eclipse_data.csv   ← site metadata
+    ├── total_eclipse_data_data_dict.csv
+    ├── CONFIG_data_dict.csv
+    ├── WAV_data_dict.csv
+    ├── file_list_data_dict.csv
+    ├── AudioMoth_Operation_Manual.pdf
+    └── License.txt
 ```
+
+> Additional companion files in `resource_files_list.csv` are automatically
+> included here — no code changes required.
 
 ### Upload manifest format
 
@@ -185,19 +240,24 @@ python prepare_dataset.py Raw_Data/ESID#004 \
 ```
 Staging_Area/
 └── ESID_004/
-    ├── ESID_004.zip                     ← Created (WAV files + CONFIG.TXT)
+    ├── ESID_004.zip                     ← Created (WAV files + CONFIG.TXT + all companion files)
     ├── ESID_004_to_upload.csv           ← Created (upload manifest)
     ├── README.html                      ← Generated from README_template.html
     ├── README.md                        ← Generated from README.html
-    ├── file_list.csv                    ← Generated (SHA-512 hashes of all files)
+    ├── file_list.csv                    ← Generated (SHA-512 hashes — includes ZIP row)
     ├── total_eclipse_data.csv           ← Generated (single-row metadata)
-    ├── total_eclipse_data_data_dict.csv ← Copied from Resources/
-    ├── CONFIG_data_dict.csv             ← Copied from Resources/
-    ├── WAV_data_dict.csv                ← Copied from Resources/
-    ├── file_list_data_dict.csv          ← Copied from Resources/
-    ├── AudioMoth_Operation_Manual.pdf   ← Copied from Resources/
-    └── License.txt                      ← Copied from Resources/
+    ├── related_identifiers.csv          ← Copied from Resources/ (keyword-selected)
+    ├── total_eclipse_data_data_dict.csv ← Copied from Resources/ (via resource_files_list.csv)
+    ├── CONFIG_data_dict.csv             ← Copied from Resources/ (via resource_files_list.csv)
+    ├── WAV_data_dict.csv                ← Copied from Resources/ (via resource_files_list.csv)
+    ├── file_list_data_dict.csv          ← Copied from Resources/ (via resource_files_list.csv)
+    ├── AudioMoth_Operation_Manual.pdf   ← Copied from Resources/ (via resource_files_list.csv)
+    └── License.txt                      ← Copied from Resources/ (via resource_files_list.csv)
 ```
+
+> Files marked "via resource_files_list.csv" are controlled by
+> `Resources/resource_files_list.csv`. Add or remove rows there to change
+> which companion files appear in every dataset.
 
 > There is no separate `create_upload_package.py` step. `prepare_dataset.py`
 > handles everything including ZIP creation and manifest generation.
@@ -300,10 +360,14 @@ standalone_tasks.py scans dataset_dir
 "references_csv": "Resources/references.csv"
 ```
 
-> 🔜 **Coming soon:** Per-record citation override. Place
-> `related_identifiers.csv` and/or `references.csv` directly inside an
-> `ESID_XXX/` staging directory to override the global files for that record.
-> If no per-record file is found, AZUS falls back to the global config paths.
+> **Per-record citation override:** Place `related_identifiers.csv` and/or
+> `references.csv` directly inside an `ESID_XXX/` staging directory to
+> override the global files for that record. If no per-record file is found,
+> AZUS falls back to the global config paths.
+>
+> `prepare_dataset.py` automatically selects the correct
+> `related_identifiers.csv` based on the `Keywords and subjects` field for
+> each site — see `Guides/CITATIONS_USER_GUIDE.md` for details.
 
 ---
 

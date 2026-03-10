@@ -1,0 +1,8 @@
+Variable Name,Description,Data Type,Units,Size KB,Source,Code Meaning,Notes 1,Notes 2,Notes 3,Notes 4
+File Name,Name of the file.,String,,,Manual Entry,,,,,
+File Type,Format of the file.,String,,,Manual Entry,,,,,
+Description,Short description of the file.,String,,,Manual Entry,,,,,
+File size (KB),Size of the file.,Float,kilobytes,,Calculated by the Python 3 routine os.path.getsize,,,,,
+Associated Data Dictionary,File name of the data dictionary that describes the variables contained within the file.,String,,,Manual Entry,NA- Not Available or Not Applicable,,,,
+SHA-512 Hash,"A cryptographic 512-bit hash value. This value provides a unique ""fingerprint"" of the file, regardless of the size that can be used to determine data integrity.",Hexadecimal String,,,Calculated by the compute_sha_512_hash.py function using the SHA-512 algorithm.,NA- Not Available or Not Applicable,,,,
+Notes,Any notes that might be relavant to a user about the file.,String,,,Manual Entry,,,,,

@@ -1,0 +1,10 @@
+File Name,File Type,Description,Associated Data Dictionary
+2024_total_eclipse_data_data_dict.csv,Comma Separated Variable (.CSV),Data dictionary for the total_eclipse_data.csv file.,N/A
+file_list_data_dict.csv,Comma Separated Variable (.CSV),Data dictionary for the file_list.csv file.,N/A
+CONFIG_data_dict.csv,Comma Separated Variable (.CSV),Data dictionary for the CONFIG.TXT file.,N/A
+WAV_data_dict.csv,Comma Separated Variable (.CSV),Data dictionary for WAV audio files.,N/A
+License.txt,Plain Text (.txt),Creative Commons Attribution 4.0 International (CC BY 4.0) license text.,N/A
+AudioMoth_Operation_Manual.pdf,Portable Document Format (.PDF),Device operation manual.,N/A
+Eclipse_Soundscapes_Data_Collector_Role_Training_and_Implementation_Manual_2023–2024.pdf,Portable Document Format (.PDF),Data Collector role training manual,N/A
+Eclipse_Soundscapes_Data_Management_Data_Processing.pdf,Portable Document Format (.PDF),Data processing description,N/A
+Eclipse_Soundscapes_Data_Management_Public_Data_Sharing.pdf,Portable Document Format (.PDF),Data sharing overview,N/A

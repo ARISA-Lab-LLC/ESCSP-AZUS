@@ -1,0 +1,10 @@
+Variable Name,Description,Data Type,Units,Size KB,Source,Code Meaning,Notes 1,Notes 2,Notes 3,Notes 4
+Channels,Number of recording channels,Integer,Number,,AudioMoth Settings,"1=Mono, 2=Stereo",For Eclipse Soundscapes data recorded via an AudioMoth this setting should be 1.,,,
+Sample Width,Bit depth of recording,Integer,Bits,,AudioMoth Settings,,Number of bits used to measure the vertical component of an audio signal. This number defines how finely the amplitude of sound is measured.,,,
+Frame Rate ,Sampling rate,Integer,Hertz,,AudioMoth Settings,,,,,
+Frame Count,Number of samples per duration,Integer,Number,,AudioMoth Settings,,,,,
+Compression Type,Type of compression ,String,,,AudioMoth Recorder Output,NONE = No compression.,,,,
+Compression Named,Name of compression algorithm,String,,,AudioMoth Recorder Output,not compressed = No compression,,,,
+Duration,Length of time of recording,Float,seconds,,AudioMoth Recorder Output,,,,,
+comment,"For an audiomoth recorded file, the comment string contains the date and time of the recording start, the serial number of the AudioMoth device's serial # (not the same as the ES ID #), the gain level, battery voltage, and temperature.",String,,,AudioMoth Recorder Output,,The AudioMoth's serial number is designated at the factory and is not the same as the ES ID # that the Eclipse Soundscapes team assigned to the device,,,
+artist,"For an audiomoth recorded file, the artist string contains the AudioMoth device's serial #",String,,,AudioMoth Recorder Output,,The AudioMoth's serial number is designated at the factory and is not the same as the ES ID # that the Eclipse Soundscapes team assigned to the device,,,
