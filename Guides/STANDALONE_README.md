@@ -34,10 +34,10 @@ echo $INVENIO_RDM_BASE_URL
 
 ```bash
 # Dry run to test configuration
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 
 # Actual upload
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ## Features
@@ -45,6 +45,9 @@ python standalone_upload.py
 ✅ **No Prefect Server Required** - Runs directly from command line  
 ✅ **Progress Tracking** - Real-time upload progress with file counts and sizes  
 ✅ **Duplicate Prevention** - Automatically tracks uploaded files  
+✅ **Auto-Retry on Transport Failure** - Each file PUT is retried up to 3 times with exponential backoff (30s/90s/270s) on SSL/connection drops and HTTP 5xx — survives transient network blips that previously killed multi-hour uploads  
+✅ **Resumable Drafts** - If a run fails mid-upload, re-running the script picks up where it left off: skips already-committed files on the same Zenodo draft and only uploads what's missing (state tracked in `upload_state.json` inside the ESID staging folder)  
+✅ **Concurrent ESID Uploads** - `--workers N` uploads N ESID datasets at the same time (default: 1, sequential). Files within a single dataset still upload one at a time; only the outer ESID loop is parallelized. See the "Concurrent uploads" section below for guidance.  
 ✅ **Error Handling** - Comprehensive error reporting and recovery  
 ✅ **Logging** - All output logged to `azus_upload.log`  
 ✅ **Interactive Confirmation** - Requires confirmation before uploading  
@@ -52,17 +55,35 @@ python standalone_upload.py
 
 ## Files
 
-### New Standalone Files
+### Standalone Code Files (project root)
 
-1. **standalone_upload.py** - Main entry point
-2. **standalone_tasks.py** - Task functions without Prefect decorators
-3. **standalone_uploader.py** - Direct Zenodo API communication
+1. **standalone_tasks.py** — main entry point. Loads config, discovers ESIDs,
+   orchestrates uploads (sequential or concurrent via `--workers`), and
+   handles all post-upload bookkeeping (tracker, result CSVs, folder move
+   to `Uploaded_Data/`). CLI: `--config`, `--esid`, `--workers`, `--dry-run`.
+2. **standalone_uploader.py** — direct Zenodo / InvenioRDM API client.
+   `upload_to_zenodo()` handles draft create-or-resume, per-file PUT with
+   retry, pending-slot cleanup on exhausted retries, community submit,
+   publish, and graceful degradation when the `/draft` endpoint is broken.
+
+### Helper Tools (in `Resources/`)
+
+These are convenience wrappers around the main code path:
+
+- **Resources/prepare_dataset.py** — prepare ONE raw ESID folder into a
+  Zenodo-ready staging package (generates README, ZIP, manifests, metadata).
+- **Resources/prep_all_datasets.py** — batch-prepare every ESID under a
+  top-level raw-data folder, in numerical order, skipping any ESID
+  already prepared (folder exists in `Staging_Area/` or `Uploaded_Data/`).
+- **Resources/finish_stuck_uploads.py** — scan `Staging_Area/` for ESIDs
+  with `upload_state.json` (interrupted uploads) and finish them via
+  `standalone_tasks.py --esid <discovered list> --workers N`.
 
 ### Existing Files (Reused)
 
-- **models/audiomoth.py** - Data models (no changes needed)
-- **models/invenio.py** - Zenodo metadata models (no changes needed)
-- **config.json** - Configuration file (same format)
+- **models/audiomoth.py** — data models (no changes needed)
+- **models/invenio.py** — Zenodo metadata models (no changes needed)
+- **Resources/config.json** — configuration file (same format)
 
 ## Usage
 
@@ -70,17 +91,17 @@ python standalone_upload.py
 
 ```bash
 # Upload all datasets configured in config.json
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ### Advanced Usage
 
 ```bash
 # Use a different config file
-python standalone_upload.py --config /path/to/custom_config.json
+python standalone_tasks.py --config /path/to/custom_config.json
 
 # Dry run (test without uploading)
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 ```
 
 ## Configuration
@@ -189,8 +210,8 @@ Same format as Prefect version:
 | Progress monitoring | ✅ Console | ✅ Dashboard |
 | Logging | ✅ File + console | ✅ Prefect logs |
 | Configuration | ✅ config.json | ✅ config.json |
-| Pause/resume | ❌ No | ✅ Yes |
-| Parallel uploads | ❌ Sequential | ✅ Possible |
+| Pause/resume | ✅ Yes (per-draft, via `upload_state.json`) | ✅ Yes |
+| Parallel uploads | ✅ Yes (`--workers N`) | ✅ Possible |
 | Setup complexity | ✅ Simple | ⚠️ Complex |
 
 ## Error Handling
@@ -226,7 +247,7 @@ pwd
 ls -la config.json
 
 # Or specify path explicitly
-python standalone_upload.py --config /full/path/to/config.json
+python standalone_tasks.py --config /full/path/to/config.json
 ```
 
 **3. Network/API errors**
@@ -295,11 +316,176 @@ wc -l Records/uploaded_files.txt
 
 ### Resume After Interruption
 
-If the upload is interrupted:
+AZUS resumes at two levels:
 
-1. Already uploaded files are tracked in `Records/uploaded_files.txt`
-2. Simply run `python standalone_upload.py` again
-3. Previously uploaded files will be skipped automatically
+**1. Dataset-level (already-completed records):**
+- Successfully completed datasets are tracked in `Records/uploaded_files.txt`.
+- Re-running the script skips any dataset already in that ledger.
+
+**2. Within-dataset (partially uploaded drafts):**
+- When a draft is created, AZUS writes `upload_state.json` into that ESID's
+  staging folder containing the Zenodo `record_id`.
+- If the script later dies mid-upload (e.g., the ZIP fails on its third retry),
+  the state file stays put.
+- On the next run, AZUS reads the state file, fetches the existing draft on
+  Zenodo, **skips files that are already committed**, deletes any "pending"
+  file slots, re-uploads only the missing pieces, and (if configured) submits
+  to community / publishes.
+- If you want to abandon a partial draft and start fresh, just delete
+  `upload_state.json` from that ESID's staging folder — the next run will
+  create a new draft.
+- If the saved draft is no longer on Zenodo (e.g., you deleted it from the
+  web UI), AZUS logs a warning and falls back to creating a fresh draft
+  automatically.
+
+**What you'll see in the log on resume:**
+```
+Resume requested for draft 20814816
+  Resuming draft 20814816 (status=draft state=unsubmitted is_published=False has_review=False)
+  Draft has 16 existing file entries:
+    - README.html (status=completed, size=12345, checksum=md5:...)
+    - ESID_014.zip (status=pending, size=None, checksum=None)
+    ...
+  Already uploaded, skipping: README.html (status=completed)
+  Clearing existing slot for re-upload: ESID_014.zip (status=pending, size=None)
+Uploading 1 file(s) (15 already committed)...
+```
+
+### Concurrent uploads (`--workers`)
+
+By default, AZUS uploads one ESID dataset at a time. The `--workers N` flag
+lets you upload **N datasets concurrently**, which can dramatically reduce
+total wall-clock time when you have many ESIDs to ship.
+
+```bash
+# Sequential (default — one dataset at a time)
+python standalone_tasks.py --config Resources/config.json
+
+# Upload 3 ESID datasets concurrently
+python standalone_tasks.py --config Resources/config.json --workers 3
+
+# Combine with --esid to upload just a specific set, concurrently
+python standalone_tasks.py --config Resources/config.json --esid 012 014 073 --workers 3
+```
+
+**What it does and doesn't parallelize:**
+
+| Layer | Sequential by default? | Parallel with `--workers N`? |
+|-------|---|---|
+| ESID datasets (outer loop) | ✅ Yes | ✅ N at a time |
+| Files within one dataset | ✅ Yes | ❌ Still sequential within one dataset |
+| Retries on a single file | ✅ Yes | ❌ Still sequential per file |
+
+Each worker takes one whole ESID dataset (all its files end-to-end — README,
+CSVs, data dicts, the ZIP, plus the community submit / publish step) and
+finishes it before picking up the next ESID.
+
+**How many workers should I use?**
+
+- **`1` (default):** Safest, most predictable. The original behavior. Use this
+  unless you have a clear reason to go higher.
+- **`2`–`4`:** Useful when you have many ESIDs to upload and you have plenty
+  of upstream bandwidth. Three concurrent 5 MB/s uploads still total 15 MB/s
+  — fine for most office/lab connections.
+- **`>4`:** Likely diminishing returns. Your upstream bandwidth becomes the
+  bottleneck; each worker just gets a smaller slice. Higher worker counts
+  also increase the chance of bumping into Zenodo's API rate limits.
+
+**Reading the log with concurrent uploads:**
+
+When `--workers > 1` is in effect, log lines from different ESIDs interleave
+in `azus_upload.log`. Every key per-ESID line is tagged with `[ESID XXX]` so
+you can follow one dataset:
+
+```
+2026-06-24 09:00:00 ... [ESID 012] Starting (dataset 1 of 3)
+2026-06-24 09:00:00 ... [ESID 014] Starting (dataset 2 of 3)
+2026-06-24 09:00:00 ... [ESID 073] Starting (dataset 3 of 3)
+2026-06-24 09:00:01 ... Creating draft record...               # ← from one of them
+2026-06-24 09:00:01 ... Creating draft record...               # ← from another
+...
+2026-06-24 11:25:30 ... [ESID 014] DONE (success)
+2026-06-24 11:42:11 ... [ESID 012] DONE (success)
+2026-06-24 12:01:55 ... [ESID 073] DONE (success)
+```
+
+To follow ESID 012's progress only:
+```bash
+grep '\[ESID 012\]' azus_upload.log
+```
+
+**Reliability notes (read these):**
+
+- One failed ESID never poisons the pool. If `ESID_014` fails, `ESID_012` and
+  `ESID_073` keep running. The failure is recorded in `failed_results.csv`
+  exactly as in sequential mode, with `upload_state.json` left in place so
+  you can re-run that ESID later.
+- The retry and resume features apply to **each worker independently**. If
+  `ESID_073`'s ZIP PUT hits an SSL drop, that worker retries 3× with
+  30s/90s/270s backoff while the others continue uninterrupted.
+- The shared files (`Records/uploaded_files.txt`, the result CSVs) are
+  written under thread locks, so concurrent workers cannot corrupt them.
+- The "Proceed? (yes/no)" confirmation runs **once before any workers
+  start** — exactly as in sequential mode.
+
+### Automatic retry on transient failures
+
+Two retry policies are in effect — both 3 attempts with backoff, tuned to the
+type of call they protect.
+
+**File-PUT retry (long-running multi-GB uploads):**
+- 3 attempts, **30s / 90s / 270s** backoff.
+- Catches `SSLError`, `SSLEOFError`, `ConnectionError`, `Timeout`,
+  `ChunkedEncodingError`, and HTTP **5xx**.
+- HTTP **4xx** fails immediately.
+
+Example log:
+```
+PUT failed for ESID_014.zip (attempt 1/3): SSLEOFError: EOF occurred in
+violation of protocol. Retrying in 30s...
+```
+
+**Metadata-GET retry (sub-second resume/status calls):**
+- 3 attempts, **5s / 15s / 45s** backoff (shorter — these are quick calls).
+- Wraps `GET /draft` (`get_draft_record`) and `GET /draft/files`
+  (`list_draft_files`).
+- Same retry triggers as PUT: transport errors + HTTP 5xx, with 4xx
+  failing fast.  404 on `/draft` still returns cleanly (signals
+  "draft truly gone" so the script can create a fresh one).
+
+**Pending-slot cleanup on PUT exhaustion:**
+If all 3 PUT attempts fail, the script issues a `DELETE` against the
+half-uploaded file slot before bailing out.  This leaves the Zenodo
+draft in a clean state (committed files + no broken slots), so:
+
+- The `GET /draft` endpoint keeps working for that draft (a pending
+  slot has been observed to make Zenodo's full-record serializer
+  return HTTP 500 deterministically).
+- The next resume run re-initializes the file from scratch instead
+  of inheriting a partial slot.
+
+Example log:
+```
+PUT failed for ESID_014.zip after 3 attempts. Last error: SSLEOFError: ...
+Cleaning up pending file slot for ESID_014.zip after exhausted retries...
+Pending slot cleaned: ESID_014.zip. The draft remains in clean draft
+state; upload_state.json still points to it and a re-run will re-initialize
+this file fresh.
+```
+
+**Graceful degradation when `/draft` is broken:**
+If `GET /draft` keeps returning 5xx even after retries (for example, a
+draft inherited from an older buggy version of AZUS that left a pending
+slot in place), the resume path now degrades gracefully: it logs a
+warning, skips the metadata fetch, and proceeds with the resume using
+only `/draft/files` (which uses a different code path on Zenodo's side
+and is usually still healthy).  Already-submitted-to-community and
+already-published guards default to "not yet" in this mode — correct
+for stuck uploads, where neither step has been reached.
+
+After all retries fail, `upload_state.json` remains in the staging
+folder; re-run the script (or `finish_stuck_uploads.py`) to pick up
+exactly where you left off.
 
 ### Clean Up Failed Uploads
 
@@ -314,12 +500,16 @@ To manually clean up:
 
 ### Upload Stuck
 
-If an upload appears stuck:
+If an upload appears stuck on a single file PUT:
 
-1. Check your internet connection
-2. Press Ctrl+C to cancel
-3. Check Zenodo status: https://status.zenodo.org
-4. Re-run the upload (already uploaded files will be skipped)
+1. Wait — AZUS now auto-retries up to 3 times (30s/90s/270s backoff) before
+   reporting failure. The first dropped connection is not the end.
+2. If genuinely stuck (no log activity for many minutes longer than the file
+   should take), check your internet connection.
+3. Press Ctrl+C to cancel.
+4. Check Zenodo status: https://status.zenodo.org
+5. Re-run the upload — `upload_state.json` will resume the draft from
+   where it stopped; only files not yet committed will be re-uploaded.
 
 ### Permission Errors
 
@@ -355,14 +545,14 @@ You can run both in parallel - they track uploads independently.
 ### Custom Upload Tracker Location
 
 ```python
-# Edit standalone_upload.py
+# Edit standalone_tasks.py
 tracker = UploadTracker(tracker_file="Records/uploaded_files.txt")
 ```
 
 ### Modify Logging
 
 ```python
-# Edit standalone_upload.py, logging configuration section
+# Edit standalone_tasks.py, logging configuration section
 logging.basicConfig(
     level=logging.DEBUG,  # More verbose
     # ... other settings
@@ -374,7 +564,7 @@ logging.basicConfig(
 By default, uploads all datasets in sequence. To limit:
 
 ```python
-# Edit upload_datasets() in standalone_upload.py
+# Edit upload_datasets() in standalone_tasks.py
 # Add limit to for loop:
 for i, data in enumerate(annular_upload_data[:10], 1):  # Only first 10
 ```

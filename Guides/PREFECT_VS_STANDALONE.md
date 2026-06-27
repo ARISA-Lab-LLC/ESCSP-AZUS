@@ -78,7 +78,7 @@ pip install requests
 source set_env.sh
 
 # 4. Done! Ready to upload
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 **Prefect:**
@@ -110,11 +110,11 @@ python uploads.py
 **Standalone:**
 ```bash
 # Simple one-liner
-python standalone_upload.py
+python standalone_tasks.py
 
 # With options
-python standalone_upload.py --dry-run
-python standalone_upload.py --config /path/to/config.json
+python standalone_tasks.py --dry-run
+python standalone_tasks.py --config /path/to/config.json
 ```
 
 **Prefect:**
@@ -134,7 +134,7 @@ prefect deployment run upload-datasets/upload-datasets-deployment
 **Standalone:**
 ```bash
 # Watch console output
-python standalone_upload.py
+python standalone_tasks.py
 
 # Output shows real-time progress:
 📦 Processing 1/30: ESID 004
@@ -192,7 +192,7 @@ If upload fails:
 # If interrupted (Ctrl+C, crash, etc.):
 # 1. Records/uploaded_files.txt tracks completed uploads
 # 2. Simply run again:
-python standalone_upload.py
+python standalone_tasks.py
 
 # Already uploaded files automatically skipped
 ```
@@ -256,7 +256,7 @@ cat failed_results.csv
 
 **Command:**
 ```bash
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ### Use Case 2: Regular Weekly Uploads
@@ -287,7 +287,7 @@ python standalone_upload.py
 
 **Command:**
 ```bash
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 ```
 
 ### Use Case 4: Production Deployments
@@ -316,10 +316,10 @@ python standalone_upload.py --dry-run
 
 1. Stop Prefect server
 2. Copy these files to your AZUS directory:
-   - `standalone_upload.py`
-   - `standalone_tasks.py`
-   - `standalone_uploader.py`
-3. Run: `python standalone_upload.py`
+   - `standalone_tasks.py` (orchestration + entry point)
+   - `standalone_uploader.py` (Zenodo API client)
+   - `Resources/prepare_dataset.py` (dataset prep)
+3. Run: `python standalone_tasks.py --config Resources/config.json`
 
 **Note:** Both systems track uploads independently, so you can run both if needed.
 
@@ -375,7 +375,7 @@ Based on typical AZUS uploads:
 
 # Quick fix:
 source set_env.sh
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 **Prefect:**

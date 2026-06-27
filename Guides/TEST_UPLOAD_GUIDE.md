@@ -511,9 +511,29 @@ Check: `grep "^999," ~/AZUS_Test_Workspace/Resources/test_collectors.csv`
 
 ### "HTTP 500 from Zenodo"
 
-Zenodo server error — not a problem on your end. Check
-https://status.zenodo.org, then simply re-run. AZUS skips already-uploaded
-records, so only the failed one will be retried.
+Zenodo server error — not a problem on your end. AZUS auto-retries each file
+PUT up to 3 times (30s/90s/270s backoff) on 5xx and connection drops, so
+transient failures usually resolve on their own. If the whole upload still
+fails after retries, check https://status.zenodo.org and re-run — AZUS skips
+already-completed records, and **within an incomplete record, the existing
+draft is resumed** and only the files that weren't yet committed are
+re-uploaded (state tracked in `upload_state.json` inside the ESID staging
+folder).
+
+### "SSL/connection error during a large upload"
+
+```
+SSLError: EOF occurred in violation of protocol
+ConnectionError: ...
+```
+
+A single multi-hour HTTPS PUT for a multi-GB ZIP is fragile by design —
+intermediate proxies and Zenodo's edge can terminate long-lived TLS sessions.
+AZUS now auto-retries each file PUT 3 times (30s/90s/270s backoff). If all
+three attempts fail, just re-run — `upload_state.json` will resume the same
+Zenodo draft, skip already-committed files, and only retry the missing ZIP.
+To abandon the partial draft and start fresh, delete `upload_state.json` from
+the ESID staging folder before re-running.
 
 ---
 
@@ -546,12 +566,24 @@ python prepare_dataset.py Raw_Data/ESID_999 \
 # Dry run
 python standalone_tasks.py --config Resources/config_test.json --dry-run
 
-# Upload
+# Upload (sequential — default)
 python standalone_tasks.py --config Resources/config_test.json
+
+# Upload only specific ESID(s)
+python standalone_tasks.py --config Resources/config_test.json --esid 004 007 012
+
+# Upload N ESID datasets concurrently (here, 3 at a time)
+python standalone_tasks.py --config Resources/config_test.json --workers 3
+
+# Combine: upload these specific ESIDs, 3 at a time
+python standalone_tasks.py --config Resources/config_test.json --esid 012 014 073 --workers 3
 
 # Check results
 cat Records/successful_results.csv
 cat Records/failed_results.csv
+
+# Follow one ESID's progress when --workers > 1 (logs interleave)
+grep '\[ESID 012\]' azus_upload.log
 ```
 
 ---

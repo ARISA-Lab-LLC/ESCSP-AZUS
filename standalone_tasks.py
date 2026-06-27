@@ -24,13 +24,17 @@ Design notes for future Prefect integration:
 # Standard library
 # ---------------------------------------------------------------------------
 import argparse
+import concurrent.futures
 import csv
 import glob
 import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -1364,8 +1368,29 @@ def upload_dataset(
     )
 
     # ------------------------------------------------------------------
-    # Phase 3: Upload to Zenodo.
+    # Phase 3: Upload to Zenodo (with resume support).
+    # If a prior run created a draft but failed before publication,
+    # upload_state.json in the staging folder records the draft ID so
+    # the upload can resume against that same draft on re-run.
     # ------------------------------------------------------------------
+    state_file = esid_dir / "upload_state.json"
+    existing_draft_id: Optional[str] = None
+    if state_file.exists():
+        try:
+            saved_state = json.loads(state_file.read_text(encoding="utf-8"))
+            existing_draft_id = str(saved_state.get("record_id") or "") or None
+            if existing_draft_id:
+                logger.info(
+                    "Found upload_state.json for ESID %s — will resume draft %s",
+                    data.esid, existing_draft_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Could not parse upload_state.json for ESID %s (%s) — "
+                "proceeding without resume.",
+                data.esid, exc,
+            )
+
     try:
         logger.info("Uploading to Zenodo...")
         result = upload_to_zenodo(
@@ -1376,6 +1401,8 @@ def upload_dataset(
             request_log_path=str(
                 esid_dir / f"ESID_{data.esid}_request_log.json"
             ),
+            existing_draft_id=existing_draft_id,
+            state_file_path=str(state_file),
         )
         return result
 
@@ -1459,11 +1486,18 @@ def get_upload_data(
             subdir.name.startswith("ESID_") or subdir.name.startswith("ESID#")
         ):
             # Apply ESID filter before adding to the work list.
-            # Extract the numeric portion of the folder name and compare
-            # against the normalized filter set.
+            # Extract the leading digits after "ESID_" / "ESID#" — tolerant
+            # of folder names like "ESID_073", "ESID_073_Staging" (the name
+            # prepare_dataset.py uses), or "ESID#73".
             if normalized_filter is not None:
-                folder_esid = subdir.name.replace("ESID_", "").replace("ESID#", "")
-                folder_esid_normalized = folder_esid.strip().zfill(3)
+                m = re.match(r"^ESID[_#](\d+)", subdir.name)
+                if m is None:
+                    logger.debug(
+                        "  Skipping %s (no ESID number in folder name)",
+                        subdir.name,
+                    )
+                    continue
+                folder_esid_normalized = m.group(1).zfill(3)
                 if folder_esid_normalized not in normalized_filter:
                     logger.debug(
                         "  Skipping %s (not in --esid filter)", subdir.name
@@ -1508,6 +1542,194 @@ def get_upload_data(
     return upload_data
 
 
+def _process_one_dataset(
+    index: int,
+    total: int,
+    data: UploadData,
+    *,
+    delete_failures: bool,
+    auto_publish: bool,
+    reserve_doi: bool,
+    related_identifiers_csv: Optional[str],
+    references_csv: Optional[str],
+    project_config: Optional[Dict[str, Any]],
+    successful_results_file: str,
+    failure_results_file: str,
+    tracker: "UploadTracker",
+    tracker_lock: threading.Lock,
+    results_lock: threading.Lock,
+    stats: Dict[str, int],
+    stats_lock: threading.Lock,
+) -> None:
+    """Upload one ESID dataset end-to-end and record the result.
+
+    This is the per-ESID unit of work.  It performs (in order):
+      1. Upload all files for the dataset to a Zenodo draft (via
+         :func:`upload_dataset`, which internally handles per-file retries,
+         draft resume via ``upload_state.json``, community submission,
+         and optional publishing).
+      2. On success, append the ZIP path to the upload tracker so future
+         runs skip this dataset.
+      3. On success, move the prepared staging folder into
+         ``Uploaded_Data/ESID_XXX_Uploaded/`` (best-effort — a move
+         failure is logged but does not undo the successful upload).
+      4. Append a row to the appropriate result CSV (success or failure).
+      5. Update the shared statistics dictionary.
+
+    Thread safety
+    -------------
+    This function is designed to be safe to call **concurrently** from
+    multiple worker threads (one ESID per thread).  It coordinates access
+    to the three pieces of shared state via locks supplied by the caller:
+
+    * ``tracker_lock`` — guards :meth:`UploadTracker.mark_uploaded`, which
+      appends one line to ``Records/uploaded_files.txt``.  Without this
+      lock, two threads writing at the same time could corrupt that file.
+    * ``results_lock`` — guards :func:`save_result`, which appends one row
+      to ``successful_results.csv`` or ``failed_results.csv``.  Same
+      reason: prevents two threads writing simultaneously and producing
+      a garbled CSV.
+    * ``stats_lock`` — guards increments to the shared ``stats`` counter
+      dictionary (``stats["total_processed"] += 1`` is **not** atomic
+      under Python's GIL for compound updates).
+
+    Everything else this function touches is naturally per-ESID and
+    requires no coordination: the Zenodo draft (different record_id per
+    ESID), the staging folder (different path per ESID), and
+    ``upload_state.json`` (lives inside the per-ESID staging folder).
+    The Python ``logging`` module is already thread-safe by design, so
+    log lines from different ESIDs may interleave but never garble — use
+    the ``[ESID XXX]`` prefix on the key log messages below to follow
+    one dataset's progress through interleaved output.
+
+    Args:
+        index: 1-based position of this dataset in the queue (for logs).
+        total: Total number of datasets queued (for logs).
+        data: The :class:`UploadData` bundle for this ESID.
+        delete_failures: Whether to delete the Zenodo draft on failure
+            (forwarded to :func:`upload_dataset`).
+        auto_publish: Whether to publish the record after upload
+            (forwarded to :func:`upload_dataset`).
+        reserve_doi: Whether to reserve a DOI at draft creation
+            (forwarded to :func:`upload_dataset`).
+        related_identifiers_csv: Global related-identifiers CSV path.
+        references_csv: Global references CSV path.
+        project_config: Parsed ``project_config.json``.
+        successful_results_file: CSV path for successful results.
+        failure_results_file: CSV path for failed results.
+        tracker: The shared :class:`UploadTracker` instance.
+        tracker_lock: Lock that guards the tracker's append-to-file.
+        results_lock: Lock that guards both result CSV writes.
+        stats: Shared statistics dict (modified in place).
+        stats_lock: Lock that guards stat increments.
+
+    Returns:
+        None.  All results are recorded via the result CSVs and the
+        shared stats dict — there is nothing for the caller to inspect
+        afterwards.  A failed upload does NOT raise; it is logged and
+        written to the failure CSV so that one bad ESID never poisons
+        the worker pool or stops other ESIDs from finishing.
+    """
+    # Per-ESID prefix lets the user follow one dataset through interleaved
+    # multi-worker output.  Example: `grep '[ESID 012]' azus_upload.log`.
+    tag = f"[ESID {data.esid}]"
+
+    logger.info("%s Starting (dataset %d of %d)", tag, index, total)
+
+    # Catch-all guard around the entire per-ESID workflow.  ``upload_dataset``
+    # already wraps its own work in try/except and returns a failure dict,
+    # so a real exception here is unexpected — but we never want one ESID's
+    # crash to take down the whole batch, so we convert any leaked exception
+    # into a synthesized failure result and continue.
+    try:
+        result = upload_dataset(
+            data=data,
+            delete_failures=delete_failures,
+            auto_publish=auto_publish,
+            reserve_doi=reserve_doi,
+            related_identifiers_csv=related_identifiers_csv,
+            references_csv=references_csv,
+            project_config=project_config,
+        )
+    except Exception as exc:
+        logger.error("%s Unexpected error during upload: %s", tag, exc)
+        result = {
+            "successful": False,
+            "api_response": None,
+            "error": {
+                "type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        }
+
+    # --- Update shared counters under the stats lock ---
+    # Compound increments like ``stats["x"] += 1`` are NOT atomic in Python;
+    # two threads incrementing at once could lose updates.  Locking is cheap.
+    with stats_lock:
+        stats["total_processed"] += 1
+
+    if result["successful"]:
+        with stats_lock:
+            stats["successful"] += 1
+
+        # Mark the ZIP as uploaded so future runs skip it.  The tracker
+        # appends one line to ``Records/uploaded_files.txt``; the lock
+        # ensures two threads don't write to that file at the same time.
+        with tracker_lock:
+            tracker.mark_uploaded(data.zip_file)
+
+        # Archive the staging folder into Uploaded_Data/ESID_XXX_Uploaded/.
+        # This is per-ESID file I/O on a unique path (no two threads ever
+        # touch the same staging folder), so no lock is needed here.
+        # We catch any error and log it as a warning so that a local move
+        # failure does NOT undo the (already successful) Zenodo upload.
+        try:
+            staging_folder = Path(data.zip_file).resolve().parent
+            if staging_folder.is_dir():
+                uploaded_dir = Path(__file__).resolve().parent / "Uploaded_Data"
+                destination = uploaded_dir / f"ESID_{data.esid}_Uploaded"
+                uploaded_dir.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    logger.warning(
+                        "%s Replacing existing uploaded folder: %s",
+                        tag, destination,
+                    )
+                    shutil.rmtree(destination)
+                shutil.move(str(staging_folder), str(destination))
+                logger.info("%s Archived staging folder to: %s", tag, destination)
+        except Exception as exc:
+            logger.warning(
+                "%s Could not move staging folder: %s", tag, exc,
+            )
+
+        # Append the success row to successful_results.csv (lock-guarded).
+        with results_lock:
+            save_result(
+                esid=data.esid,
+                zip_file=data.zip_file,
+                success=True,
+                success_file=successful_results_file,
+                failure_file=failure_results_file,
+                api_response=result.get("api_response"),
+            )
+        logger.info("%s DONE (success)", tag)
+    else:
+        with stats_lock:
+            stats["failed"] += 1
+        error = result.get("error", {}) or {}
+        with results_lock:
+            save_result(
+                esid=data.esid,
+                zip_file=data.zip_file,
+                success=False,
+                success_file=successful_results_file,
+                failure_file=failure_results_file,
+                error_type=error.get("type"),
+                error_message=error.get("error_message"),
+            )
+        logger.error("%s DONE (failed)", tag)
+
+
 def upload_datasets(
     datasets: List[Dict[str, str]],
     successful_results_file: str,
@@ -1519,12 +1741,32 @@ def upload_datasets(
     reserve_doi: bool = False,
     project_config: Optional[Dict[str, Any]] = None,
     esid_filter: Optional[List[str]] = None,
+    workers: int = 1,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
     Iterates over the ``datasets`` list from config.json.  Each entry
     specifies a directory, collectors CSV, and dataset category.  This
     single loop replaces the former duplicate annular/total processing.
+
+    Concurrency
+    -----------
+    When ``workers == 1`` (the default), datasets are uploaded one at a
+    time in scan order — exactly the original behavior, no threads
+    involved.  When ``workers > 1``, that many ESID datasets are
+    uploaded **at the same time** using a thread pool.  Files within a
+    single dataset are still uploaded sequentially; only the **outer
+    loop over ESIDs** is parallelized.
+
+    With concurrency, log lines from different ESIDs will interleave in
+    ``azus_upload.log``.  Every key per-ESID log line is prefixed with
+    ``[ESID XXX]`` so you can follow one dataset's progress by grepping:
+
+        grep '\\[ESID 012\\]' azus_upload.log
+
+    The three shared resources (``Records/uploaded_files.txt``, the
+    result CSVs, and the in-memory ``stats`` counters) are guarded by
+    locks created here and passed into the per-ESID worker.
 
     Args:
         datasets: List of dataset config dicts, each with keys:
@@ -1540,6 +1782,10 @@ def upload_datasets(
         esid_filter: Optional list of ESID number strings to upload.
             If ``None`` or empty, all discovered ESIDs are processed.
             Passed through to :func:`get_upload_data`.
+        workers: Number of ESID datasets to upload concurrently.
+            ``1`` (default) means sequential — identical to the original
+            behavior.  Values greater than 1 enable parallel uploads via
+            a thread pool.  Must be >= 1.
 
     Returns:
         Dictionary with upload statistics:
@@ -1547,6 +1793,15 @@ def upload_datasets(
     """
     if not datasets:
         raise ValueError("No datasets configured for upload")
+
+    # Defensive validation — ``main()`` already enforces this, but a direct
+    # caller (e.g. a future automation script) might not.  Clamp to 1.
+    if workers < 1:
+        logger.warning(
+            "workers=%d is invalid; clamping to 1 (sequential upload).",
+            workers,
+        )
+        workers = 1
 
     # Derive the Records directory from the results file path so the tracker
     # sits alongside the other output CSVs (successful_results.csv, etc.).
@@ -1561,6 +1816,17 @@ def upload_datasets(
     )
 
     stats = {"total_processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+
+    # --- Locks for shared state (only consulted in the workers>1 path) ---
+    # Created once and shared with every worker.  See the module-level
+    # docstring on `_process_one_dataset` for what each lock protects.
+    # In the workers==1 path, these are acquired by the (only) caller
+    # thread — uncontended locks in Python are extremely cheap (a few
+    # hundred nanoseconds), so we use the same code path for both modes
+    # rather than maintaining two parallel implementations.
+    tracker_lock = threading.Lock()
+    results_lock = threading.Lock()
+    stats_lock = threading.Lock()
 
     # --- Process each dataset category in a single unified loop ---
     for dataset_entry in datasets:
@@ -1592,47 +1858,99 @@ def upload_datasets(
             esid_filter=esid_filter,
         )
 
-        for i, data in enumerate(category_upload_data, 1):
+        total_in_category = len(category_upload_data)
+
+        # ---------------------------------------------------------------
+        # Build the keyword arguments common to every per-ESID call.
+        # We bundle these once and reuse them in both the sequential
+        # branch and the thread-pool branch below — this guarantees both
+        # paths invoke `_process_one_dataset` with the exact same args.
+        # ---------------------------------------------------------------
+        common_kwargs: Dict[str, Any] = dict(
+            delete_failures=delete_failures,
+            auto_publish=auto_publish,
+            reserve_doi=reserve_doi,
+            related_identifiers_csv=related_identifiers_csv,
+            references_csv=references_csv,
+            project_config=project_config,
+            successful_results_file=successful_results_file,
+            failure_results_file=failure_results_file,
+            tracker=tracker,
+            tracker_lock=tracker_lock,
+            results_lock=results_lock,
+            stats=stats,
+            stats_lock=stats_lock,
+        )
+
+        if workers == 1:
+            # ===========================================================
+            # SEQUENTIAL PATH (default — workers == 1).
+            # No thread pool, no overhead.  This is exactly the original
+            # behavior and the safest, most reliable mode of operation.
+            # Use this unless you have a clear reason to upload datasets
+            # concurrently.
+            # ===========================================================
+            for i, data in enumerate(category_upload_data, 1):
+                _process_one_dataset(
+                    index=i, total=total_in_category, data=data,
+                    **common_kwargs,
+                )
+        else:
+            # ===========================================================
+            # CONCURRENT PATH (workers > 1).
+            #
+            # Uses Python's standard ThreadPoolExecutor — a pool of
+            # worker threads, where each worker pulls one ESID dataset
+            # off the queue, runs `_process_one_dataset` end-to-end on
+            # it, then picks up the next one.
+            #
+            # Why threads (not processes)?
+            #   Uploading files is **I/O-bound**: most of the time the
+            #   thread is just waiting for the network.  During that
+            #   wait, Python releases the GIL and lets other threads
+            #   run.  This is the textbook use case for threads.
+            #   Processes (multiprocessing) would add complexity
+            #   (pickling, inter-process communication) without speed
+            #   benefit for network I/O.
+            #
+            # Why `as_completed` instead of `executor.map`?
+            #   `as_completed` lets us iterate over futures in the order
+            #   they finish.  If we use `.result()` on each, any
+            #   exception that escaped `_process_one_dataset` would be
+            #   re-raised here.  In practice, `_process_one_dataset` has
+            #   a top-level try/except and never lets an exception out —
+            #   but calling `.result()` is still good hygiene: if an
+            #   unexpected exception ever does escape, it surfaces
+            #   loudly instead of being swallowed.
+            #
+            # Lifecycle:
+            #   The `with` block guarantees `executor.shutdown(wait=True)`
+            #   runs on exit, which waits for in-flight uploads to finish
+            #   before returning — so the function does not return until
+            #   every ESID has been processed (success or failure).
+            # ===========================================================
             logger.info(
-                "Processing %d/%d: ESID %s",
-                i, len(category_upload_data), data.esid,
+                "Concurrent upload enabled: %d ESID dataset(s) at a time. "
+                "Look for [ESID XXX] prefixes in the log to follow each one.",
+                workers,
             )
-
-            result = upload_dataset(
-                data=data,
-                delete_failures=delete_failures,
-                auto_publish=auto_publish,
-                reserve_doi=reserve_doi,
-                related_identifiers_csv=related_identifiers_csv,
-                references_csv=references_csv,
-                project_config=project_config,
-            )
-
-            stats["total_processed"] += 1
-
-            if result["successful"]:
-                stats["successful"] += 1
-                tracker.mark_uploaded(data.zip_file)
-                save_result(
-                    esid=data.esid,
-                    zip_file=data.zip_file,
-                    success=True,
-                    success_file=successful_results_file,
-                    failure_file=failure_results_file,
-                    api_response=result.get("api_response"),
-                )
-            else:
-                stats["failed"] += 1
-                error = result.get("error", {})
-                save_result(
-                    esid=data.esid,
-                    zip_file=data.zip_file,
-                    success=False,
-                    success_file=successful_results_file,
-                    failure_file=failure_results_file,
-                    error_type=error.get("type"),
-                    error_message=error.get("error_message"),
-                )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="azus-upload",
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        _process_one_dataset,
+                        index=i, total=total_in_category, data=data,
+                        **common_kwargs,
+                    )
+                    for i, data in enumerate(category_upload_data, 1)
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    # Re-raise any exception that escaped the worker.
+                    # `_process_one_dataset` is designed to never raise,
+                    # so this is a safety net for unexpected failures.
+                    future.result()
 
     return stats
 
@@ -1662,7 +1980,29 @@ def main() -> None:
             "Example: --esid 004  or  --esid 004 007 012"
         ),
     )
+    parser.add_argument(
+        "--workers", type=int, default=1, metavar="N",
+        help=(
+            "Number of ESID datasets to upload AT THE SAME TIME (default: 1, "
+            "sequential). Each worker uploads one complete dataset (all its "
+            "files end-to-end) before picking up the next one. Files within "
+            "a single dataset are still uploaded one at a time — only the "
+            "outer 'one ESID after another' loop is parallelized. "
+            "Recommended range: 1 to 4. Higher values send more parallel "
+            "traffic to Zenodo and split your upload bandwidth across them. "
+            "When N > 1, log lines from different ESIDs will interleave; "
+            "use 'grep \"[ESID XXX]\" azus_upload.log' to follow one dataset."
+        ),
+    )
     args = parser.parse_args()
+
+    # --- Validate --workers BEFORE any other work so errors come early ---
+    if args.workers < 1:
+        parser.error(
+            f"--workers must be at least 1 (got {args.workers}). "
+            "Use --workers 1 for sequential, or --workers 3 (etc.) to upload "
+            "multiple datasets concurrently."
+        )
 
     # --- Configure logging ---
     logging.basicConfig(
@@ -1723,6 +2063,13 @@ def main() -> None:
         logger.info("ESID filter:  %s (all others will be skipped)", ", ".join(args.esid))
     else:
         logger.info("ESID filter:  none (all discovered ESIDs will be uploaded)")
+    if args.workers > 1:
+        logger.info(
+            "Workers:      %d (uploading %d ESID datasets at a time)",
+            args.workers, args.workers,
+        )
+    else:
+        logger.info("Workers:      1 (sequential — one ESID dataset at a time)")
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -1775,6 +2122,7 @@ def main() -> None:
             reserve_doi=uploads_config.get("reserve_doi", False),
             project_config=project_config,
             esid_filter=args.esid,
+            workers=args.workers,
         )
 
         # --- Display summary ---

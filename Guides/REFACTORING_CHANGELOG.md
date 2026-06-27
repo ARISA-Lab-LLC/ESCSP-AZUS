@@ -8,6 +8,288 @@ configuration files, not Python code.
 
 ---
 
+## June 2026 — Resilient resume: clean up pending slots + tolerate broken /draft
+
+Two related issues:
+
+**(1) Pending file slot from failed upload corrupts the draft for `/draft` GET.**
+After a file PUT exhausted all 3 retries, the file entry was left in
+`"status": "pending"` on Zenodo.  Multiple stuck drafts in this state
+were observed to cause `GET /api/records/{id}/draft` to return
+`HTTP 500: 'server is overloaded or there is an error in the application'`
+(deterministically, not transiently).  The web UI still showed the
+drafts and `GET /draft/files` continued to work fine — only the
+full-record serializer choked.
+
+**(2) `get_draft_record` and `list_draft_files` had no retry.**
+A single transient 5xx during resume aborted the whole run, even
+though the underlying issue was transient.
+
+### Fixes (single file: `standalone_uploader.py`)
+
+**Clean up pending file slot on exhausted PUT retries.**
+`upload_file_to_draft` now wraps the call to
+`_put_file_content_with_retry`.  If it raises after 3 attempts:
+
+- Logs the cleanup.
+- Issues `DELETE /api/records/{id}/draft/files/{key}` to remove the
+  broken slot.
+- Logs success or, if cleanup itself fails, a warning.
+- Re-raises the original PUT exception so the dataset is correctly
+  marked as failed.
+
+Result: drafts that fail at the upload step are left in a clean state
+(committed files + no pending slots).  `upload_state.json` is
+untouched (it was written immediately after draft creation), so the
+next resume run picks up cleanly.
+
+**Retry on metadata GETs.**
+New constants `_API_RETRY_ATTEMPTS = 3`, `_API_RETRY_BACKOFF_S = (5, 15, 45)`.
+New helper `_api_get_with_retry` wraps `get_draft_record` and
+`list_draft_files`.  Retries on `RequestException` and HTTP 5xx; HTTP
+4xx still fails fast.  `get_draft_record` uses `allow_404=True` so a
+404 still returns `None` (signaling "draft truly gone").
+
+**Graceful degradation when `/draft` is broken.**
+`upload_to_zenodo` now distinguishes three outcomes from
+`get_draft_record`:
+
+| Outcome                     | What it means                  | What happens                                  |
+|-----------------------------|--------------------------------|-----------------------------------------------|
+| Returns dict                | 200, draft is healthy          | Normal resume (existing behavior)             |
+| Returns `None`              | 404, draft truly gone          | Fall back to creating fresh draft             |
+| Raises (4xx / 5xx exhausted)| `/draft` broken, draft alive   | **NEW:** Resume with `draft_response = None`  |
+
+In the new third case the script logs a warning and continues.  The
+downstream code that touches `draft_response` was already defensive
+(`bool(draft_response and ...)`), so the no-metadata path is naturally
+handled: the already-submitted / already-published guards default to
+`False`, which for a stuck upload is the correct assumption (those
+steps come *after* file uploads).
+
+### Why this recovers the existing stuck drafts
+
+The user's stuck drafts each had ~15 committed files + 1 pending ZIP slot.
+That pending slot was the cause of the 500.  With these changes, the
+recovery flow becomes:
+
+1. `finish_stuck_uploads.py` discovers stuck ESIDs via `upload_state.json`.
+2. `standalone_tasks.py --esid <list>` resumes each.
+3. `get_draft_record` returns 500 → graceful degradation logs the warning
+   and proceeds with `is_resume=True` and `draft_response=None`.
+4. `list_draft_files` returns 200 → script sees 15 completed entries +
+   1 pending entry.
+5. The pending entry is deleted (existing resume logic), then re-initialized,
+   uploaded fresh with 3 retries.
+6. If that PUT also exhausts retries, the new cleanup deletes the slot
+   before propagating the failure — so the draft stays clean for the
+   *next* retry.
+
+### Files touched
+- `standalone_uploader.py`
+
+---
+
+## June 2026 — Stuck-upload recovery tool (`Resources/finish_stuck_uploads.py`)
+
+After a batch upload, some ESIDs may have exhausted all three PUT
+retries on the large ZIP — the small files were committed first, so
+the Zenodo draft exists with most files in place but the ZIP missing.
+Re-running `standalone_tasks.py --esid <list>` already finishes them
+(the resume path detects the existing draft via `upload_state.json`),
+but you had to know which ESIDs were stuck.
+
+This tool removes that requirement:
+- Walks `Staging_Area/` for ESID folders containing `upload_state.json`
+  (the marker written immediately after draft creation; absent from
+  any folder that has been moved to `Uploaded_Data/`).
+- Reads each `upload_state.json` to pull the Zenodo `record_id`.
+- Lists discovered stuck ESIDs in numerical order with their draft
+  IDs, so the user can see exactly what will be resumed.
+- Shells out to `standalone_tasks.py --esid <list> --workers N`
+  to do the actual work — zero duplication of upload, retry, or
+  post-upload logic.
+
+CLI:
+```
+python Resources/finish_stuck_uploads.py
+    [--config Resources/config.json]
+    [--workers N]
+    [--list-only]      # just list the stuck ESIDs; don't run recovery
+```
+
+Robustness:
+- Malformed `upload_state.json` → warn + skip that ESID.
+- `upload_state.json` missing `record_id` → warn + skip that ESID.
+- Non-ESID folders → silently ignored.
+- No stuck uploads → clean exit with friendly "nothing to do".
+
+---
+
+## June 2026 — Batch preparation tool (`Resources/prep_all_datasets.py`)
+
+A small driver that walks a top-level folder of raw ESID directories,
+runs `prepare_dataset.py` on each in **numerical** order, and **skips
+any ESID already prepared** (folder exists in `Staging_Area/` or
+`Uploaded_Data/`).  Replaces the prior 24-line draft of the same name.
+
+### Behavior
+- Discovery: accepts folder names `ESID_NNN`, `ESID#NNN`, and unpadded
+  variants (`ESID_4`).  Non-matching folders are silently ignored.
+- Order: numeric sort on the extracted ESID integer, not lexicographic.
+- Skip check: looks first at `Staging_Area/ESID_NNN_Staging/`, then at
+  `Uploaded_Data/ESID_NNN_Uploaded/`.  Either present → skip.
+- Per-ESID work runs as a `subprocess.run([sys.executable,
+  "Resources/prepare_dataset.py", ...])` so this tool stays decoupled
+  from `prepare_dataset.py`'s internal API and each ESID gets a fresh
+  Python process.
+- One failing ESID never stops the batch — failure is logged and the
+  loop continues.  Exit code 1 only if at least one ESID failed.
+- Heavy module-level + per-function docstrings, written for readers
+  who are not full-time Python programmers.
+
+### CLI
+```
+python Resources/prep_all_datasets.py <RAW_DATA_DIR>
+    [--config Resources/config.json]
+    [--eclipse-type total|annular|partial]
+```
+
+---
+
+## June 2026 — Concurrent ESID uploads (`--workers`)
+
+Motivation: many ≥40 GB ZIPs to upload, each taking ~2.5 hours sequentially.
+Need to upload several at the same time to compress wall-clock time.
+
+### Single file changed
+- `standalone_tasks.py` (+ docs in README.md, STANDALONE_README.md,
+  TEST_UPLOAD_GUIDE.md, and this file).
+
+### CLI
+- New `--workers N` argument (default `1`).  Validated at parse time —
+  `< 1` exits with a helpful error.
+- The configuration banner now logs the worker count on startup.
+
+### Implementation
+- New helper `_process_one_dataset(...)` containing everything previously
+  inside the per-ESID loop body of `upload_datasets()`.  Kw-only arguments
+  past the first three positionals to prevent accidental positional misuse
+  in future maintenance.
+- `upload_datasets()` gains a `workers: int = 1` parameter.  Two code paths:
+  - `workers == 1` → direct sequential loop (identical behavior to before).
+  - `workers > 1` → `concurrent.futures.ThreadPoolExecutor` with the
+    requested number of workers; futures resolved via `as_completed` and
+    `.result()` so unexpected exceptions surface loudly.
+- Three `threading.Lock` objects guard the three pieces of shared state:
+  - `tracker_lock` — `UploadTracker.mark_uploaded()` (appends to
+    `Records/uploaded_files.txt`).
+  - `results_lock` — `save_result()` (appends to
+    `successful_results.csv` / `failed_results.csv`).
+  - `stats_lock` — increments of the in-memory stats counters.
+- Threads chosen over processes because uploading is I/O-bound (GIL
+  released during socket waits).  No pickling, no IPC, no per-worker
+  Python interpreter startup cost.
+- One worker's exception cannot poison the pool: `_process_one_dataset`
+  has a top-level try/except that turns any leaked exception into a
+  failure result dict and continues.
+- All key per-ESID log lines now carry an `[ESID XXX]` prefix so users
+  can follow one dataset through interleaved log output with
+  `grep '[ESID XXX]' azus_upload.log`.
+
+### Reliability properties
+- Default behavior (`--workers 1`) is byte-for-byte identical to the prior
+  sequential implementation — no risk to existing workflows.
+- Per-file retry (3 attempts, 30s/90s/270s backoff) and draft resume
+  (`upload_state.json`) operate independently inside each worker — no
+  interaction between concurrent ESIDs.
+- The "Proceed? (yes/no)" confirmation prompt fires once before any
+  worker starts.
+- Shared output files are append-only under locks; even with `--workers 8`
+  the result CSVs cannot interleave their rows.
+
+---
+
+## June 2026 — `--esid` filter folder-name fix
+
+The `--esid N` filter compared against the literal folder-name suffix.
+`prepare_dataset.py` now produces folders named `ESID_XXX_Staging/`,
+which made the comparison `"NNN_Staging" not in {"NNN"}` always true, so
+`--esid` runs found zero ZIPs while full-scan runs found them fine.
+
+Fix: extract the leading numeric portion with a regex
+(`^ESID[_#](\d+)`) instead of stripping a fixed prefix.  Now accepts
+all of `ESID_073`, `ESID_073_Staging`, `ESID_073_Uploaded`, `ESID#73`.
+Added `import re` to `standalone_tasks.py`; one location changed.
+
+---
+
+## June 2026 — Upload resilience: retry + draft resume
+
+Motivation: a 27 GB ZIP upload died after ~2.5 hours with
+`SSLEOFError(8, 'EOF occurred in violation of protocol')` — a single multi-hour
+HTTPS PUT is fragile by design.  InvenioRDM multipart upload was investigated
+and confirmed disabled on production Zenodo (init succeeds; per-part PUT
+returns `HTTP 403 Permission denied`), so multipart is not viable.  Instead,
+two narrower fixes:
+
+### Per-PUT retry (`standalone_uploader.py`)
+- New helper `_put_file_content_with_retry()` wraps the file PUT.
+- 3 attempts with `30s → 90s → 270s` exponential backoff.
+- Catches `RequestException` (covers `SSLError`, `ConnectionError`, `Timeout`,
+  `ChunkedEncodingError`) and HTTP `5xx` server errors.
+- `HTTP 4xx` fails immediately (real client/auth/payload problem; retrying
+  won't fix it).
+- Each attempt re-opens the file at byte 0 — InvenioRDM's single-PUT
+  semantics overwrite server-side content per call, so restart is safe.
+- Constants: `_PUT_RETRY_ATTEMPTS = 3`, `_PUT_RETRY_BACKOFF_S = (30, 90, 270)`.
+
+### Draft resume (`standalone_uploader.py` + `standalone_tasks.py`)
+- New helpers in `standalone_uploader.py`:
+  - `get_draft_record(record_id)` — fetch an existing draft (returns `None`
+    on 404 so the caller can fall back cleanly).
+  - `list_draft_files(record_id)` — list existing file entries on a draft.
+  - `delete_draft_file(record_id, key)` — clear a "pending" file slot before
+    re-uploading.
+- `upload_to_zenodo()` gains two new optional parameters:
+  - `existing_draft_id` — when set, skip `create_draft_record()`, fetch the
+    existing draft, list its files, skip ones already `status="completed"`,
+    delete any in `status="pending"` and re-upload them.  If the draft no
+    longer exists on Zenodo (404), falls back to creating a fresh draft.
+  - `state_file_path` — when set, writes a small JSON file (`record_id`,
+    `created_at`, `zenodo_url`, `resumed`) immediately after draft creation
+    / location, used by the orchestrator to enable automatic resume on
+    re-run.
+- Submit-to-community and publish steps now check `parent.review` and
+  `is_published` on the draft and skip if those actions already happened
+  on a prior attempt — calling `submit-review` twice or republishing
+  otherwise 4xx's.
+- `standalone_tasks.py` writes `upload_state.json` into the ESID staging
+  folder on the first attempt; on subsequent runs it reads the file and
+  passes the saved `record_id` to `upload_to_zenodo()`.  The state file
+  travels with the staging folder when it is renamed to
+  `Uploaded_Data/ESID_XXX_Uploaded/` after success.
+
+### Observability
+- `_put_file_content_with_retry` logs both the exception class and the file
+  name on each retry, e.g.
+  `PUT failed for ESID_014.zip (attempt 1/3): SSLEOFError: ...`.
+- Resume logs the full draft state on entry
+  (`status / state / is_published / has_review`) plus a full inventory of
+  every existing file entry on the draft (key, status, size, checksum)
+  before any decisions are made — so any future Zenodo-side response shape
+  change is immediately visible in the log.
+
+### Files touched
+- `standalone_uploader.py`
+- `standalone_tasks.py`
+
+### Diagnostic-only (not used by production code)
+- `multipart_preflight.py` — one-off script that confirmed multipart upload
+  is disabled on production Zenodo.  Safe to delete; safe to keep.
+
+---
+
 ## Files Created (New)
 
 | File | Purpose |

@@ -604,6 +604,15 @@ def create_external_file_list(
 #  README generation from template
 # ===================================================================
 
+# Map the "WAV ... Time & Date Settings" CSV value to its README display wording.
+# Keys are normalized (stripped + lowercased); unknown values pass through unchanged.
+_TIME_DATE_MODE_DISPLAY: Dict[str, str] = {
+    "set manually": "Needs to be set manually",
+    "needs to be set manually": "Needs to be set manually",
+    "set with automated audiomoth time chime": "Set with Automated AudioMoth Time Chime",
+}
+
+
 def create_readme_html(
     collector_data: Dict[str, str],
     output_dir: Path,
@@ -667,6 +676,18 @@ def create_readme_html(
     }
     eclipse_label = eclipse_labels.get(eclipse_type, f"{eclipse_type} Solar Eclipse")
 
+    # Resolve the WAV time/date setting, tolerant of header spelling:
+    # 2024 sheets use "WAV Files Time & Date Settings"; 2023/collectors sheets
+    # use "WAV files Time & Date Settings:" (lowercase "files", trailing colon).
+    raw_time_date_mode = ""
+    for key, value in collector_data.items():
+        if key and key.strip().rstrip(":").strip().lower() == "wav files time & date settings":
+            raw_time_date_mode = (value or "").strip()
+            break
+    time_date_mode = _TIME_DATE_MODE_DISPLAY.get(
+        raw_time_date_mode.lower(), raw_time_date_mode
+    )
+
     substitution_vars = {
         "esid": esid,
         "date": formatted_date,
@@ -675,7 +696,7 @@ def create_readme_html(
         "latitude": collector_data.get("Latitude", "Unknown"),
         "longitude": collector_data.get("Longitude", "Unknown"),
         "coverage": collector_data.get("Eclipse Percent (%)", "Unknown"),
-        "time_date_mode": collector_data.get("WAV Files Time & Date Settings", ""),
+        "time_date_mode": time_date_mode,
         "start_time_notes": collector_data.get("Data Collector Start Time Notes", ""),
         "first_contact": collector_data.get(
             "Eclipse Start Time (UTC) (1st Contact)", "N/A"),
@@ -1153,6 +1174,24 @@ def main() -> None:
     # standalone_tasks.py reads this at upload time so the file list has a
     # single, reviewable source of truth per dataset.
     create_upload_manifest(output_dir, esid)
+
+    # --- Move the completed staging folder into Staging_Area/ (success only) ---
+    # Staging_Area is resolved relative to the project root (the parent of this
+    # script's Resources/ directory) so the move works regardless of the current
+    # working directory.  Reaching this point means preparation succeeded — the
+    # earlier steps sys.exit() on failure.
+    staging_area_dir = Path(__file__).resolve().parent.parent / "Staging_Area"
+    destination = staging_area_dir / output_dir.name
+    if output_dir.resolve() == destination.resolve():
+        logger.info("Staging folder already in Staging_Area: %s", output_dir)
+    else:
+        staging_area_dir.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            logger.warning("Replacing existing staging folder: %s", destination)
+            shutil.rmtree(destination)
+        shutil.move(str(output_dir), str(destination))
+        logger.info("Moved staging folder to: %s", destination)
+        output_dir = destination
 
     # --- Summary ---
     logger.info("=" * 70)

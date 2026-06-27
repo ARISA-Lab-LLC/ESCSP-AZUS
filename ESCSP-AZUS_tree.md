@@ -1,7 +1,6 @@
 # Directory Tree: `ESCSP-AZUS`
 
-*Generated: 2026-03-10 14:27:00*  
-*Scanner: scan_tree.py v1.0.0*
+*Generated: 2026-06-27 13:47:49*
 
 ---
 
@@ -9,11 +8,11 @@
 
 | Setting | Value |
 |---------|-------|
-| Root path | `~/ESCSP-AZUS` |
+| Root path | `git_folder/ESCSP-AZUS/` |
 | Max depth | unlimited |
 | Show hidden | False |
 | Show file stats | True |
-| Excluded patterns | `__pycache__`, `.git`, `.svn`, `.hg`, `*.pyc`, `*.pyo`, `.DS_Store`, `Thumbs.db`, `*.egg-info`, `.env`, `node_modules`, `prefect-env`, `*.log` |
+| Excluded patterns | `.DS_Store`, `.git`, `__pycache__`, `azus-env`, `prefect-env` |
 
 ---
 
@@ -22,19 +21,21 @@
 ```
 ESCSP-AZUS/
 ├── **Guides/**
-│   ├── CITATIONS_USER_GUIDE.md  *(12.4 KB, 2026-02-28 10:41)*
-│   ├── CSV_FIX_GUIDE.md  *(4.5 KB, 2026-02-28 10:41)*
-│   ├── DIRECTORY_STRUCTURE_GUIDE.md  *(17.1 KB, 2026-02-28 10:41)*
-│   ├── PREFECT_VS_STANDALONE.md  *(9.3 KB, 2026-02-28 10:41)*
-│   ├── REFACTORING_CHANGELOG.md  *(7.1 KB, 2026-02-28 10:41)*
-│   ├── STANDALONE_README.md  *(9.6 KB, 2026-02-28 10:41)*
-│   └── TEST_UPLOAD_GUIDE.md  *(17.7 KB, 2026-02-28 10:41)*
+│   ├── CITATIONS_USER_GUIDE.md  *(12.4 KB, 2026-06-25 21:39)*
+│   ├── CSV_FIX_GUIDE.md  *(4.5 KB, 2026-06-25 21:39)*
+│   ├── DIRECTORY_STRUCTURE_GUIDE.md  *(19.6 KB, 2026-06-25 21:38)*
+│   ├── PREFECT_VS_STANDALONE.md  *(9.4 KB, 2026-06-25 21:41)*
+│   ├── REFACTORING_CHANGELOG.md  *(20.0 KB, 2026-06-25 15:52)*
+│   ├── STANDALONE_README.md  *(19.0 KB, 2026-06-25 21:38)*
+│   ├── TEST_UPLOAD_GUIDE.md  *(19.2 KB, 2026-06-24 14:08)*
 ├── **models/**
-│   ├── __init__.py  *(32.0 B, 2026-02-28 10:41)*
-│   ├── audiomoth.py  *(11.3 KB, 2026-02-28 10:41)*
-│   └── invenio.py  *(11.5 KB, 2026-02-28 10:41)*
+│   ├── __init__.py  *(32 B, 2026-02-26 02:59)*
+│   ├── audiomoth.py  *(11.3 KB, 2026-02-26 03:40)*
+│   ├── invenio.py  *(11.5 KB, 2026-02-26 01:34)*
 ├── **Raw_Data/**
+│   ├── .gitkeep  *(57 B, 2026-02-26 02:59)*
 ├── **Records/**
+│   ├── .gitkeep  *(0 B, 2026-02-28 10:41)*
 ├── **Resources/**
 │   ├── 2023_Annular_Zenodo_Form_Spreadsheet.csv  *(11.0 KB, 2026-02-28 10:41)*
 │   ├── 2024_total_eclipse_data_data_dict.csv  *(4.5 KB, 2026-02-08 19:28)*
@@ -44,38 +45,47 @@ ESCSP-AZUS/
 │   ├── config.json  *(2.0 KB, 2026-02-25 15:21)*
 │   ├── CONFIG_data_dict.csv  *(11.4 KB, 2026-02-28 10:41)*
 │   ├── Eclipse_Soundscapes_Data_Collector_Role_Training_and_Implementation_Manual_2023–2024.pdf  *(11.7 MB, 2026-03-02 09:12)*
-│   ├── Eclipse_Soundscapes_Data_Management_Data_Processing.pdf  *(12.7 KB, 2026-03-02 08:46)*
-│   ├── Eclipse_Soundscapes_Data_Management_Public_Data_Sharing.pdf  *(12.7 KB, 2026-03-02 08:45)*
-│   ├── file_list_data_dict.csv  *(985.0 B, 2026-02-28 10:41)*
+│   ├── ES_Data_Management_Data_Processing_Stage_2.pdf  *(2.1 MB, 2026-06-17 07:55)*
+│   ├── ES_Data_Management_Data_Sharing_Stage_3.pdf  *(2.5 MB, 2026-06-17 07:55)*
+│   ├── ES_Data_Management_Pre-Eclipse_Data_Infrastructure_Stage_0.pdf  *(1.9 MB, 2026-06-17 07:55)*
+│   ├── ES_Data_Management_Receipt_Sorting_and_Metadata_Organization_Stage_1.pdf  *(1.8 MB, 2026-06-17 07:55)*
+│   ├── file_list_data_dict.csv  *(985 B, 2026-02-28 10:41)*
 │   ├── file_list_Template.csv  *(2.7 KB, 2026-02-28 10:41)*
+│   ├── finish_stuck_uploads.py  *(13.3 KB, 2026-06-25 15:19)*
 │   ├── License.txt  *(18.2 KB, 2026-02-28 10:41)*
-│   ├── prepare_dataset.py  *(43.3 KB, 2026-02-28 10:41)*
-│   ├── README_template.html  *(14.1 KB, 2026-02-28 10:41)*
-│   ├── references.csv  *(507.0 B, 2026-02-28 10:41)*
-│   ├── related_identifiers.csv  *(289.0 B, 2026-02-28 10:41)*
-│   ├── related_identifiers1.csv  *(289.0 B, 2026-02-28 10:41)*
-│   ├── related_identifiers2.csv  *(470.0 B, 2026-02-28 10:41)*
+│   ├── prep_all_datasets.py  *(16.4 KB, 2026-06-25 13:08)*
+│   ├── prepare_dataset.py  *(45.2 KB, 2026-06-19 15:32)*
+│   ├── project_config.json  *(3.3 KB, 2026-06-22 21:32)*
+│   ├── README_template.html  *(23.6 KB, 2026-06-19 09:55)*
+│   ├── references.csv  *(507 B, 2026-02-28 10:41)*
+│   ├── related_identifiers.csv  *(418 B, 2026-06-19 10:03)*
+│   ├── related_identifiers1.csv  *(417 B, 2026-06-19 10:04)*
+│   ├── related_identifiers2.csv  *(598 B, 2026-06-19 10:03)*
 │   ├── resource_files_list.csv  *(1.1 KB, 2026-03-02 09:33)*
-│   └── WAV_data_dict.csv  *(1.6 KB, 2026-02-28 10:41)*
+│   ├── WAV_data_dict.csv  *(1.6 KB, 2026-02-28 10:41)*
 ├── **Scripts/**
+│   ├── .gitkeep  *(0 B, 2026-03-09 21:24)*
 ├── **Staging_Area/**
+│   ├── .gitkeep  *(61 B, 2026-02-26 02:59)*
 ├── **templates/**
-│   ├── config.json.example  *(1.8 KB, 2026-02-28 10:41)*
+│   ├── config.json.example  *(1.8 KB, 2026-02-26 02:59)*
 │   ├── prepare_dataset.py.example  *(45.0 KB, 2026-02-28 10:41)*
-│   ├── project_config.json.example  *(3.5 KB, 2026-02-28 10:41)*
-│   ├── README_template.html.example  *(2.0 KB, 2026-02-28 10:41)*
-│   ├── references.csv.example  *(251.0 B, 2026-02-28 10:41)*
-│   ├── related_identifiers.csv.example  *(312.0 B, 2026-02-28 10:41)*
+│   ├── project_config.json.example  *(3.5 KB, 2026-02-26 02:59)*
+│   ├── README_template.html.example  *(2.0 KB, 2026-02-26 02:59)*
+│   ├── references.csv.example  *(251 B, 2026-02-26 02:59)*
+│   ├── related_identifiers.csv.example  *(312 B, 2026-02-26 02:59)*
 │   ├── resource_files_list.csv.example  *(1.9 KB, 2026-02-28 10:41)*
-│   └── set_env.sh.example  *(239.0 B, 2026-02-28 10:41)*
+│   ├── set_env.sh.example  *(239 B, 2026-02-26 02:59)*
 ├── **Uploaded_Data/**
-├── ESCSP-AZUS_tree.md  *(4.5 KB, 2026-03-10 14:21)*
-├── README.md  *(3.2 KB, 2026-02-28 10:42)*
-├── requirements-standalone.txt  *(235.0 B, 2026-02-28 10:40)*
-├── scan_tree.py  *(17.5 KB, 2026-02-22 21:04)*
-├── scan_tree_config.json  *(620.0 B, 2026-02-22 21:04)*
-├── standalone_tasks.py  *(63.9 KB, 2026-03-02 23:09)*
-└── standalone_uploader.py  *(16.2 KB, 2026-02-28 10:40)*
+│   ├── .gitkeep  *(0 B, 2026-03-09 21:27)*
+├── .gitignore  *(1.3 KB, 2026-02-28 10:41)*
+├── ESCSP-AZUS_tree.md  *(4.7 KB, 2026-06-25 21:39)*
+├── LICENSE  *(1.5 KB, 2026-06-27 13:47)*
+├── multipart_preflight.py  *(9.1 KB, 2026-06-23 16:52)*
+├── README.md  *(5.5 KB, 2026-06-27 13:47)*
+├── requirements-standalone.txt  *(235 B, 2026-02-26 02:59)*
+├── standalone_tasks.py  *(80.1 KB, 2026-06-24 13:47)*
+├── standalone_uploader.py  *(33.4 KB, 2026-06-25 15:51)*
 ```
 
 ---
@@ -85,8 +95,8 @@ ESCSP-AZUS/
 | Metric | Count |
 |--------|-------|
 | Directories | 9 |
-| Files | 46 |
-| Total size | 15.8 MB |
+| Files | 57 |
+| Total size | 24.2 MB |
 
 ### File Types
 
@@ -94,9 +104,10 @@ ESCSP-AZUS/
 |-----------|-------|
 | `.csv` | 13 |
 | `.md` | 9 |
+| `.py` | 9 |
 | `.example` | 8 |
-| `.py` | 7 |
-| `.pdf` | 4 |
+| `(none)` | 7 |
+| `.pdf` | 6 |
 | `.json` | 2 |
 | `.txt` | 2 |
 | `.html` | 1 |

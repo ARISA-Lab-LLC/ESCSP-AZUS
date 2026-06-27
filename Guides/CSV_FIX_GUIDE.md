@@ -31,7 +31,7 @@ This will:
 
 Then try your upload again:
 ```bash
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ## Manual Fix
@@ -139,10 +139,10 @@ Once your CSV is valid:
 
 ```bash
 # Test (no upload)
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 
 # Actual upload
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ## Still Having Issues?
@@ -193,7 +193,7 @@ To avoid this in future:
 3. Use the auto-fix tool as part of your workflow:
    ```bash
    python validate_csv.py input.csv --fix --eclipse-type total
-   python standalone_upload.py
+   python standalone_tasks.py
    ```
 
 ## Example Workflow
@@ -209,7 +209,7 @@ python validate_csv.py collectors.csv --fix --eclipse-type total
 python validate_csv.py collectors.csv --eclipse-type total
 
 # 4. Upload
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ---

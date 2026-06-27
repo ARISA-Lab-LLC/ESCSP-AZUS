@@ -62,10 +62,10 @@ def get_default_related_identifiers() -> List[RelatedIdentifier]:
 
 ```bash
 # Test with dry run
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 
 # If successful, upload
-python standalone_upload.py
+python standalone_tasks.py
 ```
 
 ---
@@ -286,7 +286,7 @@ python -c "from standalone_tasks import get_default_related_identifiers; print('
 
 ```bash
 # Run with dry-run to see metadata
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 ```
 
 ### 3. Check Zenodo Draft
@@ -442,7 +442,7 @@ RelatedIdentifier(
 
 **Test command:**
 ```bash
-python standalone_upload.py --dry-run
+python standalone_tasks.py --dry-run
 ```
 
 ---

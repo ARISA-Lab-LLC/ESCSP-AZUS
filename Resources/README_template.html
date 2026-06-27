@@ -1,4 +1,10 @@
 <p>These are audio recordings taken by an Eclipse Soundscapes (ES) Data Collector during the week of the $date $eclipse_label.&nbsp;</p>
+<p>It was decided to include only raw, unprocessed audio data files in each site-specific ZIP archive and in each Zenodo record.  
+This decision was so that any researcher can independently verify, reproduce, and extend the analysis performed.  As a result, some 
+sites have WAV files with 0 bytes of data or timestamps outside the range of probable recording times.  Procedures used by the Eclipse 
+Soundscapes team to process audio data for its purposes are outlined in the Data Management reports located in the Eclipse Soundscapes 
+Zenodo community. Data with 0 bytes of data were included for completeness.</p>
+
         <h1>Data Site location information:</h1>
         <ul>
         <li>Latitude: $latitude&nbsp;</li>
@@ -11,12 +17,72 @@
         <h1>Included Data:</h1>
         <ul>
         <li>
-        <p><strong>Audio files in WAV format</strong>&nbsp;with the date and time in UTC within the file name: YYYYMMDD_HHMMSS meaning YearMonthDay_HourMinuteSecond<br>For example, 20240411_141600.WAV means that this audio file starts on April 11, 2024 at 14:16:00 Coordinated Universal Time (UTC)</p>
+        <p><strong>Audio files in WAV format</strong>&nbsp;with the date and time in UTC within the file name: YYYYMMDD_HHMMSS meaning 
+                YearMonthDay_HourMinuteSecond<br>For example, 20240411_141600.WAV means that this audio file starts on April 11, 2024 
+                at 14:16:00 Coordinated Universal Time (UTC)</p>
         </li>
         <li>
-        <p><strong>CONFIG Text file:&nbsp;</strong>Includes AudioMoth device setting information, such as sample rate in Hertz (Hz), gain, firmware, etc.&nbsp;</p>
+        <p><strong>CONFIG Text file:&nbsp;</strong>Includes AudioMoth device setting information, such as sample rate in Hertz (Hz), 
+                gain, firmware, etc.&nbsp;</p>
         </li>
+        <li>
+        <p><strong>README.md:&nbsp;</strong> Markdown formatted file with information about the recording and recording site.</p>
+        </li>
+        <li>
+        <p><strong>file_list.csv:&nbsp;</strong> A machine and human file that gives the following information on each file in the 
+                record: File Name, File Type, Description, File Size in kilobytes, Name of Associated Data Dictionary with the file, 
+                calculated SHA-512 Hash of the file as a unique identifier to insure data integrity during transfer and compression.</p>
+        </li>
+        <li>
+        <p><strong>total_eclipse_data.csv:&nbsp;</strong> A machine and human readable file that gives the following information about 
+                the site where the audio data recording was taken: ESID#, Latitude, Longitude, Eclipse_type, CoveragePercent, 
+                Eclipse Start UTC (1st contact), Totality Start UTC (2nd contact), Totality End UTC (3rd Contact), 
+                Eclipse End UTC (4th Contact), Max Eclipse Time UTC</p>
+        </li>
+        <li>
+        <p><strong>License.txt:&nbsp;</strong> A human readable file that explains the terms and conditions under which the data 
+                can be used.</p>
+        </li>
+        <li>
+        <p><strong>AudioMoth_Operation_Manual.pdf:&nbsp;</strong> A human readable document that explains the use of an AudioMoth device.
+                  The document is current up to the time of the AudioMoth's use in the Eclipse Soundscapes project.</p>
+        </li>
+        <li>
+        <p><strong>file_list_data_dict.csv:&nbsp;</strong> A machine and human data dictionary file that gives information on the 
+                variables contained within the file_list.csv file.</p>
+        </li>
+        <li>
+        <p><strong>CONFIG_data_dict.csv:&nbsp;</strong> A machine and human data dictionary file that gives information on the 
+                variables contained within the CONFIG.TXT file.</p>
+        </li>
+        <li>
+        <p><strong>eclipse_data_data_dict.csv:&nbsp;</strong> A machine and human data dictionary file that gives information on the 
+                variables contained within the total_eclipse_data.csv file.</p>
+        </li>
+        <li>
+        <p><strong>WAV_data_dict.csv:&nbsp;</strong> A machine and human data dictionary file that gives information on the variables 
+                contained within the *.WAV files.</p>
+        </li>
+        <li>
+        <p><strong>ES_Data_Management_Pre-Eclipse_Data_Infrastructure_Stage_0.pdf:&nbsp;</strong> PDF document that describes Stage 0 
+                (Pre-Eclipse Infrastructure and Data Stewardship Planning) of the Eclipse Soundscapes (ES) data lifecycle.</p>
+        </li>
+        <li>
+        <p><strong>ES_Data_Management_Receipt_Sorting_and_Metadata_Organization_Stage_1.pdf:&nbsp;</strong> PDF document that 
+                describes Stage 1 (Receipt, Sorting, and Metadata Organization) of the Eclipse Soundscapes (ES) data lifecycle. </p>
+        </li>
+        <li>
+        <p><strong>ES_Data_Management_Data_Processing_Stage_2.pdf:&nbsp;</strong> PDF document that describes Stage 2 
+                (Data Processing) of the Eclipse Soundscapes (ES) data Volunteer Scientists. 2023 and 2024 solar eclipse soundscapes audio datalifecycle.</p>
+        </li>
+        <li>
+        <p><strong>ES_Data_Management_Data_Sharing_Stage_3.pdf:&nbsp;</strong> PDF document that describes Stage 3 (Public Data Sharing) 
+                of the Eclipse Soundscapes (ES) data lifecycle. </p>
+        </li>
+              
         </ul>
+
+
         <h1>Eclipse Information for this location:</h1>
         <ul>         
         <li>Eclipse Date: $date</li>
@@ -39,7 +105,7 @@
         <p>The latitude and longitude for each site was taken manually by data collectors and submitted to the ES team, either via a web form or on paper. It is shared in Decimal Degrees format.</p>
         
         <h1>General Project Information:</h1>
-        <p>The Eclipse Soundscapes Project is a NASA Volunteer Science project funded by NASA Science Activation that is studying how eclipses affect life on Earth during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. Eclipse Soundscapes revisits an eclipse study from almost 100 years ago that showed that animals and insects are affected by solar eclipses! Like this study from 100 years ago, ES asked for the public’s help. ES uses modern technology to continue to study how solar eclipses affect life on Earth! You can learn more at www.EclipseSoundscapes.org.&nbsp;</p>
+        <p>The Eclipse Soundscapes Project is a NASA Volunteer Science project funded by NASA Science Activation that is studying how eclipses affect life on Earth during the October 14, 2023 annular solar eclipse and the April 8, 2024 total solar eclipse. Eclipse Soundscapes revisits an eclipse study from almost 100 years ago that showed that animals and insects are affected by solar eclipses! Like this study from 100 years ago, ES asked for the public’s help. ES uses modern technology to continue to study how solar eclipses affect life on Earth!&nbsp;</p>
         <p>Eclipse Soundscapes is an enterprise of ARISA Lab, LLC and is supported by NASA award No. 80NSSC21M0008. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Aeronautics and Space Administration. &nbsp;</p>
         <p>Eclipse map/figure/table/predictions courtesy of Fred Espenak, NASA/Goddard Space Flight Center, from <a href="https://eclipse.gsfc.nasa.gov">eclipse.gsfc.nasa.gov</a>. &nbsp;</p>
         
@@ -51,82 +117,151 @@
         <p><strong>2024.0.0</strong>&nbsp;=&nbsp; Week of April 8, 2024 Total Solar Eclipse Audio Data , OFF the Path of Totality (Partial Solar Eclipse)</p>
         <p><em>*Please note that this dataset's version number is listed below.</em></p>
         
-        <h1>Data Collector Training and Resources Manual (Archival Copy)</h1>
+        <h1>Eclipse Soundscapes Data Collector Role Training and Implementation Resources Manual (2023-2024) (Archival Copy)</h1>
 
-        <p>This site-level record includes the Eclipse Soundscapes Data Collector Role Training and 
-                Resources Manual (2023-2024). The manual documents the participant training, device 
+        <p>This site-level record includes the <i>Eclipse Soundscapes Data Collector Role Training and Implementation 
+                Resources Manual (2023-2024)</i>. The manual documents the participant training, device 
                 setup procedures, metadata submission requirements, ES ID system, timestamp protocols, 
                 data return workflow, and public archiving processes used during the October 14, 2023
                  annular solar eclipse and the April 8, 2024 total solar eclipse. The manual is 
                  preserved for transparency and reproducibility and reflects the procedures under 
                  which this dataset was collected and processed. (DOI 10.5281/zenodo.18623442)</p>
 
-        <h1>Data Receipt, Processing, and Analysis Methods</h1>      
-        Audio data returned by ES Data Collectors was processed through a structured, multi-stage workflow 
-        designed to ensure accurate metadata matching, timestamp verification, secure backup, public sharing, and downstream analysis. Audio data were separated into individual site-level records organized by ES ID number and geographic location to preserve spatial clarity and reproducibility. This infrastructure documentation was developed to support transparency, reproducibility, and long-term open-data stewardship.
+        <h2>Data Receipt, Processing, and Analysis Methods</h2>      
         
-        <h2>Stages 1–3: Data Receipt, Organization, and Public Sharing</h2>
         All programs supporting Stages 1–3 are openly available in the:
         <ul>
-                <li><strong>Soundscapes GitHub repository:</strong><br>
+                <li><strong>Eclipse Soundscapes GitHub repository:</strong><br>
                 <a href="https://github.com/ARISA-Lab-LLC/ESCSP">https://github.com/ARISA-Lab-LLC/ESCSP</a>
                 </li>
         </ul>
-        <h3>Stage 1 (Receipt, Sorting, and Metadata Organization) </h3>
-                <strong>Stage 1 </strong> led by MaryKay Severino and included physical receipt of microSD cards, metadata 
-                verification, ES ID matching, and organization of site-level records. Programs supporting 
-                metadata validation and organization were developed by Henry "Trae" Winter and Joel Goncalves and are 
-                openly shared in the Eclipse Soundscapes GitHub repository. Information about this step was 
-                shared publicly with ES Data Collectors and is included in the <em>Eclipse Soundscapes Data 
-                Collector Role Training and Implementation Manual (2023-2024).</em>
-        
-        <ul>
-                <li>Severino, M., & Winter, H. (2026). Eclipse Soundscapes Data Collector Role Training and 
-                        Implementation Manual (2023–2024). Zenodo. <a href="https://doi.org/10.5281/zenodo.18623442">
-                                https://doi.org/10.5281/zenodo.18623442</a>     
-                </li>
-        
-        </ul>
-        <h3>Stages 2 and 3 (Raw Data Verification, Upload Preparation, and Zenodo Integration) </h3>
-        <strong>Stages 2 and 3</strong> were led by Henry "Trae" Winter. MaryKay Severino supported Stages 2 and 3 through 
-        project coordination, timeline management, and documentation organization to ensure the structured 
-        progression of the data stewardship workflow. These stages included timestamp verification, raw audio 
-        upload workflows, site-level record preparation, and implementation of ES-developed upload code using 
-        the Zenodo API. Detailed information about these two stages was not made publicly available during the 
-        life of the project. They are included in <em>Eclipse Soundscapes Data Management: Data Processing</em> 
-        and <em>Eclipse Soundscapes Data Management: Public Audio Data Sharing for data processing transparency 
-        purposes</em>.
- 
-        <ul>   
-                
-                <li>Winter, H., & Severino, M. (2026). Eclipse Soundscapes Data Management: Data Processing. Zenodo.  
-                        <a href="https://doi.org/10.5281/zenodo.18623441">https://doi.org/10.5281/zenodo.18623441</a></li>
-                <li>Winter, H., & Severino, M. (2026). Eclipse Soundscapes Data Management: Public Audio Data 
-                        Sharing. Zenodo.  
-                        <a href="https://doi.org/10.5281/zenodo.18623440">https://doi.org/10.5281/zenodo.18623440</a></li>
-        </ul>
-        <h2>Stage 4: Soundscape Analysis</h2>   
-        Scientific analysis of the soundscape data was conducted separately from the data stewardship 
-        infrastructure described above.
-        <p><strong>Soundscape Analysis</strong> was conducted by Neil Gilbert and Brent Pease and included vocal 
-                richness analysis, timing analysis, and species identification workflows. Related materials 
-                include:</p>       
-        <ul>
-                <li>Pease, B., Gilbert, N., & Severino, M. (2026). Eclipse Soundscapes Preliminary Findings – How Eclipses Affect Nature as determined by Sound (Recorded Webinar). Zenodo. <a href="https://doi.org/10.5281/zenodo.18613979">https://doi.org/10.5281/zenodo.18613979</a></li>
-                <li>Gilbert, N. A., Pease, B. S., Severino, M., & Winter, H. III. (2026). Photic niche explains avian behavioral responses to solar eclipses. Ecology and Evolution, 16(2), e73090. <a href="https://doi.org/10.1002/ece3.73090">https://doi.org/10.1002/ece3.73090</a></li>
+
+                <h3>Data Management Lifecycle</h3>
+
+                The following section documents the relationship of this record to the full Eclipse Soundscapes (ES) data lifecycle, a multi-stage workflow designed to support large-scale participatory science, long-term data stewardship, open science, and scientific reuse. Each stage addressed a different operational need, beginning before eclipse deployment and continuing through validation, public archiving, and scientific analysis. Together, these stages transformed distributed volunteer-submitted audio recordings into structured, documented, publicly accessible NASA-funded research assets.
+
+                <h4>Stage 0: Pre-Eclipse Infrastructure and Deployment Preparation</h4>
+
+                <p>Severino, M., & Winter, H. (2026). Eclipse Soundscapes Data Management: Pre-Eclipse Infrastructure and 
+                Deployment Preparation (Stage 0). Zenodo. <a href="https://doi.org/10.5281/zenodo.20413370">
+                        https://doi.org/10.5281/zenodo.20413370</a></p>
+
+                <p>Stage 0 focused on building the operational foundation required to support geographically distributed eclipse data collection at national scale. This stage included AudioMoth device preparation, accessibility modifications, ES ID # assignment systems, metadata collection workflows, participant training materials, deployment logistics, and planning for downstream data stewardship and archival workflows. The 2023 annular eclipse served as both a scientific investigation and a large-scale operational beta test that informed improvements for the 2024 total solar eclipse campaign.</p>
+
+                Related Citations and Resources:
                 <ul>
-                    <li>
-                        Analysis code repository: https://github.com/BrentPease1/eclipse-traits
-                    </li>
-                    <li>
-                        Companion Zenodo record archiving, structured analysis scripts, and derived outputs. 
-                        https://doi.org/10.5281/zenodo.15790879 
-   
+                        <li>Severino, M., & Kline, T. (2025, November 24). Eclipse Soundscapes Apprentice Role Curriculum: 
+                                Solar Eclipses and Multi-Sensory Observing (Informal Education). 
+                                Zenodo. <a href="https://doi.org/10.5281/zenodo.17703003">https://doi.org/10.5281/zenodo.17703003</a></li>
+                        <li>Severino, M., & Bauer, D. J. (2026). Eclipse Soundscapes Observer Role Training and Resources Manual (2023–2024). 
+                                Zenodo. <a href="https://doi.org/10.5281/zenodo.18633602<">https://doi.org/10.5281/zenodo.18633602<</a>/li>
+                        <li>Severino, M., Winter, H., & Bauer, D. J. (2026). Eclipse Soundscapes Data Collector Role Training and Implementation Manual 
+                                (2023–2024). 
+                                Zenodo. <a href="https://doi.org/10.5281/zenodo.18623443">https://doi.org/10.5281/zenodo.18623443</a></li>
                 </ul>
-        </ul>
-        
-        Stage 4 analytical workflows are documented separately to preserve a clear methodological 
-        distinction between raw data stewardship (Stages 1–3) and scientific analysis processes (Stage 4).
+
+                <h4>Stage 1: Receipt, Sorting, and Metadata Organization</h4>
+
+                <p>Severino, M., & Winter, H. (2026). Eclipse Soundscapes Data Management: Receipt, Sorting, 
+                and Metadata Organization (Stage 1). Zenodo. <a href="https://doi.org/10.5281/zenodo.19471425">
+                        https://doi.org/10.5281/zenodo.19471425</a></p>
+
+                <p>Stage 1 transformed returned participant materials into organized, traceable site-level records. 
+                This included receiving mailed microSD cards, consolidating participant-submitted metadata, reconciling handwritten 
+                and online records, organizing physical audio media by ES ID #, and deriving eclipse timing and coverage information 
+                using NASA eclipse prediction datasets. The outputs of Stage 1 established the structured metadata relationships 
+                required for downstream validation, processing, archiving, and analysis workflows.</p>
+
+                Related Citations and Resources:
+                <ul>
+                        <li>Winter, H., & Goncalves, J. (2026). EPTT (Eclipse Phase Timing Tool) [Computer software]. GitHub. 
+                                <a href="https://github.com/ARISA-Lab-LLC/ESCSP-Eclipse-Phase-Timing-Tool">
+                                        https://github.com/ARISA-Lab-LLC/ESCSP-Eclipse-Phase-Timing-Tool</a>/li>
+                        <li>Espenak, F. (n.d.). Eclipse predictions by Fred Espenak, NASA’s GSFC Eclipse Web Site. NASA Goddard Space 
+                                Flight Center. <a href="http://eclipse.gsfc.nasa.gov/eclipse.html"> 
+                                        http://eclipse.gsfc.nasa.gov/eclipse.html</a>
+                                </li>
+
+                </ul>      
+                <h4>Stage 2: Data Processing and Validation</h4>
+
+                <p>Severino, M., & Winter, H. (2026). Eclipse Soundscapes Data Management: Data Processing (Stage 2). 
+                Zenodo. <a href="https://doi.org/10.5281/zenodo.18683402">https://doi.org/10.5281/zenodo.18683402</a></p>
+
+                <p>Stage 2 focused on centralized audio ingestion, validation, timestamp verification, metadata reconciliation, 
+                        and preparation of datasets for analysis and public sharing. During this stage, returned audio recordings 
+                        were processed using custom open-source tools developed by the ES team, including ES WAVES and ES AMES. 
+                        The project implemented scalable infrastructure capable of processing large volumes of participant-submitted 
+                        microSD cards while preserving all raw audio data without modification. Stage 2 established the validated 
+                        dataset structure required for long-term preservation and scientific analysis.</p>
+
+                Related Citations and Resources:
+                <ul>
+                        <li>Winter, H., & Goncalves, J. (2026). ES WAVES (Eclipse Soundscapes WAV Audio Validation & Extraction Suite) 
+                                [Computer software]. GitHub. 
+                                <a href="https://github.com/ARISA-Lab-LLC/ESCSP-ES-WAV-Audio-Validation-Extraction-Suite">
+                                        https://github.com/ARISA-Lab-LLC/ESCSP-ES-WAV-Audio-Validation-Extraction-Suite
+                                </a></li>
+                        <li>Winter, H., & Goncalves, J. (2026). ES AMES (Eclipse Soundscapes AudioMoth Metadata Extractor Suite) 
+                                [Computer software]. GitHub. 
+                                <a href="https://github.com/ARISA-Lab-LLC/ESCSP-ES-AMES-AudioMoth-Metadata-Extractor-Suite">
+                                        https://github.com/ARISA-Lab-LLC/ESCSP-ES-AMES-AudioMoth-Metadata-Extractor-Suite</a></li>
+
+                </ul>
+
+                <h4>Stage 3: Public Data Sharing and Open Archiving</h4>
+
+
+                </p>Severino, M., & Winter, H. (2026). Eclipse Soundscapes Data Management: Public Audio Data Sharing (Stage 3).
+                 Zenodo.<a href="https://doi.org/10.5281/zenodo.18683437">https://doi.org/10.5281/zenodo.18683437</a> </p>
+
+
+                <p>Stage 3 transformed validated site-level datasets into publicly archived, DOI-assigned research records published 
+                        through the Eclipse Soundscapes Zenodo Community. This stage included dataset packaging, metadata 
+                        standardization, README generation, integrity verification, DOI assignment, and automated repository upload 
+                        workflows using the Automated Zenodo Upload Software (AZUS). These workflows established the project’s long-term 
+                        open-science infrastructure and ensured that datasets remained findable, accessible, interoperable, reusable, 
+                        and citable for future scientific and educational use.</p>
+
+
+                Related Citations and Resources:
+                <ul>
+                        <li>Winter, H., & Goncalves, J. (2026). AZUS (Automated Zenodo Upload Software) [Computer software]. 
+                                GitHub.
+                                <a href="https://github.com/ARISA-Lab-LLC/AZUS-Automated-Zenodo-Upload-Software">
+                                        https://github.com/ARISA-Lab-LLC/AZUS-Automated-Zenodo-Upload-Software</a>
+                                </li>
+                        </ul>
+
+                <h4>Stage 4: Scientific Analysis and Research Use</h4>
+
+
+                <p>Stage 4 involves the scientific analysis and interpretation of validated eclipse soundscape datasets. 
+                        Analysis workflows utilized datasets verified during earlier stages to investigate eclipse-related 
+                        environmental and animal vocalization changes across hundreds of recording sites. This stage also includes 
+                        broader scientific interpretation, publication development, and continued reuse of Eclipse Soundscapes datasets 
+                        and infrastructure for future research, education, and open-science applications.</p>
+
+
+                Related Citations and Resources:
+                <ul>
+                        <li>Pease, B., Gilbert, N., & Severino, M. (2026). Eclipse Soundscapes Preliminary Findings 
+                                – How Eclipses Affect Nature as determined by Sound (Recorded Webinar). 
+                                Zenodo.<a href="https://doi.org/10.5281/zenodo.18613979">https://doi.org/10.5281/zenodo.18613979</a> 
+                        </li>
+                        <li>Gilbert, N. A., Pease, B. S., Severino, M., & Winter, H. III. (2026). 
+                                Photic niche explains avian behavioral responses to solar eclipses. 
+                                Ecology and Evolution, 16(2), e73090.
+                                <a href="https://doi.org/10.1002/ece3.73090">https://doi.org/10.1002/ece3.73090</a>
+                        </li>
+                        <li>Analysis code repository: <a href="https://github.com/BrentPease1/eclipse-traits">
+                                https://github.com/BrentPease1/eclipse-traits</a>
+                        </li>
+                        <li>Companion Zenodo record archiving structured analysis scripts and derived outputs: 
+                               <a href="https://doi.org/10.5281/zenodo.15790879[r]">https://doi.org/10.5281/zenodo.15790879[r]</a> 
+
+                        </li>
+                </ul>   
 
 
         <h1>Public Archiving, Privacy, and Data Transparency</h1>
@@ -139,13 +274,13 @@
         </ul>
         <h1>Citations</h1>
         <h2>Individual Site Citation: APA Citation (7th edition)</h2>
-        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientist. (2025). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}</p>
+        <p>Winter, H., Severino, M., & Volunteer Scientist. (2026). <i>$year solar eclipse soundscapes audio data</i> [Audio dataset, ES ID# $esid]. Zenodo.{Insert DOI}</p>
         <p>
                 Collected by volunteer scientists as part of the Eclipse Soundscapes Project.<br>
                 This project is supported by NASA award No. 80NSSC21M0008.
         </p>
         <h2>Eclipse Community Citation</h2>
-        <p>ARISA Lab, L.L.C., Winter, H., Severino, M., & Volunteer Scientists. <i>2023 and 2024 solar eclipse soundscapes audio data</i> [Collection of audio datasets]. Eclipse Soundscapes Community, Zenodo. <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a></p>
+        <p>Winter, H., Severino, M., & Volunteer Scientists. <i>2023 and 2024 solar eclipse soundscapes audio data</i> [Collection of audio datasets]. Eclipse Soundscapes Community, Zenodo. <a href="https://zenodo.org/communities/eclipsesoundscapes/">https://zenodo.org/communities/eclipsesoundscapes/</a></p>
         <p>
                 Collected by volunteer scientists as part of the Eclipse Soundscapes Project<br>
                 This project is supported by NASA award No. 80NSSC21M0008.

@@ -38,7 +38,10 @@ azus/
 │   ├── successful_results.csv           ← Created on first successful upload
 │   └── failed_results.csv              ← Created on first failed upload
 │
-├── Resources/                           ← Config, templates, shared data files
+├── Resources/                           ← Config, templates, shared data files, prep tools
+│   ├── prepare_dataset.py               ← Prepare ONE raw ESID into a staging package
+│   ├── prep_all_datasets.py             ← Batch-prepare every ESID in a raw-data folder
+│   ├── finish_stuck_uploads.py          ← Re-run interrupted uploads (auto-discovers stuck ESIDs)
 │   ├── project_config.json              ← Project identity (creators, funding, etc.)
 │   ├── config.json                      ← Upload configuration (YOU CREATE THIS)
 │   ├── set_env.sh                       ← API credentials (YOU CREATE THIS)
@@ -54,12 +57,15 @@ azus/
 │   ├── file_list_data_dict.csv          ← Data dictionary for file_list.csv
 │   ├── file_list_Template.csv           ← Template for file manifests
 │   ├── License.txt                      ← CC BY 4.0 license text
-│   ├── AudioMoth_Operation_Manual.pdf   ← Uploaded to each Zenodo record
-│   └── set_env.sh.example               ← Safe template (no real credentials)
+│   └── AudioMoth_Operation_Manual.pdf   ← Uploaded to each Zenodo record
 │
+├── Raw_Data/                            ← Raw ESID folders go here (input to prepare_dataset.py)
 ├── Staging_Area/                        ← Prepared datasets ready for upload
-│   └── ESID_XXX/                        ← One subdirectory per dataset
+│   └── ESID_XXX_Staging/                ← One subdirectory per dataset (after prep)
 │       └── ... (see Staging Area section below)
+├── Uploaded_Data/                       ← Datasets renamed here after successful upload
+│   └── ESID_XXX_Uploaded/               ← Original staging folder + upload_state.json
+├── Records/                             ← Result CSVs + uploaded_files.txt tracker
 │
 ├── templates/                           ← .example files for new project setup
 │   ├── config.json.example
@@ -70,11 +76,31 @@ azus/
 │   ├── references.csv.example
 │   └── set_env.sh.example
 │
-├── standalone_tasks.py                  ← MAIN ENTRY POINT
-├── standalone_uploader.py               ← Zenodo API client
-├── prepare_dataset.py                   ← Dataset preparation script
+├── models/                              ← Pydantic data models (audiomoth, invenio)
+├── Guides/                              ← Documentation (this file + others)
+│
+├── standalone_tasks.py                  ← MAIN ENTRY POINT — upload orchestration
+├── standalone_uploader.py               ← Zenodo / InvenioRDM API client
 ├── requirements-standalone.txt          ← Python dependencies
 └── README.md
+```
+
+### Data flow between folders
+
+```
+Raw_Data/ESID_NNN/                     ─prepare_dataset.py──→ Staging_Area/ESID_NNN_Staging/
+                                                                       │
+                                                              ┌────────┴──────────┐
+                                                              │ standalone_tasks  │
+                                                              │   .py upload      │
+                                                              └────────┬──────────┘
+                                                                       │
+                                                          ┌────success─┴────failure─┐
+                                                          ↓                          ↓
+                                          Uploaded_Data/ESID_NNN_Uploaded/    (folder stays in
+                                          + entry in                          Staging_Area/ with
+                                          Records/uploaded_files.txt          upload_state.json
+                                                                              for the next resume)
 ```
 
 > ⚠️ **`Resources/config.json` and `Resources/set_env.sh` are NOT included in the
@@ -128,7 +154,9 @@ Staging_Area/
 │   ├── WAV_data_dict.csv
 │   ├── file_list_data_dict.csv
 │   ├── AudioMoth_Operation_Manual.pdf
-│   └── License.txt
+│   ├── License.txt
+│   └── upload_state.json                ← Auto-written on draft creation; enables
+│                                          resume on re-run (NOT uploaded to Zenodo)
 │
 ├── ESID_005/
 │   └── ... (same structure)
@@ -150,6 +178,7 @@ Staging_Area/
 | `*_data_dict.csv` | Yes | Data dictionaries |
 | `AudioMoth_Operation_Manual.pdf` | Yes | Device documentation |
 | `License.txt` | Yes | CC BY 4.0 license |
+| `upload_state.json` | No | Resume state: holds Zenodo `record_id` of the draft so a re-run can pick up where it left off. Created by `standalone_tasks.py` when the draft is first created; travels with the staging folder to `Uploaded_Data/` after success. Delete this file to force a fresh draft on next run. |
 
 ### ZIP archive contents
 
