@@ -7,6 +7,19 @@
 # API credentials and local paths
 Resources/set_env.sh
 Resources/config.json
+# set_env.sh anywhere in the tree (the historical leak was at the project root)
+set_env.sh
+**/set_env.sh
+# Generic environment files
+.env
+.env.*
+*.env
+
+# Runtime upload state and request logs (may contain Zenodo draft IDs / URLs)
+upload_state.json
+**/upload_state.json
+*_request_log.json
+**/*_request_log.json
 
 # =============================================================
 # GENERATED OUTPUT — do not commit
