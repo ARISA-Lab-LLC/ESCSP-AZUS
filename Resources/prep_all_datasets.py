@@ -128,6 +128,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
 _UPLOADED_DATA = _PROJECT_ROOT / "Uploaded_Data"
 
+# Sentinel file that prepare_dataset.py touches as its absolute last
+# action.  Its presence inside a Staging_Area/ESID_NNN_Staging/ folder
+# is the authoritative signal that preparation finished cleanly.
+# A folder WITHOUT this sentinel is treated as INCOMPLETE and re-prepped
+# (covers interruptions like Ctrl+C, kill -9, or a partial cross-filesystem
+# copy that left a fully-named but content-incomplete directory in place).
+_PREP_SENTINEL = ".prep_complete"
+
 
 # =====================================================================
 #  Discovery
@@ -198,29 +206,42 @@ def already_prepared(esid_padded: str) -> Optional[Path]:
     Checks the two well-known "this ESID is done" locations under the
     project root, in this order:
 
-        1. ``Staging_Area/ESID_NNN_Staging/``
-           Set by ``prepare_dataset.py`` after a successful prep.
-           Means: this ESID was prepared.  Upload may or may not have
-           happened yet.
+        1. ``Staging_Area/ESID_NNN_Staging/`` PLUS its ``.prep_complete``
+           sentinel file (both must be present).  The sentinel is the
+           last thing ``prepare_dataset.py`` writes; if it is missing,
+           the prep was interrupted and the folder must be re-prepped.
 
         2. ``Uploaded_Data/ESID_NNN_Uploaded/``
            Set by ``standalone_tasks.py`` after a successful upload.
-           Means: this ESID was prepared AND uploaded.
-
-    Either one is enough to count as "already prepared" — both
-    represent work we should not redo.
+           Means: this ESID was prepared AND uploaded.  Folder existence
+           alone is sufficient here — an upload could only have completed
+           against a prep-complete folder in the first place.
 
     Args:
         esid_padded: The 3-digit zero-padded ESID string (e.g., "073").
 
     Returns:
-        The path of the existing folder if one was found, or
-        ``None`` if neither folder exists (meaning: this ESID has
-        NOT been prepared yet and should be processed).
+        The path of the fully prepared folder if one was found, or
+        ``None`` if neither location qualifies (meaning: this ESID has
+        NOT been fully prepared yet and should be processed).  A folder
+        present in Staging_Area/ but missing the ``.prep_complete``
+        sentinel ALSO returns ``None`` — the re-prep flow's own cleanup
+        will overwrite that partial folder.
     """
     staging = _STAGING_AREA / f"ESID_{esid_padded}_Staging"
     if staging.is_dir():
-        return staging
+        if (staging / _PREP_SENTINEL).is_file():
+            return staging
+        # Directory exists but the sentinel is missing — treat as INCOMPLETE.
+        # This is the classic interrupted-prep recovery path.  The next
+        # prepare_dataset.py run will remove this stale folder during its
+        # own pre-move cleanup (see prepare_dataset.py: "Replacing existing
+        # staging folder").
+        logger.warning(
+            "Found incomplete staging folder (no %s sentinel): %s — "
+            "will re-prepare.",
+            _PREP_SENTINEL, staging,
+        )
 
     uploaded = _UPLOADED_DATA / f"ESID_{esid_padded}_Uploaded"
     if uploaded.is_dir():

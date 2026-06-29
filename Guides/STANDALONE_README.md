@@ -428,6 +428,74 @@ grep '\[ESID 012\]' azus_upload.log
 - The "Proceed? (yes/no)" confirmation runs **once before any workers
   start** — exactly as in sequential mode.
 
+### Interrupted-preparation detection
+
+`prepare_dataset.py` does not just `shutil.move()` the finished staging
+folder into `Staging_Area/` and call it done. The risk being avoided:
+if the move is an interruptible cross-filesystem copy (raw data on one
+drive, AZUS project root on another), a Ctrl+C / kill / power loss in
+the middle could leave a half-populated directory under the final name
+`Staging_Area/ESID_NNN_Staging/`. `prep_all_datasets.py`'s `is_dir()`
+check alone could not tell that apart from a complete folder, so the
+broken ESID would be silently skipped on the next batch run.
+
+Two complementary protections are in place:
+
+**1. Two-phase atomic move (`prepare_dataset.py`).**
+
+```
+Phase 1: shutil.move(output_dir, Staging_Area/.ESID_NNN_Staging.partial)
+         ↑ slow, possibly cross-filesystem, can be interrupted mid-copy.
+         If interrupted: only the hidden ".partial" name exists.
+         The final ESID_NNN_Staging name never appears in a partial state.
+
+Phase 2: os.rename(.partial → ESID_NNN_Staging)
+         ↑ same filesystem (both inside Staging_Area/), metadata-only,
+         atomic by POSIX guarantee.  Cannot be partial.
+```
+
+Any stale `.partial/` from a prior interrupted run, and any existing
+final `ESID_NNN_Staging/` from a previous prep of the same ESID, are
+removed before the new move — so re-prep is fully idempotent.
+
+**2. `.prep_complete` sentinel — written LAST.**
+
+After the move, after the summary banner, after every other action,
+`prepare_dataset.py` does:
+
+```python
+(staging_folder / ".prep_complete").touch()
+```
+
+That `touch()` is literally the last line of `main()`. If the script
+is killed at any earlier point, the folder exists without the sentinel.
+
+`prep_all_datasets.already_prepared()` requires BOTH:
+1. `Staging_Area/ESID_NNN_Staging/` is a directory, AND
+2. `Staging_Area/ESID_NNN_Staging/.prep_complete` is a regular file.
+
+A folder missing the sentinel logs a warning and is re-prepped:
+
+```
+WARNING - Found incomplete staging folder (no .prep_complete sentinel):
+          .../Staging_Area/ESID_073_Staging — will re-prepare.
+```
+
+**`Uploaded_Data/ESID_NNN_Uploaded/` does NOT require the sentinel** —
+a folder in `Uploaded_Data/` is the artifact of a successful upload,
+which could only have happened against a prep-complete folder in the
+first place. The sentinel rides along inside the moved folder, but the
+skip check accepts `Uploaded_Data/` folders on existence alone (so you
+can restore from backup without forging a sentinel).
+
+**Forcing a re-prep of a specific ESID:**
+
+```bash
+rm Staging_Area/ESID_073_Staging/.prep_complete   # gentle nudge — keeps the folder
+# OR
+rm -rf Staging_Area/ESID_073_Staging/             # full clean re-prep
+```
+
 ### Automatic retry on transient failures
 
 Two retry policies are in effect — both 3 attempts with backoff, tuned to the

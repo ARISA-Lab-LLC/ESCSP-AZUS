@@ -25,6 +25,11 @@ Python code.
 - **Concurrent ESID uploads** — `--workers N` uploads N ESID datasets at the
   same time. Default `1` (sequential, identical to original behavior).
   Example: `python standalone_tasks.py --config Resources/config.json --workers 3`.
+- **Interrupted-prep detection** — `prepare_dataset.py` moves into
+  `Staging_Area/` via a two-phase atomic pattern and writes a `.prep_complete`
+  sentinel file as its very last action. `prep_all_datasets.py`'s skip check
+  requires that sentinel, so an interrupted preparation cannot be silently
+  skipped on the next batch run — the partial folder is re-prepped instead.
 
 See `Guides/STANDALONE_README.md` for the full retry/resume/concurrency behavior.
 

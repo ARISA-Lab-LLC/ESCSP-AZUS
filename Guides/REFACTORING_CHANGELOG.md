@@ -90,6 +90,78 @@ recovery flow becomes:
 
 ---
 
+## June 2026 — Two-phase atomic move + `.prep_complete` sentinel
+
+Closes a partial-folder race condition between `Resources/prepare_dataset.py`
+and `Resources/prep_all_datasets.py`.  Before this change, an interrupted
+cross-filesystem `shutil.move()` at the end of `prepare_dataset.py` could
+leave a partial directory under the final name `Staging_Area/ESID_NNN_Staging/`,
+and `prep_all_datasets.already_prepared()`'s `is_dir()` check could not
+distinguish it from a complete folder — so the broken ESID would be silently
+skipped on the next batch run.
+
+### Two complementary layers
+
+**1. Two-phase atomic move (`prepare_dataset.py`)**
+- Phase 1: `shutil.move(output_dir, Staging_Area/.ESID_NNN_Staging.partial)`
+  — the slow, possibly cross-filesystem copy.  If interrupted, only the
+  hidden `.partial` name exists; the final name never appears.
+- Phase 2: `os.rename(.partial → ESID_NNN_Staging)` — same filesystem,
+  metadata-only, atomic by POSIX guarantee.  Cannot be partial.
+- Stale `.partial/` from a prior interrupted run is cleaned up before the
+  new move, so re-prep is fully idempotent.
+- `import os` added to `prepare_dataset.py` imports.
+
+**2. `.prep_complete` sentinel — written LAST (`prepare_dataset.py`)**
+- A zero-byte `.prep_complete` is `touch()`-ed inside the final folder
+  as the **absolute last line** of `main()` — after the move, after the
+  summary banner output.
+- If the script is killed at any earlier point, the folder is present
+  without the sentinel.
+
+**3. Sentinel-aware skip check (`prep_all_datasets.py`)**
+- `already_prepared()` now requires both: `Staging_Area/ESID_NNN_Staging/`
+  is a directory AND `Staging_Area/ESID_NNN_Staging/.prep_complete` is a
+  regular file.
+- A folder missing the sentinel logs a WARNING and is treated as
+  NOT-prepared, so the next prep run re-prepares it (and the existing
+  partial folder is cleaned up by the move block's pre-existing
+  "replacing existing staging folder" logic).
+- `Uploaded_Data/ESID_NNN_Uploaded/` check unchanged — folder existence
+  there implies a successful upload, which implies complete prep.
+
+### Why both layers
+
+- Layer 1 alone would still let a future code path that wrote to
+  `Staging_Area/` outside the normal flow leave a partial folder under
+  the final name.
+- Layer 2 alone would not stop an interrupted copy from briefly leaving
+  a partial folder under the final name (the sentinel would just be
+  missing during that window, but a concurrent scan could still see the
+  half-written tree).
+- Together: any folder visible under `Staging_Area/ESID_NNN_Staging/`
+  either carries the sentinel (complete) or doesn't (re-prep).  No
+  silent skips.
+
+### Files touched
+- `Resources/prepare_dataset.py` — `import os` added; move block (lines
+  ~1178–1194) replaced with the two-phase pattern; sentinel `touch()`
+  appended as the new last line of `main()`.
+- `Resources/prep_all_datasets.py` — new `_PREP_SENTINEL = ".prep_complete"`
+  constant; `already_prepared()` updated to require the sentinel inside
+  `Staging_Area/` paths.
+
+### Backward compatibility
+- Pre-existing `Staging_Area/ESID_NNN_Staging/` folders from before this
+  change do NOT carry the sentinel.  After upgrade, they will be flagged
+  as incomplete on the next `prep_all_datasets.py` run and re-prepared.
+  To skip the re-prep, run once:
+  `touch Staging_Area/ESID_*_Staging/.prep_complete`.
+- Pre-existing `Uploaded_Data/ESID_NNN_Uploaded/` folders are unaffected
+  — that check still passes on directory existence alone.
+
+---
+
 ## June 2026 — Stuck-upload recovery tool (`Resources/finish_stuck_uploads.py`)
 
 After a batch upload, some ESIDs may have exhausted all three PUT

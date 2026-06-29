@@ -155,8 +155,13 @@ Staging_Area/
 │   ├── file_list_data_dict.csv
 │   ├── AudioMoth_Operation_Manual.pdf
 │   ├── License.txt
-│   └── upload_state.json                ← Auto-written on draft creation; enables
-│                                          resume on re-run (NOT uploaded to Zenodo)
+│   ├── upload_state.json                ← Auto-written on draft creation; enables
+│   │                                      resume on re-run (NOT uploaded to Zenodo)
+│   └── .prep_complete                   ← Empty sentinel; presence means
+│                                          preparation finished cleanly.  Last
+│                                          file prepare_dataset.py writes.
+│                                          prep_all_datasets.py's skip check
+│                                          REQUIRES this file (NOT uploaded to Zenodo)
 │
 ├── ESID_005/
 │   └── ... (same structure)
@@ -179,6 +184,7 @@ Staging_Area/
 | `AudioMoth_Operation_Manual.pdf` | Yes | Device documentation |
 | `License.txt` | Yes | CC BY 4.0 license |
 | `upload_state.json` | No | Resume state: holds Zenodo `record_id` of the draft so a re-run can pick up where it left off. Created by `standalone_tasks.py` when the draft is first created; travels with the staging folder to `Uploaded_Data/` after success. Delete this file to force a fresh draft on next run. |
+| `.prep_complete` | No | Completion sentinel — empty file written as the **very last** action of `prepare_dataset.py`. Its presence proves preparation finished cleanly; its absence on a directory in `Staging_Area/` means the prep was interrupted, and `prep_all_datasets.py` will re-prep that ESID. Delete to force a re-prep without removing other files. |
 
 ### ZIP archive contents
 

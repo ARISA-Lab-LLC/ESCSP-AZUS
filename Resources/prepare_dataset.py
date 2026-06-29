@@ -20,15 +20,16 @@ Usage:
         --eclipse-type total [--resources-dir Resources] [--output-dir ...]
 """
 
+import argparse
 import csv
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
 import zipfile
-import argparse
 from pathlib import Path
 from string import Template
 from datetime import datetime
@@ -1175,23 +1176,46 @@ def main() -> None:
     # single, reviewable source of truth per dataset.
     create_upload_manifest(output_dir, esid)
 
-    # --- Move the completed staging folder into Staging_Area/ (success only) ---
+    # --- Two-phase atomic move into Staging_Area/ (success only) ---
     # Staging_Area is resolved relative to the project root (the parent of this
     # script's Resources/ directory) so the move works regardless of the current
     # working directory.  Reaching this point means preparation succeeded — the
     # earlier steps sys.exit() on failure.
+    #
+    # Phase 1 (slow, possibly cross-filesystem, INTERRUPTIBLE):
+    #   shutil.move into a hidden ".<name>.partial" path under Staging_Area/.
+    #   If interrupted mid-copy, only this hidden name exists; the final name
+    #   never appears in Staging_Area/.  Tools that scan Staging_Area for ESID
+    #   subfolders ignore the leading dot, so the partial is invisible to them.
+    # Phase 2 (fast, same filesystem, ATOMIC by POSIX guarantee):
+    #   os.rename() the partial path to the final name.  This is a metadata-
+    #   only operation within Staging_Area/ — it cannot be partial.
+    # Stale cleanup:
+    #   Any leftover .partial/ or pre-existing final/ from a prior interrupted
+    #   run is removed first, so re-prep is fully idempotent.
     staging_area_dir = Path(__file__).resolve().parent.parent / "Staging_Area"
-    destination = staging_area_dir / output_dir.name
-    if output_dir.resolve() == destination.resolve():
+    final_destination = staging_area_dir / output_dir.name
+    partial_destination = staging_area_dir / f".{output_dir.name}.partial"
+    if output_dir.resolve() == final_destination.resolve():
         logger.info("Staging folder already in Staging_Area: %s", output_dir)
     else:
         staging_area_dir.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            logger.warning("Replacing existing staging folder: %s", destination)
-            shutil.rmtree(destination)
-        shutil.move(str(output_dir), str(destination))
-        logger.info("Moved staging folder to: %s", destination)
-        output_dir = destination
+        if partial_destination.exists():
+            logger.warning(
+                "Removing stale partial from a prior interrupted run: %s",
+                partial_destination,
+            )
+            shutil.rmtree(partial_destination)
+        if final_destination.exists():
+            logger.warning(
+                "Replacing existing staging folder: %s", final_destination
+            )
+            shutil.rmtree(final_destination)
+        logger.info("Phase 1: copying into partial path %s", partial_destination)
+        shutil.move(str(output_dir), str(partial_destination))
+        logger.info("Phase 2: atomic rename -> %s", final_destination)
+        os.rename(str(partial_destination), str(final_destination))
+        output_dir = final_destination
 
     # --- Summary ---
     logger.info("=" * 70)
@@ -1207,6 +1231,18 @@ def main() -> None:
     logger.info("  1. Verify files in: %s", output_dir)
     logger.info("  2. Update Resources/config.json")
     logger.info("  3. Run: python standalone_tasks.py")
+
+    # --- VERY LAST ACTION: completion sentinel ---
+    # ``.prep_complete`` is the marker prep_all_datasets.py looks for to decide
+    # whether a Staging_Area folder is fully prepared.  Writing this LAST (after
+    # the move and after the summary banner) means:
+    #   * If the script is killed at any earlier point, the folder is present
+    #     without the sentinel and the next batch run will correctly re-prep it.
+    #   * Only a fully successful prepare_dataset.py run produces a folder that
+    #     other tools will treat as done.
+    sentinel = output_dir / ".prep_complete"
+    sentinel.touch()
+    logger.info("Wrote completion sentinel: %s", sentinel)
 
 
 if __name__ == "__main__":
