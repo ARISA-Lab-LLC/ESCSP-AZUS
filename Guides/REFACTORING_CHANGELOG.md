@@ -8,6 +8,57 @@ configuration files, not Python code.
 
 ---
 
+## July 2026 — `--defer-zip`: two-phase upload for very large ZIPs
+
+Data ZIPs (up to 43 GB) fail at a high rate because Zenodo only accepts
+them as a single HTTP PUT, and concurrent workers split the upload
+bandwidth — making each huge transfer slower and more exposed to
+connection drops.
+
+### New flag: `standalone_tasks.py --defer-zip`
+
+Phase 1 creates each record, uploads every file EXCEPT the data ZIP,
+reserves the DOI, and **holds back the community-review submission**.
+The dataset folder stays in `Staging_Area/` with its `upload_state.json`
+— deliberately identical to the state a "stuck" upload leaves behind.
+
+Phase 2 is the existing recovery tool, unchanged:
+`python Resources/finish_stuck_uploads.py --workers 1` resumes each
+draft, skips committed files, uploads the ZIP at full bandwidth (one at
+a time), submits the record for review, and archives the folder to
+`Uploaded_Data/`.
+
+### Why review submission is deferred
+
+Accepting a record from the community review queue **publishes** it, and
+published records cannot accept new files. If phase 1 submitted the
+ZIP-less record and a manager accepted it before phase 2 ran, the ZIP
+could never be attached without a new version + new DOI. Deferral closes
+that race; phase 2 submits review right after the ZIP commits.
+
+### Changes
+
+- `standalone_uploader.py` — `upload_to_zenodo()` gained
+  `submit_review: bool = True`; the community-submission block is now
+  guarded by it, with a "DEFERRED" log line when held back.
+- `standalone_tasks.py` —
+  - New `--defer-zip` CLI flag (help text written for non-programmers).
+  - `upload_dataset()` filters the ZIP out of the upload list and passes
+    `submit_review=False` when deferring.
+  - `_process_one_dataset()` counts deferred successes under a new
+    `deferred` stat and deliberately skips the tracker append, the
+    success-CSV row, and the move to `Uploaded_Data/` (the record is not
+    complete yet).
+  - Summary banner shows the `Deferred` count and the exact
+    `finish_stuck_uploads.py` command to finish.
+- `Resources/finish_stuck_uploads.py` — **no changes needed**; deferred
+  folders are indistinguishable from stuck ones by design.
+- Docs: `README.md` (Upload Resilience bullet + Quick Start step 7c),
+  `Guides/STANDALONE_README.md` (full two-phase section with a
+  phase-by-phase table and worker guidance).
+
+---
+
 ## June 2026 — Resilient resume: clean up pending slots + tolerate broken /draft
 
 Two related issues:
@@ -87,6 +138,89 @@ recovery flow becomes:
 
 ### Files touched
 - `standalone_uploader.py`
+
+---
+
+## June 2026 — Content audit + legacy sentinel back-fill (`Resources/audit_prep_completeness.py`)
+
+A new tool that vets every prepared `Staging_Area/` and `Uploaded_Data/`
+folder by its actual contents — folder files plus `unzip -l` of the
+ZIP — against the truth set `prepare_dataset.py` would have produced.
+
+### Primary purpose: legacy migration
+
+The `.prep_complete` sentinel introduced earlier in this changelog is
+the marker `prep_all_datasets.py` trusts for fast skip decisions.
+Folders prepared before that change exist without the marker.  This
+tool's primary job is to vet them by content and **back-fill the
+sentinel on any folder it confirms as `Yes`** — bringing the whole
+repository into the sentinel world without manual `touch`-ing.
+
+### Secondary purpose: drift detection
+
+Use `--audit-all` to ignore the sentinel fast-path and deep-audit
+every folder — useful for catching folders that got corrupted after
+the sentinel was written (manual edits, partial filesystem writes,
+bugs).
+
+### Behavior
+
+For each ESID found in the raw-data folder, the tool:
+
+1. Locates the matching prepared folder under `Staging_Area/` (preferred)
+   or `Uploaded_Data/`.
+2. Fast path: if `.prep_complete` exists and `--audit-all` is not set,
+   marks `Yes` immediately.
+3. Deep path: lists ZIP contents via `unzip -l`, compares folder
+   basenames against `_HARDCODED_STAGING_FILES + resource_files_list.csv
+   companions + conditional files`, compares ZIP basenames against
+   `_HARDCODED_ZIP_ENTRIES + raw WAVs + raw CONFIG.TXT + companions +
+   conditional files`.
+4. Status decision (first match wins):
+   - Fast-path sentinel → `Yes`
+   - ZIP file missing → `No` (unambiguous)
+   - `resource_files_list.csv` unreadable / `unzip -l` failed → `Ambiguous`
+   - Required Set A or Set B miss → `No`
+   - Only `related_identifiers.csv` missing → `Ambiguous` (depends on Keywords)
+   - `CONFIG.TXT` absent from both raw and ZIP → `Ambiguous`
+   - Otherwise → `Yes`
+5. On `Yes`, `touch()` `.prep_complete` in the folder (back-fill,
+   idempotent).
+
+### Output
+
+A 4-column CSV: `ESID#, Staging Area, Uploaded Data, Prep Completed`,
+written to the current working directory with a timestamped filename
+(`prep_completeness_report_YYYYMMDD_HHMMSS.csv`).  Exit code `0` if
+no `No` rows, `1` otherwise.
+
+### CLI
+
+```
+python Resources/audit_prep_completeness.py <RAW_DATA_DIR>
+    [--resources-dir Resources]
+    [--output PATH]
+    [--audit-all]
+    [--verbose]
+```
+
+### Files touched
+
+- New: `Resources/audit_prep_completeness.py`
+- `README.md`: new bullet under Upload Resilience
+- `Guides/STANDALONE_README.md`: new "Content audit" section
+
+### Verified locally (synthetic fixture)
+
+- Fresh audit produces correct Yes/Yes/No across three ESIDs.
+- Sentinel back-fill writes `.prep_complete` on confirmed `Yes`.
+- Fast path returns `Yes` when sentinel is present even if contents are
+  missing (intentional — trust the sentinel by default).
+- `--audit-all` overrides the fast path and detects the missing content.
+- Missing required file → `No` with file name in details.
+- Missing ZIP → `No` (not `Ambiguous`).
+- Corrupt ZIP → `Ambiguous` with explanation.
+- Missing only `related_identifiers.csv` → `Ambiguous`.
 
 ---
 

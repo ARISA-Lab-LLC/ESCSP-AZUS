@@ -573,6 +573,7 @@ def upload_to_zenodo(
     request_log_path: Optional[str] = None,
     existing_draft_id: Optional[str] = None,
     state_file_path: Optional[str] = None,
+    submit_review: bool = True,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -594,6 +595,12 @@ def upload_to_zenodo(
         state_file_path: If provided, a small JSON file is written here (after
             the draft is created or located) with the record id and Zenodo URL.
             Used by the orchestrator to enable automatic resume on re-run.
+        submit_review: If False, skip the community-review submission even
+            when ``config.community_id`` is set.  Used by the ``--defer-zip``
+            workflow: the record must NOT enter the community review queue
+            until every file (including the deferred ZIP) is uploaded,
+            because a community manager accepting the record publishes it —
+            and published records cannot accept new files.
 
     Returns:
         Dictionary with keys:
@@ -825,7 +832,7 @@ def upload_to_zenodo(
         already_in_review = bool(
             draft_response and draft_response.get("parent", {}).get("review")
         )
-        if config.community_id and not already_in_review:
+        if config.community_id and not already_in_review and submit_review:
             logger.info("Submitting draft to community review queue...")
             review_response = submit_to_community_review(
                 credentials, record_id, config.community_id
@@ -836,6 +843,11 @@ def upload_to_zenodo(
             )
         elif config.community_id and already_in_review:
             logger.info("Community review already submitted — skipping resubmit")
+        elif config.community_id and not submit_review:
+            logger.info(
+                "Community review submission DEFERRED — will be submitted "
+                "on the run that uploads the remaining file(s)."
+            )
 
         # --- Publish if requested (skip if already published) ---
         already_published = bool(

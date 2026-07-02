@@ -428,6 +428,149 @@ grep '\[ESID 012\]' azus_upload.log
 - The "Proceed? (yes/no)" confirmation runs **once before any workers
   start** — exactly as in sequential mode.
 
+### Two-phase upload for very large ZIPs (`--defer-zip`)
+
+Data ZIPs can reach 40+ GB, and Zenodo only accepts them as a **single
+HTTP PUT** (multipart per-part uploads are blocked for regular API tokens).
+The longer a single transfer runs, the more likely a connection drop kills
+it — and with `--workers 3`, three huge ZIPs share your upload bandwidth,
+so each one takes ~3× longer and is ~3× more exposed to failure.
+
+`--defer-zip` splits the work into two phases so the huge transfers can run
+one at a time at full bandwidth:
+
+```bash
+# ---- PHASE 1 (fast) ----
+# Creates each Zenodo record, uploads every file EXCEPT the data ZIP,
+# and reserves the DOI. Records are NOT submitted for community review.
+# Each dataset folder stays in Staging_Area/ with its upload_state.json —
+# exactly the state a "stuck" upload leaves behind.
+python standalone_tasks.py --config Resources/config.json --workers 3 --defer-zip
+
+# ---- PHASE 2 (the big transfers) ----
+# finish_stuck_uploads.py finds every folder with an upload_state.json,
+# resumes each draft, skips the already-committed files, uploads the ZIP,
+# THEN submits the record for community review and archives the folder
+# to Uploaded_Data/. Use --workers 1 so each ZIP gets the whole pipe.
+# Re-run as many times as needed — completed ESIDs are skipped.
+python Resources/finish_stuck_uploads.py --workers 1
+```
+
+**Why community review is held back in phase 1 (important):** when a
+community manager **accepts** a record from the review queue, InvenioRDM
+**publishes** it — and published records cannot accept new files. If
+phase 1 submitted the ZIP-less record for review and a manager accepted it
+before phase 2 ran, the ZIP could never be attached (it would require a
+whole new record version with a new DOI). So `--defer-zip` defers the
+review submission too; phase 2 submits it automatically right after the
+ZIP is committed.
+
+**What phase 1 does and does not do:**
+
+| Action | Phase 1 (`--defer-zip`) | Phase 2 (`finish_stuck_uploads.py`) |
+|---|---|---|
+| Create draft record + reserve DOI | ✅ | (already exists — resumed) |
+| Upload README, CSVs, manuals, etc. | ✅ | (already committed — skipped) |
+| Upload the data ZIP | ❌ deferred | ✅ |
+| Submit for community review | ❌ deferred | ✅ after the ZIP commits |
+| Append to `uploaded_files.txt` | ❌ | ✅ |
+| Row in `successful_results.csv` | ❌ | ✅ |
+| Move folder to `Uploaded_Data/` | ❌ stays in `Staging_Area/` | ✅ |
+| Summary counter | `Deferred` | `Successful` |
+
+**Worker guidance for the two phases:**
+
+- Phase 1 files are small — `--workers 3` is safe and fast.
+- Phase 2 ZIPs are enormous — use `--workers 1` so each transfer gets your
+  full upload bandwidth and the shortest possible transfer window. This is
+  the whole point of deferring: shorter transfer time = fewer failures.
+
+**Re-running is safe.** Running phase 1 again with `--defer-zip` resumes
+each existing draft, skips every committed file, and still holds review
+back — it's idempotent. Running phase 2 repeatedly is the designed retry
+loop for stubborn ZIPs.
+
+### Content audit (`Resources/audit_prep_completeness.py`)
+
+`prep_all_datasets.py`'s skip check is intentionally cheap: it trusts
+the `.prep_complete` sentinel as a binary "did prep finish?" flag.
+That's perfect for the day-to-day batch workflow.
+
+But two cases call for something deeper:
+
+1. **Legacy folders that predate the sentinel.** They're (probably)
+   complete, they just don't have the marker. We want to verify the
+   contents and then back-fill the sentinel so the cheap skip works
+   from then on.
+2. **Silent corruption.** A bug, a manual edit, or a partial filesystem
+   write could leave a folder with the sentinel but missing files.
+   The cheap skip wouldn't catch it.
+
+`audit_prep_completeness.py` handles both. It walks raw ESID folders,
+finds the matching `Staging_Area/` or `Uploaded_Data/` entry, and
+runs a deep audit:
+
+- Expected folder contents derived from the `prepare_dataset.py`
+  hardcoded outputs + `Resources/resource_files_list.csv` companions.
+- Expected ZIP contents derived from raw WAVs + raw `CONFIG.TXT` +
+  the staging metadata + the same companions.
+- ZIP introspection via `unzip -l` (so the result matches what a
+  human sees on the shell).
+
+For each ESID it emits one row in a 4-column CSV:
+
+| Column | Value |
+|---|---|
+| `ESID#` | zero-padded 3-digit (`007`, `073`) |
+| `Staging Area` | basename of the matching folder, or empty |
+| `Uploaded Data` | basename of the matching folder, or empty |
+| `Prep Completed` | `Yes` / `No` / `Ambiguous` |
+
+The trichotomy:
+
+- **Yes** — every required file is in the folder and in the ZIP.
+- **No** — at least one required file is missing (or the ZIP itself
+  is missing — that's unambiguously incomplete).
+- **Ambiguous** — `unzip -l` failed (corrupt or missing utility);
+  `resource_files_list.csv` couldn't be read; the conditional
+  `related_identifiers.csv` is missing (could be intentional —
+  depends on site Keywords); or `CONFIG.TXT` is absent from both
+  raw and ZIP (could be intentional for sites without a real device
+  config).
+
+**Self-healing back-fill.** When the deep audit returns `Yes`, the
+script touches `.prep_complete` inside that folder. The next time
+`prep_all_datasets.py` runs, the cheap sentinel skip will fire for
+that ESID — no need to re-audit it. This is the legacy-folder
+migration path: one audit run brings the whole repo into the
+sentinel world.
+
+**Default vs. `--audit-all`.** By default the audit takes a fast
+path: if `.prep_complete` is already present, it trusts the sentinel
+and returns `Yes` without inspecting contents. Pass `--audit-all`
+to ignore the sentinel and deep-audit every folder — that's the
+"detect drift" mode.
+
+**Usage:**
+
+```bash
+# Default: vet pre-sentinel folders + back-fill sentinels
+python Resources/audit_prep_completeness.py /path/to/Raw_Data
+
+# Verbose per-ESID details (every missing file enumerated)
+python Resources/audit_prep_completeness.py /path/to/Raw_Data --verbose
+
+# Force-audit every folder regardless of sentinel (drift check)
+python Resources/audit_prep_completeness.py /path/to/Raw_Data --audit-all
+
+# Custom output path
+python Resources/audit_prep_completeness.py /path/to/Raw_Data --output /tmp/report.csv
+```
+
+The CSV is written to the current working directory by default
+(`prep_completeness_report_YYYYMMDD_HHMMSS.csv`). Exit code is `0`
+if no `No` rows were recorded, `1` otherwise — convenient for CI.
+
 ### Interrupted-preparation detection
 
 `prepare_dataset.py` does not just `shutil.move()` the finished staging

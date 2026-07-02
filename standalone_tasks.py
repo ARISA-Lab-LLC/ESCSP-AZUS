@@ -1268,6 +1268,7 @@ def upload_dataset(
     related_identifiers_csv: Optional[str] = None,
     references_csv: Optional[str] = None,
     project_config: Optional[Dict[str, Any]] = None,
+    defer_zip: bool = False,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
 
@@ -1286,6 +1287,12 @@ def upload_dataset(
             Overridden by a per-record file in the ESID staging directory
             if one exists.
         project_config: Parsed project_config.json.
+        defer_zip: If True, upload everything EXCEPT the data ZIP archive
+            and skip the community-review submission.  The record (and its
+            reserved DOI) is created on Zenodo, and upload_state.json is
+            left in the staging folder — exactly the state a "stuck" upload
+            leaves behind — so Resources/finish_stuck_uploads.py can upload
+            the ZIP and submit the record for review later.
 
     Returns:
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
@@ -1391,10 +1398,22 @@ def upload_dataset(
                 data.esid, exc,
             )
 
+    # When deferring the ZIP: drop it from the upload list and hold back
+    # the community-review submission.  Review must wait until the ZIP is
+    # on the record — a community manager accepting the record publishes
+    # it, and published records cannot accept new files.
+    files_to_upload = data.all_files
+    if defer_zip:
+        files_to_upload = [f for f in data.all_files if f != data.zip_file]
+        logger.info(
+            "  --defer-zip: skipping %s this run (%d of %d files will upload)",
+            Path(data.zip_file).name, len(files_to_upload), len(data.all_files),
+        )
+
     try:
         logger.info("Uploading to Zenodo...")
         result = upload_to_zenodo(
-            files=data.all_files,
+            files=files_to_upload,
             config=config,
             delete_on_failure=delete_failures,
             auto_publish=auto_publish,
@@ -1403,6 +1422,7 @@ def upload_dataset(
             ),
             existing_draft_id=existing_draft_id,
             state_file_path=str(state_file),
+            submit_review=not defer_zip,
         )
         return result
 
@@ -1560,6 +1580,7 @@ def _process_one_dataset(
     results_lock: threading.Lock,
     stats: Dict[str, int],
     stats_lock: threading.Lock,
+    defer_zip: bool = False,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
@@ -1622,6 +1643,13 @@ def _process_one_dataset(
         results_lock: Lock that guards both result CSV writes.
         stats: Shared statistics dict (modified in place).
         stats_lock: Lock that guards stat increments.
+        defer_zip: If True (the ``--defer-zip`` flag), the data ZIP is NOT
+            uploaded and the record is NOT submitted for community review.
+            On success the run is counted as "deferred" — the staging
+            folder stays in ``Staging_Area/`` with its ``upload_state.json``
+            so ``Resources/finish_stuck_uploads.py`` can upload the ZIP and
+            finish the record later.  Nothing is written to the success CSV
+            or the upload tracker, because the record is not complete yet.
 
     Returns:
         None.  All results are recorded via the result CSVs and the
@@ -1650,6 +1678,7 @@ def _process_one_dataset(
             related_identifiers_csv=related_identifiers_csv,
             references_csv=references_csv,
             project_config=project_config,
+            defer_zip=defer_zip,
         )
     except Exception as exc:
         logger.error("%s Unexpected error during upload: %s", tag, exc)
@@ -1667,6 +1696,24 @@ def _process_one_dataset(
     # two threads incrementing at once could lose updates.  Locking is cheap.
     with stats_lock:
         stats["total_processed"] += 1
+
+    if result["successful"] and defer_zip:
+        # Deferred success: the record and its reserved DOI exist on Zenodo
+        # with every file EXCEPT the data ZIP, and community review has NOT
+        # been submitted.  Deliberately skip the tracker append, the move to
+        # Uploaded_Data/, and the success-CSV row — the record is not
+        # complete.  The staging folder (with upload_state.json inside) is
+        # left in Staging_Area/, which is exactly the state
+        # finish_stuck_uploads.py looks for.
+        with stats_lock:
+            stats["deferred"] = stats.get("deferred", 0) + 1
+        logger.info(
+            "%s DONE (deferred) — record + DOI created, ZIP not uploaded. "
+            "Run 'python Resources/finish_stuck_uploads.py' to upload the "
+            "ZIP and submit the record for community review.",
+            tag,
+        )
+        return
 
     if result["successful"]:
         with stats_lock:
@@ -1742,6 +1789,7 @@ def upload_datasets(
     project_config: Optional[Dict[str, Any]] = None,
     esid_filter: Optional[List[str]] = None,
     workers: int = 1,
+    defer_zip: bool = False,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -1786,10 +1834,15 @@ def upload_datasets(
             ``1`` (default) means sequential — identical to the original
             behavior.  Values greater than 1 enable parallel uploads via
             a thread pool.  Must be >= 1.
+        defer_zip: If True, upload everything EXCEPT each dataset's data
+            ZIP and skip community-review submission.  Deferred datasets
+            stay in ``Staging_Area/`` and are counted under the
+            ``'deferred'`` stat.  Finish them later with
+            ``Resources/finish_stuck_uploads.py``.
 
     Returns:
         Dictionary with upload statistics:
-        {'total_processed', 'successful', 'failed', 'skipped'}.
+        {'total_processed', 'successful', 'failed', 'skipped', 'deferred'}.
     """
     if not datasets:
         raise ValueError("No datasets configured for upload")
@@ -1815,7 +1868,13 @@ def upload_datasets(
         tracker_path, tracker.get_count(),
     )
 
-    stats = {"total_processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+    stats = {
+        "total_processed": 0,
+        "successful": 0,
+        "failed": 0,
+        "skipped": 0,
+        "deferred": 0,
+    }
 
     # --- Locks for shared state (only consulted in the workers>1 path) ---
     # Created once and shared with every worker.  See the module-level
@@ -1880,6 +1939,7 @@ def upload_datasets(
             results_lock=results_lock,
             stats=stats,
             stats_lock=stats_lock,
+            defer_zip=defer_zip,
         )
 
         if workers == 1:
@@ -1994,6 +2054,22 @@ def main() -> None:
             "use 'grep \"[ESID XXX]\" azus_upload.log' to follow one dataset."
         ),
     )
+    parser.add_argument(
+        "--defer-zip", action="store_true",
+        help=(
+            "Two-phase upload, phase 1: create each Zenodo record, upload "
+            "every file EXCEPT the big data ZIP, and reserve the DOI — but "
+            "do NOT submit the record for community review yet. The dataset "
+            "folder stays in Staging_Area/ with its upload_state.json, "
+            "exactly like a 'stuck' upload. Phase 2: run "
+            "'python Resources/finish_stuck_uploads.py --workers 1' to "
+            "upload the ZIPs one at a time (full bandwidth each, fewest "
+            "failures) and submit each record for review. Review is held "
+            "back on purpose: if a community manager accepted a record "
+            "before its ZIP arrived, the record would be published and "
+            "could no longer accept files."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Validate --workers BEFORE any other work so errors come early ---
@@ -2070,6 +2146,12 @@ def main() -> None:
         )
     else:
         logger.info("Workers:      1 (sequential — one ESID dataset at a time)")
+    if args.defer_zip:
+        logger.info(
+            "Defer ZIP:    ON — data ZIPs will NOT be uploaded and records "
+            "will NOT be submitted for review this run. Finish later with "
+            "Resources/finish_stuck_uploads.py."
+        )
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -2123,6 +2205,7 @@ def main() -> None:
             project_config=project_config,
             esid_filter=args.esid,
             workers=args.workers,
+            defer_zip=args.defer_zip,
         )
 
         # --- Display summary ---
@@ -2133,6 +2216,8 @@ def main() -> None:
         logger.info("Successful:      %d", stats["successful"])
         logger.info("Failed:          %d", stats["failed"])
         logger.info("Skipped:         %d", stats["skipped"])
+        if stats.get("deferred"):
+            logger.info("Deferred:        %d (ZIP not uploaded yet)", stats["deferred"])
         logger.info("=" * 70)
 
         if stats["failed"]:
@@ -2140,6 +2225,12 @@ def main() -> None:
                 "%d upload(s) failed — check %s for details",
                 stats["failed"],
                 uploads_config.get("failure_results_file"),
+            )
+        if stats.get("deferred"):
+            logger.info(
+                "%d record(s) created without their data ZIP. Finish them with: "
+                "python Resources/finish_stuck_uploads.py --workers 1",
+                stats["deferred"],
             )
 
         sys.exit(0 if stats["failed"] == 0 else 1)
