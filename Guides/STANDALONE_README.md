@@ -490,6 +490,17 @@ each existing draft, skips every committed file, and still holds review
 back — it's idempotent. Running phase 2 repeatedly is the designed retry
 loop for stubborn ZIPs.
 
+**DOIs.** With `"reserve_doi": true` in `config.json`, the DOI is reserved
+during phase 1, right after the draft is created (or located, on a
+re-run) — so every deferred record has its DOI immediately. Independent
+of that setting, AZUS enforces a hard guarantee: **a DOI is always
+reserved immediately before a record is submitted for community review**
+(acceptance from the queue publishes the record, so that is the last
+reliable moment to get one). Both checks are idempotent — a draft that
+already has a DOI is left untouched. If a record was created DOI-less by
+an older version of AZUS, the next `finish_stuck_uploads.py` run reserves
+its DOI automatically before submitting it for review.
+
 ### Content audit (`Resources/audit_prep_completeness.py`)
 
 `prep_all_datasets.py`'s skip check is intentionally cheap: it trusts

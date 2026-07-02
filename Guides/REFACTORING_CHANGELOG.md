@@ -8,6 +8,44 @@ configuration files, not Python code.
 
 ---
 
+## July 2026 — DOI reservation: fix silent drop + guarantee before review
+
+DOIs were never being reserved, for three stacked reasons:
+
+1. **Dormant bug:** `get_draft_config()` built the reservation payload
+   (`pids.doi.provider = "datacite"`) and `save_metadata_json()` wrote it
+   to the local audit JSON — making it *look* sent — but
+   `upload_to_zenodo()` never included `pids` in the draft-creation
+   request. The reservation never reached Zenodo.
+2. The resume path (`finish_stuck_uploads.py` → `--esid` re-run) never
+   touches draft metadata at all, so existing DOI-less drafts stayed
+   DOI-less.
+3. `config.json` shipped with `"reserve_doi": false`.
+
+### Fixes
+
+- **New `ensure_doi_reserved()` in `standalone_uploader.py`** —
+  idempotent check-then-reserve using the official InvenioRDM endpoint
+  (`POST /records/{id}/draft/pids/doi`, the same call as Zenodo's
+  "Get a DOI now" button). Re-fetches the draft if metadata is stale,
+  no-ops when a DOI exists, treats HTTP 400 "already exists" as success,
+  and raises on real failures so the dataset is marked failed and
+  retryable rather than proceeding DOI-less.
+- **Two call sites in `upload_to_zenodo()`:**
+  1. Right after the draft is created/located (guarded by `reserve_doi`)
+     — a `--defer-zip` phase-1 run now yields its DOI immediately.
+  2. Unconditionally, immediately before community-review submission —
+     the hard guarantee: acceptance from the queue publishes the record,
+     so no record may enter review without a DOI. This also heals every
+     DOI-less draft created by older AZUS versions on its next
+     `finish_stuck_uploads.py` run, with no changes to that script.
+- **Draft creation now sends `pids`** when reservation is requested
+  (the original one-line omission).
+- **`Resources/config.json`: `"reserve_doi": true`.** Remember to flip
+  this on the production server's copy too — config.json is gitignored.
+
+---
+
 ## July 2026 — `--defer-zip`: two-phase upload for very large ZIPs
 
 Data ZIPs (up to 43 GB) fail at a high rate because Zenodo only accepts

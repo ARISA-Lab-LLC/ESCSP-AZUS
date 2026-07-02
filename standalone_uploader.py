@@ -450,6 +450,96 @@ def delete_draft_file(
         response.raise_for_status()
 
 
+def _draft_doi(draft_response: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Extract the DOI identifier from a draft record dict, if one exists.
+
+    Returns the DOI string (e.g. ``"10.5281/zenodo.1234567"``) or None if
+    the draft has no DOI reserved/assigned yet.
+    """
+    if not draft_response:
+        return None
+    doi = (draft_response.get("pids") or {}).get("doi") or {}
+    identifier = (doi.get("identifier") or "").strip()
+    return identifier or None
+
+
+def ensure_doi_reserved(
+    credentials: Credentials,
+    record_id: str,
+    draft_response: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Make sure a draft has a DOI, reserving one if it does not.
+
+    Idempotent: safe to call at any point in a draft's life, any number
+    of times.  Checks the draft's ``pids.doi`` first (re-fetching the
+    draft metadata if the caller didn't supply it or it looks stale) and
+    only calls the reserve endpoint when no DOI exists yet.
+
+    The reserve call is the official InvenioRDM endpoint — the same one
+    Zenodo's "Get a DOI now" button uses:
+
+        POST /api/records/{id}/draft/pids/doi
+
+    Args:
+        credentials: Zenodo API credentials.
+        record_id: The draft record ID.
+        draft_response: The draft metadata dict if the caller already has
+            it (saves one GET).  Pass None to force a fresh fetch.
+
+    Returns:
+        The DOI string (existing or newly reserved), or None if the DOI
+        state could not be confirmed but the reserve call reported
+        "already exists" (HTTP 400) — in that case a DOI is present on
+        the record even though we couldn't read it back.
+
+    Raises:
+        HTTPError / RequestException: if the reservation fails for any
+            reason other than "a DOI already exists".  Callers should let
+            this propagate so the dataset is marked failed and retried
+            later — never proceed to community review without a DOI.
+    """
+    doi = _draft_doi(draft_response)
+    if doi is None:
+        # No DOI in the supplied metadata (or none supplied) — re-fetch to
+        # be sure before issuing a reserve call.  A broken /draft endpoint
+        # (seen with corrupted pending-slot drafts) raises here; in that
+        # case fall through and attempt the reservation anyway, tolerating
+        # the "already exists" response below.
+        try:
+            fresh = get_draft_record(credentials, record_id)
+            doi = _draft_doi(fresh)
+        except (HTTPError, RequestException) as exc:
+            logger.warning(
+                "Could not fetch draft %s to check DOI state (%s) — "
+                "attempting reservation anyway.",
+                record_id, exc,
+            )
+
+    if doi:
+        logger.info("  DOI already assigned: %s", doi)
+        return doi
+
+    logger.info("  No DOI on draft %s — reserving one...", record_id)
+    url = f"{credentials.base_url}records/{record_id}/draft/pids/doi"
+    response = requests.post(url, headers=_auth_headers(credentials))
+
+    if response.status_code == 400:
+        # InvenioRDM answers 400 when a DOI is already present — treat as
+        # success (the goal state is "draft has a DOI").  Log Zenodo's
+        # message so a genuinely different 400 is visible in the log.
+        logger.info(
+            "  Reserve endpoint returned 400 for draft %s — a DOI most "
+            "likely already exists. Zenodo said: %s",
+            record_id, response.text[:300],
+        )
+        return None
+
+    response.raise_for_status()
+    reserved = _draft_doi(response.json())
+    logger.info("  DOI reserved: %s", reserved or "(reserved, id not returned)")
+    return reserved
+
+
 def _create_community_review_request(
     credentials: Credentials,
     record_id: str,
@@ -707,6 +797,13 @@ def upload_to_zenodo(
                 }
             if config.custom_fields:
                 draft_metadata["custom_fields"] = config.custom_fields
+            # Ask for DOI reservation as part of draft creation when
+            # requested (reserve_doi in config.json).  The dedicated
+            # reserve endpoint is also called below as a belt-and-
+            # suspenders guarantee — this block alone was historically
+            # dropped, which is how DOI-less drafts happened.
+            if getattr(config, "pids", None):
+                draft_metadata["pids"] = config.pids
 
             draft_response = create_draft_record(credentials, draft_metadata)
             record_id = draft_response.get("id")
@@ -754,6 +851,14 @@ def upload_to_zenodo(
                     "Could not write upload state file %s: %s",
                     state_file_path, state_exc,
                 )
+
+        # --- Reserve the DOI early when requested (reserve_doi config) ---
+        # Runs for fresh drafts AND resumes, so a --defer-zip phase-1 run
+        # yields its DOI immediately.  Idempotent: no-op when the draft
+        # already has one.  A second unconditional check runs right before
+        # community-review submission below.
+        if getattr(config, "pids", None) and record_id:
+            ensure_doi_reserved(credentials, record_id, draft_response)
 
         # --- Determine which files to skip / clear on resume ---
         skip_keys: set = set()
@@ -833,6 +938,15 @@ def upload_to_zenodo(
             draft_response and draft_response.get("parent", {}).get("review")
         )
         if config.community_id and not already_in_review and submit_review:
+            # HARD GUARANTEE: no record enters the community review queue
+            # without a DOI.  Acceptance from the queue publishes the
+            # record, so this is the last reliable moment to reserve one.
+            # Unconditional (not gated on reserve_doi) and idempotent —
+            # a no-op when the DOI already exists.  If reservation fails,
+            # this raises and the dataset is marked failed (retryable)
+            # rather than entering review DOI-less.
+            ensure_doi_reserved(credentials, record_id, draft_response)
+
             logger.info("Submitting draft to community review queue...")
             review_response = submit_to_community_review(
                 credentials, record_id, config.community_id
