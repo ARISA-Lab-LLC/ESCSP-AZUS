@@ -656,10 +656,18 @@ Two retry policies are in effect — both 3 attempts with backoff, tuned to the
 type of call they protect.
 
 **File-PUT retry (long-running multi-GB uploads):**
-- 3 attempts, **30s / 90s / 270s** backoff.
+- 3 attempts by default, **30s / 90s** backoff between attempts.
 - Catches `SSLError`, `SSLEOFError`, `ConnectionError`, `Timeout`,
   `ChunkedEncodingError`, and HTTP **5xx**.
 - HTTP **4xx** fails immediately.
+- **Override per run** with `--upload-attempts N` on both
+  `standalone_tasks.py` and `Resources/finish_stuck_uploads.py`
+  (valid range `1`–`3`, default `3`).  `N=1` = one shot per file, no
+  retry — useful when you'd rather fail fast on a bad file and rely on
+  a later `finish_stuck_uploads.py` run (the ESID-level retry loop) to
+  come back to it, instead of burning up to two minutes of per-file
+  backoff inside the current run.  The flag only affects PUTs; the
+  metadata-GET retry policy below is untouched.
 
 Example log:
 ```

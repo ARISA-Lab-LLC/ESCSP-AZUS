@@ -75,7 +75,11 @@ from models.audiomoth import (
     DraftConfig,
     Access,
 )
-from standalone_uploader import upload_to_zenodo, get_credentials_from_env
+from standalone_uploader import (
+    upload_to_zenodo,
+    get_credentials_from_env,
+    _PUT_RETRY_ATTEMPTS as _DEFAULT_UPLOAD_ATTEMPTS,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -1269,6 +1273,7 @@ def upload_dataset(
     references_csv: Optional[str] = None,
     project_config: Optional[Dict[str, Any]] = None,
     defer_zip: bool = False,
+    upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
 
@@ -1293,6 +1298,9 @@ def upload_dataset(
             left in the staging folder — exactly the state a "stuck" upload
             leaves behind — so Resources/finish_stuck_uploads.py can upload
             the ZIP and submit the record for review later.
+        upload_attempts: Total number of PUT attempts per file.  Defaults
+            to the historical value (3).  Forwarded to
+            :func:`upload_to_zenodo`.
 
     Returns:
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
@@ -1423,6 +1431,7 @@ def upload_dataset(
             existing_draft_id=existing_draft_id,
             state_file_path=str(state_file),
             submit_review=not defer_zip,
+            upload_attempts=upload_attempts,
         )
         return result
 
@@ -1581,6 +1590,7 @@ def _process_one_dataset(
     stats: Dict[str, int],
     stats_lock: threading.Lock,
     defer_zip: bool = False,
+    upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
@@ -1650,6 +1660,9 @@ def _process_one_dataset(
             so ``Resources/finish_stuck_uploads.py`` can upload the ZIP and
             finish the record later.  Nothing is written to the success CSV
             or the upload tracker, because the record is not complete yet.
+        upload_attempts: Total number of PUT attempts per file
+            (``--upload-attempts`` CLI flag).  Forwarded to
+            :func:`upload_dataset`.
 
     Returns:
         None.  All results are recorded via the result CSVs and the
@@ -1679,6 +1692,7 @@ def _process_one_dataset(
             references_csv=references_csv,
             project_config=project_config,
             defer_zip=defer_zip,
+            upload_attempts=upload_attempts,
         )
     except Exception as exc:
         logger.error("%s Unexpected error during upload: %s", tag, exc)
@@ -1790,6 +1804,7 @@ def upload_datasets(
     esid_filter: Optional[List[str]] = None,
     workers: int = 1,
     defer_zip: bool = False,
+    upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -1839,6 +1854,10 @@ def upload_datasets(
             stay in ``Staging_Area/`` and are counted under the
             ``'deferred'`` stat.  Finish them later with
             ``Resources/finish_stuck_uploads.py``.
+        upload_attempts: Total number of PUT attempts per file
+            (``--upload-attempts`` CLI flag).  Defaults to
+            ``_DEFAULT_UPLOAD_ATTEMPTS`` (3) so unmodified callers get
+            identical behavior.
 
     Returns:
         Dictionary with upload statistics:
@@ -1940,6 +1959,7 @@ def upload_datasets(
             stats=stats,
             stats_lock=stats_lock,
             defer_zip=defer_zip,
+            upload_attempts=upload_attempts,
         )
 
         if workers == 1:
@@ -2055,6 +2075,21 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--upload-attempts", type=int, default=_DEFAULT_UPLOAD_ATTEMPTS,
+        metavar="N",
+        help=(
+            "Total number of PUT attempts per file before that file is "
+            "marked failed and the run moves on (default: "
+            f"{_DEFAULT_UPLOAD_ATTEMPTS}). N=1 means one shot per file "
+            "with no retry; N=3 is the historical behavior with "
+            "30s / 90s backoffs between attempts. Valid range: 1 to 3. "
+            "Only affects file uploads (PUTs); the smaller metadata GET "
+            "retries are unchanged. If a run finishes with failures, "
+            "'python Resources/finish_stuck_uploads.py' remains the "
+            "ESID-level retry loop."
+        ),
+    )
+    parser.add_argument(
         "--defer-zip", action="store_true",
         help=(
             "Two-phase upload, phase 1: create each Zenodo record, upload "
@@ -2078,6 +2113,14 @@ def main() -> None:
             f"--workers must be at least 1 (got {args.workers}). "
             "Use --workers 1 for sequential, or --workers 3 (etc.) to upload "
             "multiple datasets concurrently."
+        )
+
+    # --- Validate --upload-attempts (must fit inside the backoff tuple) ---
+    if not (1 <= args.upload_attempts <= 3):
+        parser.error(
+            f"--upload-attempts must be between 1 and 3 (got "
+            f"{args.upload_attempts}). N=1 means one shot per file with no "
+            "retry; N=3 is the historical behavior with 30s / 90s backoffs."
         )
 
     # --- Configure logging ---
@@ -2152,6 +2195,11 @@ def main() -> None:
             "will NOT be submitted for review this run. Finish later with "
             "Resources/finish_stuck_uploads.py."
         )
+    if args.upload_attempts != _DEFAULT_UPLOAD_ATTEMPTS:
+        logger.info(
+            "Upload attempts: %d per file (overridden from default %d)",
+            args.upload_attempts, _DEFAULT_UPLOAD_ATTEMPTS,
+        )
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -2206,6 +2254,7 @@ def main() -> None:
             esid_filter=args.esid,
             workers=args.workers,
             defer_zip=args.defer_zip,
+            upload_attempts=args.upload_attempts,
         )
 
         # --- Display summary ---

@@ -138,6 +138,7 @@ def upload_file_to_draft(
     credentials: Credentials,
     record_id: str,
     file_path: str,
+    upload_attempts: int = _PUT_RETRY_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Upload a single file to a draft record (three-step process).
 
@@ -149,6 +150,11 @@ def upload_file_to_draft(
         credentials: Zenodo credentials.
         record_id: Draft record ID.
         file_path: Local path to the file.
+        upload_attempts: Total number of PUT attempts allowed for the
+            file content (step 2).  Defaults to the module constant
+            ``_PUT_RETRY_ATTEMPTS`` (3), preserving the historical
+            behavior for any direct importer.  ``1`` means one shot with
+            no retry after failure.
 
     Returns:
         API response with committed file details.
@@ -198,6 +204,7 @@ def upload_file_to_draft(
             url=file_entry["links"]["content"],
             file_path=file_path,
             auth_headers=auth,
+            attempts=upload_attempts,
         )
     except (HTTPError, RequestException) as put_exc:
         logger.info(
@@ -235,6 +242,7 @@ def _put_file_content_with_retry(
     url: str,
     file_path: str,
     auth_headers: Dict[str, str],
+    attempts: int = _PUT_RETRY_ATTEMPTS,
 ) -> None:
     """PUT file bytes to the draft content URL with retry on transport errors.
 
@@ -247,11 +255,22 @@ def _put_file_content_with_retry(
     semantics in InvenioRDM mean the server-side content is overwritten on
     every successful PUT, so retrying is safe.
 
+    Args:
+        url: Zenodo draft content URL.
+        file_path: Local file to upload.
+        auth_headers: Bearer-token headers.
+        attempts: Total number of PUT attempts to make.  ``1`` means one
+            shot with no retry.  Defaults to the module constant
+            ``_PUT_RETRY_ATTEMPTS`` (3), preserving historical behavior
+            for direct importers.  Backoffs come from
+            ``_PUT_RETRY_BACKOFF_S`` and are consumed only between
+            attempts; the last attempt is followed by no wait.
+
     Raises:
         RequestException or HTTPError: the last error if all attempts fail.
     """
     last_exc: Optional[BaseException] = None
-    for attempt in range(1, _PUT_RETRY_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             with open(file_path, "rb") as fh:
                 response = requests.put(url, data=fh, headers=auth_headers)
@@ -269,19 +288,19 @@ def _put_file_content_with_retry(
         except RequestException as exc:
             last_exc = exc
             file_name = Path(file_path).name
-            if attempt < _PUT_RETRY_ATTEMPTS:
+            if attempt < attempts:
                 backoff = _PUT_RETRY_BACKOFF_S[attempt - 1]
                 logger.warning(
                     "  PUT failed for %s (attempt %d/%d): %s: %s. "
                     "Retrying in %ds...",
-                    file_name, attempt, _PUT_RETRY_ATTEMPTS,
+                    file_name, attempt, attempts,
                     exc.__class__.__name__, exc, backoff,
                 )
                 time.sleep(backoff)
             else:
                 logger.error(
-                    "  PUT failed for %s after %d attempts. Last error: %s: %s",
-                    file_name, _PUT_RETRY_ATTEMPTS,
+                    "  PUT failed for %s after %d attempt(s). Last error: %s: %s",
+                    file_name, attempts,
                     exc.__class__.__name__, exc,
                 )
     assert last_exc is not None
@@ -664,6 +683,7 @@ def upload_to_zenodo(
     existing_draft_id: Optional[str] = None,
     state_file_path: Optional[str] = None,
     submit_review: bool = True,
+    upload_attempts: int = _PUT_RETRY_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -691,6 +711,11 @@ def upload_to_zenodo(
             until every file (including the deferred ZIP) is uploaded,
             because a community manager accepting the record publishes it —
             and published records cannot accept new files.
+        upload_attempts: Total number of PUT attempts per file (step 2 of
+            the per-file upload).  Defaults to ``_PUT_RETRY_ATTEMPTS`` (3),
+            preserving historical behavior.  ``1`` means one shot per file;
+            the ``--upload-attempts`` CLI flag on ``standalone_tasks.py``
+            surfaces this to end users.
 
     Returns:
         Dictionary with keys:
@@ -920,7 +945,10 @@ def upload_to_zenodo(
             )
 
             start_time = time.time()
-            upload_file_to_draft(credentials, record_id, file_path)
+            upload_file_to_draft(
+                credentials, record_id, file_path,
+                upload_attempts=upload_attempts,
+            )
             elapsed = time.time() - start_time
 
             logger.info("  Uploaded in %.1fs", elapsed)

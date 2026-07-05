@@ -18,7 +18,10 @@ Python code.
 ## Upload Resilience
 
 - **Auto-retry** on transient SSL/connection drops and HTTP 5xx (3 attempts,
-  30s/90s/270s backoff per file PUT).
+  30s/90s/270s backoff per file PUT). Override the attempt count with
+  `--upload-attempts N` on `standalone_tasks.py` and
+  `Resources/finish_stuck_uploads.py` (range 1–3; `N=1` = one shot per file,
+  no retry). Default unchanged.
 - **Resumable drafts** — if a run dies mid-upload, re-running picks up the same
   Zenodo draft and only re-uploads files that aren't already committed
   (state tracked in `upload_state.json` inside the ESID staging folder).

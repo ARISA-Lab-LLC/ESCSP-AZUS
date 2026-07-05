@@ -8,6 +8,39 @@ configuration files, not Python code.
 
 ---
 
+## July 2026 — `--upload-attempts`: opt-in override for per-file PUT retries
+
+Adds a `--upload-attempts N` CLI flag to both `standalone_tasks.py` and
+`Resources/finish_stuck_uploads.py`.  Range 1–3, **default 3 (unchanged
+from previous behavior)** — the flag is purely opt-in.
+
+- `N=1`: one shot per file with no retry.  Useful when the user would
+  rather fail fast on a bad file and re-run `finish_stuck_uploads.py`
+  (the ESID-level retry loop) later, instead of burning up to two
+  minutes of per-file backoff inside the current run.
+- `N=3`: historical behavior — 3 attempts with 30s/90s backoffs, same
+  pending-slot cleanup on exhaustion.
+- Only file uploads (PUTs) are affected.  Metadata GET retries
+  (`_API_RETRY_ATTEMPTS = 3`, `5s/15s/45s` backoff) are untouched.
+
+### Changes
+
+- `standalone_uploader.py` — three signatures gain an `upload_attempts`
+  keyword parameter defaulting to the existing `_PUT_RETRY_ATTEMPTS`
+  constant, forwarded down to `_put_file_content_with_retry`.  The
+  constant itself is unchanged.
+- `standalone_tasks.py` — new `--upload-attempts` argparse flag with
+  1–3 validation at parse time; threaded through the four-function
+  plumbing (`upload_datasets` → `_process_one_dataset` →
+  `upload_dataset` → `upload_to_zenodo`).  A one-line config-banner
+  entry appears only when the value differs from the default, so
+  no-arg runs stay quiet.
+- `Resources/finish_stuck_uploads.py` — matching `--upload-attempts`
+  flag with the same validation; forwarded to the shelled-out
+  `standalone_tasks.py --upload-attempts N` call.
+
+---
+
 ## July 2026 — DOI reservation: fix silent drop + guarantee before review
 
 DOIs were never being reserved, for three stacked reasons:

@@ -206,6 +206,7 @@ def run_recovery(
     stuck_esids: List[str],
     config_path: str,
     workers: int,
+    upload_attempts: int = 3,
 ) -> int:
     """Re-run standalone_tasks.py against just the stuck ESIDs.
 
@@ -226,6 +227,9 @@ def run_recovery(
         stuck_esids: Padded ESID strings, e.g. ["007", "012", "073"].
         config_path: Passed through unchanged.
         workers: How many to upload concurrently (1 = sequential).
+        upload_attempts: Total PUT attempts per file, forwarded as
+            ``--upload-attempts N`` to standalone_tasks.py.  Default 3
+            matches standalone_tasks.py's default (historical behavior).
 
     Returns:
         The exit code of standalone_tasks.py.  0 if all finished
@@ -237,6 +241,7 @@ def run_recovery(
         "--config", config_path,
         "--esid", *stuck_esids,
         "--workers", str(workers),
+        "--upload-attempts", str(upload_attempts),
     ]
     logger.info("Running: %s", " ".join(cmd))
     # cwd = project root so relative paths in config.json resolve correctly.
@@ -276,6 +281,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--upload-attempts", type=int, default=3, metavar="N",
+        help=(
+            "Total number of PUT attempts per file before that file is "
+            "marked failed (default: 3). N=1 means one shot per file with "
+            "no retry; N=3 is the historical behavior with 30s / 90s "
+            "backoffs. Valid range: 1 to 3. Forwarded to "
+            "standalone_tasks.py as --upload-attempts N. Only affects "
+            "file uploads (PUTs); metadata GETs are unchanged."
+        ),
+    )
+    parser.add_argument(
         "--list-only", action="store_true",
         help=(
             "Discover and print the stuck ESIDs, then exit WITHOUT "
@@ -289,6 +305,13 @@ def main() -> None:
     if args.workers < 1:
         parser.error(
             f"--workers must be at least 1 (got {args.workers})."
+        )
+
+    # --- Validate --upload-attempts (mirror standalone_tasks.py) ---
+    if not (1 <= args.upload_attempts <= 3):
+        parser.error(
+            f"--upload-attempts must be between 1 and 3 (got "
+            f"{args.upload_attempts})."
         )
 
     # --- Configure logging ---
@@ -346,6 +369,7 @@ def main() -> None:
         stuck_esids=esid_args,
         config_path=args.config,
         workers=args.workers,
+        upload_attempts=args.upload_attempts,
     )
 
     # --- Final status ---
