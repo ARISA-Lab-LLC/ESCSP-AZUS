@@ -1,5 +1,85 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — Verified-integrity uploads: no unverified ZIP reaches Zenodo
+
+Incomplete ZIPs (missing WAV files) were uploaded to Zenodo from the
+production server and downloaded by researchers. Root cause: every
+safeguard lived on the PREP side and the upload side consumed none of
+them — `get_upload_data()` uploaded any `Staging_Area/` folder that
+merely contained an `ESID_*.zip`; the `.prep_complete` sentinel, the
+per-file SHA-512 hashes in `file_list.csv`, and the ZIP's recorded hash
+were never read at upload time; and the resume path skipped
+already-committed files by NAME alone, so a short ZIP committed once
+stayed on the draft forever, even after the local ZIP was fixed.
+
+Fixed with four independent layers:
+
+### Layer 1 — pre-upload integrity gate (`standalone_tasks.py`)
+
+New `verify_dataset_integrity()`, called from `_process_one_dataset()`
+before any network work. Cheapest check first: `.prep_complete`
+sentinel present → ZIP readable → every WAV in `file_list.csv` present
+in the ZIP at the recorded size (and no unlisted WAVs) → ZIP SHA-512
+matches the manifest's ZIP row. Any problem marks the dataset FAILED
+(`DatasetIntegrityError` row in failed_results.csv) and nothing
+uploads. The gate fails closed — if the check itself crashes, the
+dataset fails. New `--skip-integrity-hash` flag skips ONLY the
+full-archive re-hash; the structural checks always run. The revived
+`calculate_sha512()` (previously dead code) does the hashing.
+
+### Layer 2 — verified resume (`standalone_uploader.py`)
+
+Resume skip logic now verifies each `status == "completed"` entry
+against the local file: size first (cheap), then md5 when Zenodo
+provides one. A mismatched remote copy is deleted and re-uploaded —
+this self-heals every draft carrying a short ZIP on its next resume
+(`finish_stuck_uploads.py` inherits the fix with zero changes). If the
+LOCAL file cannot be read, the dataset fails via the new
+`FileIntegrityError` instead of guessing (deleting the remote copy
+there could destroy the only good bytes).
+
+### Layer 3 — post-commit verification (`standalone_uploader.py`)
+
+`upload_file_to_draft()` captures the local file's size and md5 before
+upload and, after the commit, compares them against what Zenodo reports
+it now holds. A mismatch deletes the corrupt slot and raises
+`FileIntegrityError` — a silently corrupted transfer can no longer
+survive on a record.
+
+### Layer 4 — prep hardening (`Resources/prepare_dataset.py`)
+
+- New Step 8b `verify_zip_against_source()`: after the ZIP is final and
+  BEFORE the atomic move + sentinel, the archive is compared against a
+  FRESH scan of the raw folder (reusing `audit_wav_integrity`'s
+  double-checked scanners: disk stat vs RIFF header, ZIP size vs CRC;
+  per-file name + size match). A short or drifted ZIP exits nonzero —
+  it never becomes an uploadable staging folder and never earns
+  `.prep_complete`. The fresh scan deliberately catches WAVs that
+  appeared on disk mid-prep.
+- In-place builds refused: `--output-dir` (or a raw folder) resolving
+  inside `Staging_Area/` used to skip the two-phase atomic move, letting
+  the ZIP grow non-atomically under the exact folder name the uploader
+  scans — the direct path by which incomplete ZIPs became uploadable.
+  Now rejected at startup with a clear error, and the old
+  "already in Staging_Area" move-skip branch is a hard stop.
+
+### Tests
+
+New `tests/test_upload_integrity.py` (gate, remote-entry mismatch
+helper, md5 helper) and `tests/test_prepare_dataset_verification.py`
+(ZIP-vs-source verification incl. the late-sync case, in-place-build
+refusal via subprocess). Full suite: 91 tests, all passing.
+
+### Remediation of existing damage
+
+- Drafts with short ZIPs: healed automatically by Layer 2 on the next
+  `finish_stuck_uploads.py` run.
+- Published records with short ZIPs: find them with
+  `Resources/audit_wav_integrity.py` over the raw data; each needs a
+  re-prep and a new Zenodo version (published files are immutable).
+
+---
+
 ## July 2026 — `audit_wav_integrity.py` QC hardening: every size double-checked
 
 Reported symptom: folders labelled as having zero-byte WAVs that did

@@ -17,6 +17,22 @@ Python code.
 
 ## Upload Resilience
 
+- **Verified-integrity uploads (four layers)** — no ZIP reaches Zenodo
+  unverified. (1) A pre-upload gate fails any dataset whose staging folder
+  lacks the `.prep_complete` sentinel, whose ZIP is unreadable, whose ZIP
+  contents disagree with the `file_list.csv` prep wrote (per-WAV name +
+  size), or whose ZIP SHA-512 doesn't match the recorded hash
+  (`--skip-integrity-hash` skips only the hash step). (2) Resume runs no
+  longer skip already-committed files by name alone — each is verified
+  against the local file by size and md5, and a mismatched remote copy
+  (e.g. a short ZIP from an interrupted run) is deleted and re-uploaded
+  automatically. (3) Every upload is verified after commit: Zenodo's
+  reported size and md5 must match the local file, or the slot is deleted
+  and the dataset fails. (4) `prepare_dataset.py` verifies the finished
+  ZIP against a fresh cross-checked scan of the raw folder BEFORE the
+  atomic move and sentinel, and refuses to build in place inside
+  `Staging_Area/`. Covered by `tests/test_upload_integrity.py` and
+  `tests/test_prepare_dataset_verification.py`.
 - **Duplicate prevention (three layers)** — re-prepping a staging folder now
   preserves its `upload_state.json`/request-log link to the existing Zenodo
   draft; a lost state file is recovered from the request log automatically;

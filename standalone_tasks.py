@@ -282,6 +282,187 @@ def parse_values_from_str(string: str, delimiter: str = ":") -> List[str]:
 
 
 # ===================================================================
+#  Pre-upload integrity verification
+# ===================================================================
+
+# Written by Resources/prepare_dataset.py as its very last action; its
+# absence means preparation never finished (or predates the sentinel).
+_PREP_SENTINEL_NAME = ".prep_complete"
+
+# How many offending filenames to name in an integrity problem message
+# before collapsing the rest into a count.
+_INTEGRITY_EXAMPLE_LIMIT = 5
+
+
+def _summarize_names(names: List[str]) -> str:
+    """Format a filename list for an error message, capping the examples."""
+    shown = ", ".join(names[:_INTEGRITY_EXAMPLE_LIMIT])
+    if len(names) > _INTEGRITY_EXAMPLE_LIMIT:
+        shown += f", ... ({len(names)} total)"
+    return shown
+
+
+def verify_dataset_integrity(
+    zip_file: str,
+    verify_zip_hash: bool = True,
+) -> List[str]:
+    """Verify a prepared dataset's integrity BEFORE any upload work.
+
+    Broken ZIPs (missing WAV files) have been uploaded to Zenodo because
+    nothing in the upload path ever checked what prepare_dataset.py
+    produced.  This gate cross-checks the staging folder against the
+    integrity records prep already writes, cheapest check first:
+
+    1. The ``.prep_complete`` sentinel must exist in the staging folder
+       (prepare_dataset.py touches it as its very last action).
+    2. The ZIP must be a readable archive.
+    3. Every WAV listed in the staging folder's ``file_list.csv`` (the
+       external manifest, which carries per-file sizes and SHA-512
+       hashes) must be present in the ZIP with a matching uncompressed
+       size — and the ZIP must contain no WAVs the manifest doesn't list.
+    4. The ZIP's own SHA-512 must match the hash recorded in the
+       manifest's ZIP row (skippable via ``verify_zip_hash=False`` /
+       the ``--skip-integrity-hash`` CLI flag; the structural checks
+       above always run).
+
+    Args:
+        zip_file: Path to the dataset ZIP inside its staging folder.
+        verify_zip_hash: When True (default), re-hash the whole ZIP and
+            compare against the manifest.  Costs one full read of the
+            archive (~minutes for a 43 GB ZIP) — small next to the
+            hours-long upload it protects.
+
+    Returns:
+        List of human-readable problem strings.  Empty list = verified.
+        Any problem must fail the dataset — never upload past one.
+    """
+    problems: List[str] = []
+    zip_path = Path(zip_file)
+    staging_dir = zip_path.parent
+
+    # --- 1. Prep-completion sentinel ---
+    if not (staging_dir / _PREP_SENTINEL_NAME).is_file():
+        problems.append(
+            f"No {_PREP_SENTINEL_NAME} sentinel in {staging_dir.name} — "
+            "preparation never completed (or the folder predates the "
+            "sentinel). Re-run Resources/prepare_dataset.py, or verify "
+            "and back-fill with Resources/audit_prep_completeness.py."
+        )
+
+    # --- 2. ZIP must be a readable archive ---
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zip_infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError) as exc:
+        problems.append(
+            f"ZIP is not a readable archive "
+            f"({type(exc).__name__}: {exc}): {zip_path.name}"
+        )
+        return problems  # nothing further can be checked
+
+    # WAV entries inside the archive, keyed by basename (entries live
+    # under an ESID_XXX/ subfolder), mapped to uncompressed size.
+    zip_wav_sizes: Dict[str, int] = {}
+    for info in zip_infos:
+        basename = info.filename.rsplit("/", 1)[-1]
+        if basename.lower().endswith(".wav"):
+            zip_wav_sizes[basename] = info.file_size
+
+    # --- 3. Cross-check against prep's manifest (file_list.csv) ---
+    file_list_path = staging_dir / "file_list.csv"
+    expected_zip_hash: Optional[str] = None
+    if not file_list_path.is_file():
+        problems.append(
+            f"No file_list.csv in {staging_dir.name} — cannot verify ZIP "
+            "contents. Re-run Resources/prepare_dataset.py."
+        )
+    else:
+        listed_wav_sizes: Dict[str, str] = {}
+        try:
+            with open(file_list_path, "r", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    name = (row.get("File Name") or "").strip()
+                    if name == zip_path.name:
+                        expected_zip_hash = (
+                            (row.get("SHA-512 Hash") or "").strip() or None
+                        )
+                    elif name.lower().endswith(".wav"):
+                        listed_wav_sizes[name] = (
+                            (row.get("File size (KB)") or "").strip()
+                        )
+        except (OSError, csv.Error) as exc:
+            problems.append(
+                f"file_list.csv is unreadable ({exc}) — cannot verify "
+                "ZIP contents."
+            )
+            listed_wav_sizes = {}
+
+        if listed_wav_sizes or expected_zip_hash:
+            missing = sorted(set(listed_wav_sizes) - set(zip_wav_sizes))
+            extra = sorted(set(zip_wav_sizes) - set(listed_wav_sizes))
+            if missing:
+                problems.append(
+                    f"{len(missing)} WAV(s) listed in file_list.csv are "
+                    f"MISSING from the ZIP: {_summarize_names(missing)}"
+                )
+            if extra:
+                problems.append(
+                    f"{len(extra)} WAV(s) in the ZIP are not listed in "
+                    f"file_list.csv: {_summarize_names(extra)}"
+                )
+            # Same "File size (KB)" formatting prep uses, so the
+            # comparison is exact, not a float-tolerance guess.
+            size_mismatches = sorted(
+                name
+                for name in set(listed_wav_sizes) & set(zip_wav_sizes)
+                if f"{zip_wav_sizes[name] / 1024:.2f}" != listed_wav_sizes[name]
+            )
+            if size_mismatches:
+                problems.append(
+                    f"{len(size_mismatches)} WAV(s) differ in size between "
+                    f"file_list.csv and the ZIP: "
+                    f"{_summarize_names(size_mismatches)}"
+                )
+            if expected_zip_hash is None:
+                problems.append(
+                    f"file_list.csv has no row for {zip_path.name} — the "
+                    "external file list was never finalized; preparation "
+                    "did not complete."
+                )
+        else:
+            problems.append(
+                "file_list.csv lists no WAV files and no ZIP row — "
+                "preparation did not complete."
+            )
+
+    # --- 4. ZIP hash vs the manifest's recorded hash ---
+    # Skipped when structural problems already failed the dataset (no
+    # point reading a 43 GB archive we already know is bad).
+    if verify_zip_hash and expected_zip_hash and not problems:
+        logger.info(
+            "Verifying SHA-512 of %s against file_list.csv ...",
+            zip_path.name,
+        )
+        actual_hash = calculate_sha512(str(zip_path))
+        if actual_hash != expected_zip_hash:
+            problems.append(
+                f"ZIP SHA-512 does not match file_list.csv — the archive "
+                f"changed after preparation. Expected "
+                f"{expected_zip_hash[:16]}..., got {actual_hash[:16]}..."
+            )
+
+    if not problems:
+        logger.info(
+            "Integrity verified for %s: %d WAV file(s) in ZIP match "
+            "file_list.csv; ZIP sha512 %s.",
+            zip_path.name,
+            len(zip_wav_sizes),
+            "OK" if (verify_zip_hash and expected_zip_hash) else "not checked",
+        )
+    return problems
+
+
+# ===================================================================
 #  CSV parsing and validation
 # ===================================================================
 
@@ -1697,10 +1878,15 @@ def _process_one_dataset(
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
+    verify_zip_hash: bool = True,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
     This is the per-ESID unit of work.  It performs (in order):
+      0. Verify the dataset's integrity (:func:`verify_dataset_integrity`)
+         — the ``.prep_complete`` sentinel, ZIP readability, ZIP contents
+         vs ``file_list.csv``, and the ZIP's SHA-512.  Any problem marks
+         the dataset FAILED before a single byte reaches Zenodo.
       1. Upload all files for the dataset to a Zenodo draft (via
          :func:`upload_dataset`, which internally handles per-file retries,
          draft resume via ``upload_state.json``, community submission,
@@ -1772,6 +1958,10 @@ def _process_one_dataset(
         title_guard: Duplicate-record guard (default True; disabled by the
             ``--skip-title-guard`` CLI flag).  Forwarded to
             :func:`upload_dataset`.
+        verify_zip_hash: When True (default), the pre-upload integrity
+            gate re-hashes the ZIP and compares against ``file_list.csv``
+            (``--skip-integrity-hash`` disables just this step; the
+            sentinel and ZIP-contents checks always run).
 
     Returns:
         None.  All results are recorded via the result CSVs and the
@@ -1785,6 +1975,41 @@ def _process_one_dataset(
     tag = f"[ESID {data.esid}]"
 
     logger.info("%s Starting (dataset %d of %d)", tag, index, total)
+
+    # --- Step 0: integrity gate — nothing uploads past a problem ---
+    # Runs entirely locally (no network).  A broken or unverifiable
+    # dataset is marked FAILED here so an incomplete ZIP can never
+    # reach Zenodo, no matter how it ended up in the staging area.
+    try:
+        integrity_problems = verify_dataset_integrity(
+            zip_file=data.zip_file, verify_zip_hash=verify_zip_hash,
+        )
+    except Exception as exc:  # a gate crash must fail closed, not open
+        integrity_problems = [
+            f"Integrity check itself failed ({type(exc).__name__}: {exc})"
+        ]
+    if integrity_problems:
+        for problem in integrity_problems:
+            logger.error("%s INTEGRITY CHECK FAILED: %s", tag, problem)
+        logger.error(
+            "%s Dataset will NOT be uploaded — fix the staging folder "
+            "(re-run Resources/prepare_dataset.py) and try again.", tag,
+        )
+        with stats_lock:
+            stats["total_processed"] += 1
+            stats["failed"] += 1
+        with results_lock:
+            save_result(
+                esid=data.esid,
+                zip_file=data.zip_file,
+                success=False,
+                success_file=successful_results_file,
+                failure_file=failure_results_file,
+                error_type="DatasetIntegrityError",
+                error_message=" | ".join(integrity_problems),
+            )
+        logger.error("%s DONE (failed integrity check)", tag)
+        return
 
     # Catch-all guard around the entire per-ESID workflow.  ``upload_dataset``
     # already wraps its own work in try/except and returns a failure dict,
@@ -1916,6 +2141,7 @@ def upload_datasets(
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
+    verify_zip_hash: bool = True,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -1975,6 +2201,10 @@ def upload_datasets(
             is resumed instead, an existing published record makes the
             dataset fail rather than duplicate.  Disable with
             ``--skip-title-guard``.
+        verify_zip_hash: When True (default), each dataset's pre-upload
+            integrity gate re-hashes its ZIP against ``file_list.csv``.
+            ``--skip-integrity-hash`` disables just the hash step; the
+            sentinel and ZIP-contents checks always run.
 
     Returns:
         Dictionary with upload statistics:
@@ -2079,6 +2309,7 @@ def upload_datasets(
             defer_zip=defer_zip,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
+            verify_zip_hash=verify_zip_hash,
         )
 
         if workers == 1:
@@ -2221,6 +2452,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--skip-integrity-hash", action="store_true",
+        help=(
+            "Skip ONLY the SHA-512 re-hash of each data ZIP during the "
+            "pre-upload integrity check (saves one full read of every "
+            "archive). The rest of the gate always runs: the "
+            ".prep_complete sentinel, ZIP readability, and the "
+            "ZIP-contents-vs-file_list.csv cross-check. Use only when "
+            "re-running a batch whose ZIPs were already hash-verified."
+        ),
+    )
+    parser.add_argument(
         "--defer-zip", action="store_true",
         help=(
             "Two-phase upload, phase 1: create each Zenodo record, upload "
@@ -2336,6 +2578,16 @@ def main() -> None:
             "Duplicate guard: DISABLED (--skip-title-guard) — records "
             "with titles that already exist on Zenodo WILL be created."
         )
+    if args.skip_integrity_hash:
+        logger.warning(
+            "Integrity gate: sentinel + ZIP-contents checks ON; ZIP "
+            "SHA-512 re-hash SKIPPED (--skip-integrity-hash)."
+        )
+    else:
+        logger.info(
+            "Integrity gate: ON — every dataset is verified (sentinel, "
+            "ZIP contents vs file_list.csv, ZIP SHA-512) before upload."
+        )
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -2392,6 +2644,7 @@ def main() -> None:
             defer_zip=args.defer_zip,
             upload_attempts=args.upload_attempts,
             title_guard=not args.skip_title_guard,
+            verify_zip_hash=not args.skip_integrity_hash,
         )
 
         # --- Display summary ---

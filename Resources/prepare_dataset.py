@@ -35,6 +35,12 @@ from string import Template
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+# Sibling module in Resources/ — reused for the pre-sentinel ZIP
+# verification (RIFF-header cross-checked disk scan + ZIP index scan).
+# Resolves because Python puts this script's own directory on sys.path
+# when run by path (as prep_all_datasets.py does via subprocess).
+import audit_wav_integrity
+
 logger = logging.getLogger("azus.prepare")
 
 # SHA-512 read buffer — 64 KB for efficient hashing of large files
@@ -602,6 +608,68 @@ def create_external_file_list(
 
 
 # ===================================================================
+#  Pre-sentinel ZIP verification
+# ===================================================================
+
+def verify_zip_against_source(zip_path: Path, source_dir: Path) -> List[str]:
+    """Verify the finished ZIP holds every WAV the raw folder holds.
+
+    Runs after the ZIP is final (all metadata appended) and BEFORE the
+    move into Staging_Area/ and the ``.prep_complete`` sentinel — a ZIP
+    that fails here never becomes an uploadable staging folder.
+
+    The disk side is a FRESH scan of the raw folder, deliberately not
+    the file list captured at zip time: files that appeared (or turned
+    into placeholders) during the prep make the two sides diverge, which
+    is exactly the failure this must catch.  Both scans come from
+    ``audit_wav_integrity`` and cross-check every size two independent
+    ways (disk stat vs RIFF header; ZIP size field vs CRC).
+
+    No full-CRC ``testzip()`` pass — that would decompress gigabytes,
+    and the index + per-file-size comparison already catches the
+    short-ZIP failure class this defends against.
+
+    Args:
+        zip_path: The finalized ZIP archive.
+        source_dir: The raw ESID folder the WAVs came from.
+
+    Returns:
+        List of human-readable problem strings.  Empty list = verified.
+    """
+    problems: List[str] = []
+    tiny = audit_wav_integrity._DEFAULT_TINY_THRESHOLD
+
+    zip_stats, zip_err = audit_wav_integrity.scan_zip_wavs(zip_path, tiny)
+    if zip_err is not None:
+        return [f"ZIP is not a readable archive: {zip_err}"]
+
+    disk_stats = audit_wav_integrity.scan_disk_wavs(source_dir, tiny)
+    if disk_stats.count == 0:
+        problems.append(f"No WAV files found in source folder {source_dir}")
+
+    for name, reason in disk_stats.discrepancies:
+        problems.append(f"Source WAV failed its size cross-check — {name}: {reason}")
+    for name in disk_stats.zero_names:
+        problems.append(f"Source WAV is zero bytes: {name}")
+    for name, reason in zip_stats.discrepancies:
+        problems.append(f"ZIP entry failed its size cross-check — {name}: {reason}")
+
+    is_match, notes = audit_wav_integrity.compare_file_maps(
+        disk_stats.sizes, zip_stats.sizes
+    )
+    if not is_match:
+        problems.extend(f"Disk vs ZIP mismatch: {note}" for note in notes)
+
+    if not problems:
+        logger.info(
+            "ZIP verified against source: %d WAV(s), %d bytes, all "
+            "per-file sizes match.",
+            zip_stats.count, zip_stats.total_bytes,
+        )
+    return problems
+
+
+# ===================================================================
 #  README generation from template
 # ===================================================================
 
@@ -1152,6 +1220,29 @@ def main() -> None:
     else:
         output_dir = source_dir.parent / f"ESID_{esid}_Staging"
 
+    # Refuse to build inside Staging_Area/.  The staging folder must be
+    # assembled OUTSIDE and arrive via the two-phase atomic move below —
+    # building in place grows the ZIP non-atomically under the exact
+    # folder name the uploader scans for, so a killed prep (or a
+    # concurrent upload run) sees an incomplete ZIP as an uploadable
+    # dataset.  This exact path put broken data on Zenodo.
+    staging_area_dir = Path(__file__).resolve().parent.parent / "Staging_Area"
+    try:
+        output_dir.resolve().relative_to(staging_area_dir.resolve())
+        output_dir_in_staging = True
+    except ValueError:
+        output_dir_in_staging = False
+    if output_dir_in_staging:
+        logger.error(
+            "Output directory %s is inside Staging_Area/. Refusing to "
+            "build in place — the folder would be visible to upload runs "
+            "before it is complete. Use the default output location or "
+            "an --output-dir outside Staging_Area/; the finished folder "
+            "is moved into Staging_Area/ atomically at the end.",
+            output_dir,
+        )
+        sys.exit(1)
+
     output_dir.mkdir(exist_ok=True, parents=True)
 
     readme_template_path = (
@@ -1229,6 +1320,23 @@ def main() -> None:
     # under the ESID_XXX/ subfolder.  The ZIP is now complete and final.
     add_files_to_zip(zip_path, output_dir, esid)
 
+    # Step 8b: Verify the finished ZIP against a FRESH scan of the raw
+    # folder — every WAV present, every size matching, both sides
+    # cross-checked (disk stat vs RIFF header, ZIP size vs CRC).  A
+    # failure here exits nonzero BEFORE the move and the sentinel, so an
+    # incomplete ZIP can never become an uploadable staging folder.
+    zip_problems = verify_zip_against_source(zip_path, source_dir)
+    if zip_problems:
+        for problem in zip_problems:
+            logger.error("ZIP VERIFICATION FAILED: %s", problem)
+        logger.error(
+            "The prepared ZIP does not match the raw data — nothing was "
+            "moved to Staging_Area/ and no completion sentinel was "
+            "written. Fix the raw folder (or re-run when it is fully "
+            "synced) and re-run this preparation."
+        )
+        sys.exit(1)
+
     # Step 9: Create EXTERNAL file_list.csv — overwrites the staging-area
     # copy with a version that prepends the finalized ZIP row (final hash +
     # size).  This is the version uploaded standalone to Zenodo.
@@ -1256,11 +1364,18 @@ def main() -> None:
     # Stale cleanup:
     #   Any leftover .partial/ or pre-existing final/ from a prior interrupted
     #   run is removed first, so re-prep is fully idempotent.
-    staging_area_dir = Path(__file__).resolve().parent.parent / "Staging_Area"
     final_destination = staging_area_dir / output_dir.name
     partial_destination = staging_area_dir / f".{output_dir.name}.partial"
     if output_dir.resolve() == final_destination.resolve():
-        logger.info("Staging folder already in Staging_Area: %s", output_dir)
+        # Unreachable: the in-place refusal at startup rejects any
+        # output_dir inside Staging_Area/.  Kept as a hard stop in case
+        # a future code path reintroduces one.
+        logger.error(
+            "Staging folder was built in place inside Staging_Area/ (%s) "
+            "— this bypasses the atomic move and must never happen.",
+            output_dir,
+        )
+        sys.exit(1)
     else:
         staging_area_dir.mkdir(parents=True, exist_ok=True)
         if partial_destination.exists():

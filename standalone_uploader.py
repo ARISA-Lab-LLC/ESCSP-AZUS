@@ -11,6 +11,7 @@ Environment variables required:
     INVENIO_RDM_BASE_URL: Zenodo API base URL (e.g., https://zenodo.org/api/).
 """
 
+import hashlib
 import logging
 import os
 import time
@@ -42,6 +43,70 @@ _PUT_RETRY_BACKOFF_S = (30, 90, 270)  # before attempts 2, 3, (4 not used)
 # is appropriate.  Same 3-attempt ceiling for consistency with PUT retries.
 _API_RETRY_ATTEMPTS = 3
 _API_RETRY_BACKOFF_S = (5, 15, 45)
+
+# Read-buffer size for local file hashing (matches standalone_tasks.py).
+_HASH_BUFFER_SIZE = 65_536
+
+
+# ===================================================================
+#  File integrity verification
+# ===================================================================
+
+class FileIntegrityError(Exception):
+    """A file on Zenodo does not match the local file it should mirror.
+
+    Raised when a committed upload's size/checksum disagrees with the
+    local file, or when a resume run cannot verify an already-committed
+    file.  Always fails the dataset — a mismatched file must never be
+    left on a record that could be published.
+    """
+
+
+def _calculate_md5(file_path: str) -> str:
+    """Stream a file through md5 (Zenodo's checksum algorithm)."""
+    md5 = hashlib.md5()
+    with open(file_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(_HASH_BUFFER_SIZE), b""):
+            md5.update(chunk)
+    return md5.hexdigest()
+
+
+def _remote_entry_mismatch(
+    entry: Dict[str, Any],
+    local_size: int,
+    local_md5: Optional[str] = None,
+) -> Optional[str]:
+    """Compare a Zenodo draft file entry against the local file's facts.
+
+    Args:
+        entry: A file entry dict from Zenodo (``size``, ``checksum`` keys).
+        local_size: The local file's size in bytes.
+        local_md5: The local file's md5 hex digest, or None to skip the
+            checksum comparison (size-only check).
+
+    Returns:
+        A human-readable mismatch description, or None when the remote
+        entry matches everything it was given to compare against.
+    """
+    remote_size = entry.get("size")
+    if remote_size is not None:
+        try:
+            remote_size_int = int(remote_size)
+        except (TypeError, ValueError):
+            return f"Zenodo reported an unparseable size: {remote_size!r}"
+        if remote_size_int != local_size:
+            return (
+                f"size mismatch — Zenodo holds {remote_size_int} bytes, "
+                f"local file is {local_size} bytes"
+            )
+    checksum = entry.get("checksum") or ""
+    if local_md5 is not None and checksum.startswith("md5:"):
+        if checksum[len("md5:"):] != local_md5:
+            return (
+                f"checksum mismatch — Zenodo holds {checksum}, "
+                f"local file is md5:{local_md5}"
+            )
+    return None
 
 
 # ===================================================================
@@ -162,10 +227,20 @@ def upload_file_to_draft(
     Raises:
         FileNotFoundError: If the local file does not exist.
         HTTPError: If any API step fails.
+        FileIntegrityError: If the committed file's size or checksum on
+            Zenodo does not match the local file.  The broken slot is
+            deleted before raising, so the draft stays clean.
     """
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Local facts captured up front — what Zenodo holds after the commit
+    # must match these exactly (post-commit verification below).
+    local_size = file_path_obj.stat().st_size
+    logger.debug("  Hashing %s (md5) for post-upload verification...",
+                 file_path_obj.name)
+    local_md5 = _calculate_md5(file_path)
 
     url = f"{credentials.base_url}records/{record_id}/draft/files"
     auth = _auth_headers(credentials)
@@ -234,8 +309,37 @@ def upload_file_to_draft(
         file_entry["links"]["commit"], headers=auth,
     )
     commit_response.raise_for_status()
+    committed = commit_response.json()
 
-    return commit_response.json()
+    # Step 4: Post-commit verification — double-check what Zenodo now
+    # holds against the local file's size and md5.  A silent transfer
+    # corruption or truncation must fail the dataset here, not surface
+    # later as a broken download for a researcher.
+    mismatch = _remote_entry_mismatch(committed, local_size, local_md5)
+    if mismatch is not None:
+        logger.error(
+            "  Post-upload verification FAILED for %s: %s. "
+            "Deleting the corrupt remote copy...",
+            file_path_obj.name, mismatch,
+        )
+        try:
+            delete_draft_file(credentials, record_id, file_path_obj.name)
+            logger.info("  Corrupt remote copy deleted: %s", file_path_obj.name)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "  Could not delete corrupt remote copy %s: %s — the next "
+                "resume run's size/checksum verification will clear it.",
+                file_path_obj.name, cleanup_exc,
+            )
+        raise FileIntegrityError(
+            f"Uploaded file {file_path_obj.name} failed verification "
+            f"({mismatch})"
+        )
+    logger.info(
+        "  Verified on Zenodo: %s (size and md5 match local file)",
+        file_path_obj.name,
+    )
+    return committed
 
 
 def _put_file_content_with_retry(
@@ -1029,9 +1133,9 @@ def upload_to_zenodo(
                 )
 
             existing_by_key = {e.get("key"): e for e in existing_entries}
-            target_names = {Path(p).name for p in files}
+            local_by_name = {Path(p).name: p for p in files}
             for key, entry in existing_by_key.items():
-                if key not in target_names:
+                if key not in local_by_name:
                     logger.info(
                         "    (not in upload list — leaving as-is: %s)", key
                     )
@@ -1041,10 +1145,46 @@ def upload_to_zenodo(
                 # InvenioRDM's canonical value is "completed"; we log the
                 # raw value so a future status change is easy to spot.
                 if status == "completed":
-                    skip_keys.add(key)
-                    logger.info(
-                        "  Already uploaded, skipping: %s (status=%s)", key, status
-                    )
+                    # A committed file is only skipped after it VERIFIES
+                    # against the local file — size first (cheap), then
+                    # md5 when Zenodo provides one.  Skipping by name
+                    # alone let short ZIPs from interrupted runs stay on
+                    # records forever, even after the local ZIP was fixed.
+                    local_path = local_by_name[key]
+                    try:
+                        local_size = Path(local_path).stat().st_size
+                        mismatch = _remote_entry_mismatch(entry, local_size)
+                        if (
+                            mismatch is None
+                            and (entry.get("checksum") or "").startswith("md5:")
+                        ):
+                            logger.info(
+                                "  Verifying committed file %s (md5)...", key
+                            )
+                            mismatch = _remote_entry_mismatch(
+                                entry, local_size, _calculate_md5(local_path)
+                            )
+                    except OSError as exc:
+                        # Cannot read the local file — fail the dataset
+                        # rather than guess.  Deleting the remote copy
+                        # here could destroy the only good copy.
+                        raise FileIntegrityError(
+                            f"Cannot verify committed file {key} against "
+                            f"local copy ({exc}) — refusing to continue."
+                        )
+                    if mismatch is None:
+                        skip_keys.add(key)
+                        logger.info(
+                            "  Already uploaded and VERIFIED, skipping: %s "
+                            "(status=%s)", key, status,
+                        )
+                    else:
+                        logger.warning(
+                            "  Committed file on Zenodo does NOT match the "
+                            "local file (%s) — deleting the remote copy of "
+                            "%s and re-uploading.", mismatch, key,
+                        )
+                        delete_draft_file(credentials, record_id, key)
                 else:
                     logger.info(
                         "  Clearing existing slot for re-upload: %s "
