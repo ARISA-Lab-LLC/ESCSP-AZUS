@@ -46,6 +46,14 @@ logger = logging.getLogger("azus.prepare")
 # SHA-512 read buffer — 64 KB for efficient hashing of large files
 _HASH_BUFFER_SIZE = 65_536
 
+# ZIP's DOS timestamp field cannot represent dates before 1980-01-01.
+# AudioMoth real-time clocks reset to the 1970 Unix epoch on power loss,
+# so recordings made before the clock was set carry pre-1980 mtimes.
+# Used only to log which files will have their ZIP-entry timestamp
+# clamped (the recording start time lives in the WAV filename, so the
+# clamp loses nothing scientific).
+_ZIP_MIN_MTIME = 315_532_800  # 1980-01-01T00:00:00 UTC as a Unix epoch
+
 
 # ===================================================================
 #  Utility functions
@@ -138,10 +146,29 @@ def create_zip_file(
     # WAV files sorted for deterministic archive ordering
     wav_files = sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
 
+    # Surface files whose mtime predates the ZIP timestamp epoch — their
+    # ZIP-entry timestamps get clamped to 1980-01-01 (see
+    # strict_timestamps=False below).  An unset AudioMoth clock is also a
+    # data-quality signal worth having in the prep log.
+    candidates = ([config_file] if config_file is not None else []) + wav_files
+    pre_1980 = [f.name for f in candidates if f.stat().st_mtime < _ZIP_MIN_MTIME]
+    if pre_1980:
+        logger.warning(
+            "  %d file(s) have modification times before 1980 (AudioMoth "
+            "clock was likely unset) — their ZIP-entry timestamps will be "
+            "clamped to 1980-01-01. Recording times in the WAV filenames "
+            "are unaffected. First few: %s",
+            len(pre_1980), ", ".join(pre_1980[:5]),
+        )
+
     # Populated during the write pass — avoids a second read of large files
     content_hashes: Dict[str, str] = {}
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    # strict_timestamps=False clamps pre-1980 mtimes to 1980-01-01 instead
+    # of raising ValueError ("ZIP does not support timestamps before 1980").
+    with zipfile.ZipFile(
+        zip_path, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False
+    ) as zipf:
 
         # --- CONFIG.TXT first (small file, metadata context before audio) ---
         if config_file is not None:
@@ -517,7 +544,13 @@ def add_files_to_zip(zip_path: Path, output_dir: Path, esid: str) -> int:
     logger.info("Appending metadata files to ZIP: %s", zip_path.name)
 
     appended = 0
-    with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zipf:
+    # strict_timestamps=False for consistency with create_zip_file() —
+    # the metadata files appended here are freshly generated so a
+    # pre-1980 mtime should be impossible, but both ZIP writers should
+    # behave identically if one ever slips through.
+    with zipfile.ZipFile(
+        zip_path, "a", zipfile.ZIP_DEFLATED, strict_timestamps=False
+    ) as zipf:
         for file_path in sorted(output_dir.iterdir()):
             if not file_path.is_file():
                 continue

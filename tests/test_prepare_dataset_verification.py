@@ -10,6 +10,7 @@ Run from the project root:
     python3 -m unittest discover -s tests -v
 """
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -137,6 +138,69 @@ class TestVerifyZipAgainstSource(unittest.TestCase):
         (source / "._20240408_120000.WAV").write_bytes(b"\x00\x05\x16\x07")
         zip_path = zip_from_source(source, self.out)
         self.assertEqual(prep.verify_zip_against_source(zip_path, source), [])
+
+
+class TestPre1980Timestamps(unittest.TestCase):
+    """Regression tests for 'ZIP does not support timestamps before 1980'.
+
+    AudioMoth clocks reset to the 1970 Unix epoch on power loss, so raw
+    WAVs can arrive with pre-1980 mtimes (rsync preserves them).  Both
+    ZIP writers must clamp such timestamps instead of raising.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.out = self.root / "out"
+        self.out.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_create_zip_file_accepts_1970_mtime_wav(self):
+        source = make_source_dir(self.root)
+        epoch_wav = source / "19700101_000000.WAV"
+        write_wav(epoch_wav, 3000)
+        os.utime(epoch_wav, (0, 0))  # mtime = 1970-01-01 (Unix epoch)
+
+        # Used to raise ValueError from ZipInfo; must now succeed.
+        zip_path, content_hashes = prep.create_zip_file(
+            source, self.out, "005"
+        )
+
+        self.assertIn(epoch_wav.name, content_hashes)
+        with zipfile.ZipFile(zip_path) as zf:
+            info = zf.getinfo(f"ESID_005/{epoch_wav.name}")
+            # strict_timestamps=False clamps to the ZIP epoch, 1980-01-01.
+            self.assertGreaterEqual(info.date_time, (1980, 1, 1, 0, 0, 0))
+        # The clamped entry must still pass the pre-sentinel verification.
+        self.assertEqual(prep.verify_zip_against_source(zip_path, source), [])
+
+    def test_create_zip_file_accepts_1970_mtime_config(self):
+        source = make_source_dir(self.root)
+        config = source / "CONFIG.TXT"
+        config.write_text("gain: medium\n", encoding="utf-8")
+        os.utime(config, (0, 0))
+
+        zip_path, content_hashes = prep.create_zip_file(
+            source, self.out, "005"
+        )
+        self.assertIn("CONFIG.TXT", content_hashes)
+        with zipfile.ZipFile(zip_path) as zf:
+            self.assertIn("ESID_005/CONFIG.TXT", zf.namelist())
+
+    def test_add_files_to_zip_accepts_1970_mtime_file(self):
+        source = make_source_dir(self.root)
+        zip_path, _ = prep.create_zip_file(source, self.out, "005")
+        stale_meta = self.out / "file_list.csv"
+        stale_meta.write_text("File Name\n", encoding="utf-8")
+        os.utime(stale_meta, (0, 0))
+
+        appended = prep.add_files_to_zip(zip_path, self.out, "005")
+
+        self.assertEqual(appended, 1)
+        with zipfile.ZipFile(zip_path) as zf:
+            self.assertIn("ESID_005/file_list.csv", zf.namelist())
 
 
 class TestInPlaceBuildRefusal(unittest.TestCase):
