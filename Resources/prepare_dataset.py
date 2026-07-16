@@ -988,6 +988,69 @@ def create_upload_manifest(output_dir: Path, esid: str) -> Path:
 #  CLI entry point
 # ===================================================================
 
+# Upload-pipeline artifacts that must SURVIVE a re-prep.  They are the
+# only link between a staging folder and its Zenodo draft:
+#   * upload_state.json           — the draft's record_id (resume marker)
+#   * ESID_XXX_request_log.json   — draft-creation log; also holds the id
+# Destroying them (as the re-prep rmtree used to) orphans the existing
+# draft on Zenodo, and the next upload run creates a DUPLICATE record.
+_UPLOAD_ARTIFACT_PATTERNS = ("upload_state.json", "ESID_*_request_log.json")
+
+
+def _stash_upload_artifacts(folder: Path) -> Dict[str, bytes]:
+    """Read the upload-pipeline artifacts out of a folder about to be
+    deleted.  Returns {filename: content} — empty when none exist."""
+    stash: Dict[str, bytes] = {}
+    if not folder.is_dir():
+        return stash
+    for pattern in _UPLOAD_ARTIFACT_PATTERNS:
+        for artifact in sorted(folder.glob(pattern)):
+            try:
+                stash[artifact.name] = artifact.read_bytes()
+            except OSError as exc:
+                logger.warning(
+                    "Could not preserve %s across re-prep: %s",
+                    artifact.name, exc,
+                )
+    return stash
+
+
+def _restore_upload_artifacts(folder: Path, stash: Dict[str, bytes]) -> None:
+    """Write stashed upload artifacts into the freshly prepared folder.
+
+    Keeps the folder linked to its existing Zenodo draft so the next
+    upload run RESUMES it instead of creating a duplicate record.
+
+    Caveat (also documented in the guides): resuming a preserved draft
+    does not re-send record metadata — if this re-prep changed the
+    README/metadata, fix the record description in the Zenodo web UI
+    after the upload completes.
+    """
+    for name, content in stash.items():
+        try:
+            (folder / name).write_bytes(content)
+        except OSError as exc:
+            logger.warning(
+                "Could not restore %s after re-prep: %s", name, exc,
+            )
+    if "upload_state.json" in stash:
+        try:
+            record_id = json.loads(
+                stash["upload_state.json"].decode("utf-8")
+            ).get("record_id", "?")
+        except (ValueError, UnicodeDecodeError):
+            record_id = "?"
+        logger.info(
+            "Preserved upload state across re-prep (record %s): %s",
+            record_id, ", ".join(sorted(stash)),
+        )
+    elif stash:
+        logger.info(
+            "Preserved upload artifacts across re-prep: %s",
+            ", ".join(sorted(stash)),
+        )
+
+
 def main() -> None:
     """Command-line entry point for dataset preparation."""
     parser = argparse.ArgumentParser(
@@ -1206,7 +1269,12 @@ def main() -> None:
                 partial_destination,
             )
             shutil.rmtree(partial_destination)
+        upload_artifact_stash: Dict[str, bytes] = {}
         if final_destination.exists():
+            # Preserve the folder's link to any existing Zenodo draft
+            # BEFORE destroying it — otherwise the next upload run cannot
+            # resume that draft and creates a duplicate record.
+            upload_artifact_stash = _stash_upload_artifacts(final_destination)
             logger.warning(
                 "Replacing existing staging folder: %s", final_destination
             )
@@ -1215,6 +1283,8 @@ def main() -> None:
         shutil.move(str(output_dir), str(partial_destination))
         logger.info("Phase 2: atomic rename -> %s", final_destination)
         os.rename(str(partial_destination), str(final_destination))
+        if upload_artifact_stash:
+            _restore_upload_artifacts(final_destination, upload_artifact_stash)
         output_dir = final_destination
 
     # --- Summary ---

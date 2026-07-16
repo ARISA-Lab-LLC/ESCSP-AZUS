@@ -117,7 +117,7 @@ _ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 #  Discovery
 # =====================================================================
 
-def discover_stuck_esids() -> List[Tuple[int, str, Path, str]]:
+def discover_stuck_esids() -> Tuple[List[Tuple[int, str, Path, str]], List[str]]:
     """Walk Staging_Area/ and return every ESID with a partial upload.
 
     A "stuck" ESID is identified by these two conditions:
@@ -135,16 +135,22 @@ def discover_stuck_esids() -> List[Tuple[int, str, Path, str]]:
     normal upload run, not a recovery.
 
     Returns:
-        Sorted list of (numeric_esid, padded_str, folder_path, record_id)
-        tuples, ordered ascending by numeric ESID value.  Empty list
-        if Staging_Area/ does not exist or contains no stuck uploads.
+        Tuple of (stuck, excluded):
+          * stuck — sorted list of (numeric_esid, padded_str,
+            folder_path, record_id) tuples, ascending by ESID value.
+          * excluded — names of ESID folders that were SKIPPED because
+            they have no upload_state.json.  Callers must surface this
+            list: these folders are invisible to recovery, and hiding
+            them (as this tool once did) let missing-state datasets go
+            unnoticed for weeks.
     """
     found: List[Tuple[int, str, Path, str]] = []
+    excluded: List[str] = []
 
     if not _STAGING_AREA.is_dir():
         # No staging area = no stuck uploads.  Return cleanly so the
         # caller can print a friendly "nothing to do" message.
-        return found
+        return found, excluded
 
     for entry in _STAGING_AREA.iterdir():
         # Skip files and non-ESID-named folders.  This silently filters
@@ -158,10 +164,12 @@ def discover_stuck_esids() -> List[Tuple[int, str, Path, str]]:
             logger.debug("Skipping non-ESID directory: %s", entry.name)
             continue
 
-        # The stuck marker.  No marker → upload didn't start, or the
-        # marker was manually removed.  Either way, not stuck.
+        # The stuck marker.  No marker → this tool cannot resume the
+        # folder (there is nothing to resume TO).  Track it so main()
+        # can tell the user instead of hiding it at debug level.
         state_file = entry / _STATE_FILENAME
         if not state_file.is_file():
+            excluded.append(entry.name)
             logger.debug(
                 "Skipping %s — no upload_state.json (not stuck)",
                 entry.name,
@@ -195,7 +203,8 @@ def discover_stuck_esids() -> List[Tuple[int, str, Path, str]]:
     # Sort by integer value, not string — robust if the user has
     # both ESID_4 and ESID_073 sitting side by side.
     found.sort(key=lambda t: t[0])
-    return found
+    excluded.sort()
+    return found, excluded
 
 
 # =====================================================================
@@ -330,7 +339,22 @@ def main() -> None:
     logger.info("=" * 70)
 
     # --- Discover ---
-    stuck = discover_stuck_esids()
+    stuck, excluded = discover_stuck_esids()
+
+    # Surface the folders this tool CANNOT recover.  These used to be
+    # hidden at debug level, which let missing-state datasets silently
+    # sit out every recovery run.
+    if excluded:
+        logger.info("")
+        logger.info(
+            "EXCLUDED %d folder(s) with no upload_state.json (this tool "
+            "cannot resume them): %s",
+            len(excluded), ", ".join(excluded),
+        )
+        logger.info(
+            "  Run 'python Resources/diagnose_missing_states.py' to see "
+            "why each one is missing its state file."
+        )
 
     if not stuck:
         logger.info("No stuck uploads found in %s — nothing to do.", _STAGING_AREA)
@@ -342,6 +366,11 @@ def main() -> None:
         logger.info(
             "  ESID %s  →  Zenodo draft %s   (folder: %s)",
             padded, record_id, folder.name,
+        )
+    if excluded:
+        logger.info(
+            "  (+ %d folder(s) excluded — no upload_state.json, see above)",
+            len(excluded),
         )
     logger.info("=" * 70)
 

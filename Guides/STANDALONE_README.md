@@ -501,6 +501,165 @@ already has a DOI is left untouched. If a record was created DOI-less by
 an older version of AZUS, the next `finish_stuck_uploads.py` run reserves
 its DOI automatically before submitting it for review.
 
+### WAV integrity audit (`Resources/audit_wav_integrity.py`)
+
+When uploads keep failing, first rule out bad source data. This tool
+walks every `ESID_NNN` subfolder of the raw-data folder and writes one
+CSV row per ESID comparing, side by side:
+
+- **Disk** — the `.WAV` files at the top level of the raw ESID folder:
+  count, exact bytes, GB, zero-byte count, and "tiny" count (files
+  smaller than `--tiny-threshold` bytes, default 1024 — a WAV header
+  alone is 44 bytes, so tiny files contain no real audio).
+- **ZIP** — the `.wav` entries recorded inside the matching
+  `ESID_NNN.zip`, auto-located in `Staging_Area/ESID_NNN_Staging/`
+  first, then `Uploaded_Data/ESID_NNN_Uploaded/`. Only the ZIP index
+  is read (no extraction — fast even on 43 GB archives); sizes are the
+  uncompressed entry sizes.
+- **Match** — `YES` when disk count and bytes equal ZIP count and
+  bytes; `NO` with an explanatory note (files missing from the ZIP,
+  extra files in the ZIP, or differing byte totals); `N/A` when there
+  is no readable ZIP.
+
+```bash
+# Report written to wav_integrity_report_YYYYMMDD_HHMMSS.csv in the cwd
+python Resources/audit_wav_integrity.py /path/to/Raw_Data
+
+# Name every offending file in the log; stricter tiny cutoff
+python Resources/audit_wav_integrity.py /path/to/Raw_Data \
+    --verbose --tiny-threshold 4096
+```
+
+**How to read it:** zero/tiny WAVs on disk → fix the source recordings;
+zero/tiny WAVs only in the ZIP, `Match = NO`, or `ZIP unreadable` →
+re-run `prepare_dataset.py` for that ESID before uploading. Exit code
+is `1` when any problem is found (`ZIP Not Found` alone is
+informational — the ESID may simply not be prepared yet), `0` when
+everything is clean.
+
+### Duplicate-record check (`Resources/find_duplicate_records.py`)
+
+If an upload run loses its `upload_state.json` (for example, a re-prep
+wipes and rebuilds the staging folder), the next run cannot resume the
+existing Zenodo draft and creates a fresh one — same title, two
+records. This read-only tool finds those duplicates.
+
+```bash
+# Full check: community records + everything under your account,
+# INCLUDING drafts (needs the API token)
+source Resources/set_env.sh
+python Resources/find_duplicate_records.py
+
+# Community-only check — public API, works without any token
+python Resources/find_duplicate_records.py --scope community
+```
+
+It writes `duplicate_records_report_YYYYMMDD_HHMMSS.csv` (one row per
+record in each duplicate group: record ID, status, published flag, DOI,
+created date, URL) and reports two group types:
+
+- **exact-title** — identical titles (case/whitespace-insensitive) on
+  records that are NOT versions of one another. Versions of one record
+  legitimately share a title and are never flagged.
+- **same-esid** — same ESID number in the title but different title
+  text: duplicates hidden by a title-template change between runs.
+
+The summary counts how many involved records are unpublished
+(drafts/in-review) — those are the safely deletable strays. Published
+duplicates need a curation decision instead (published Zenodo records
+cannot simply be deleted). The tool itself deletes nothing. Exit code:
+`0` clean, `1` duplicates found, `2` usage/auth/API error.
+
+### Upload-state listing (`Resources/list_upload_states.py`)
+
+Lists every `upload_state.json` in `Staging_Area/` and `Uploaded_Data/`
+in one CSV — the local record of WHICH Zenodo record each ESID belongs
+to:
+
+```bash
+python Resources/list_upload_states.py
+# -> upload_states_report_YYYYMMDD_HHMMSS.csv in the cwd (--output to override)
+```
+
+Columns: `ESID#`, `Location` (Staging/Uploaded), `Folder`, `Record ID`,
+`Zenodo URL`, `State Created`, `Resumed`, `Notes`. Rows in
+`Staging_Area/` are drafts with incomplete uploads (stuck or deferred);
+rows in `Uploaded_Data/` are completed uploads. ESID folders without a
+state file are counted in the log (they simply haven't uploaded yet)
+but get no CSV row. Unreadable state files and ones missing a
+`record_id` are flagged in `Notes` and make the tool exit `1`.
+
+Use it together with `find_duplicate_records.py`: a Zenodo record
+whose id appears in the duplicate report but NOT in this listing is a
+stray that no local folder claims.
+
+### Duplicate prevention (three layers)
+
+A staging folder's link to its Zenodo draft lives in
+`upload_state.json`. Historically, losing that link meant the next run
+created a fresh draft — a duplicate record. Three layers now prevent
+that:
+
+1. **Re-prep preserves the link** — when `prepare_dataset.py` replaces
+   an existing staging folder, it now carries `upload_state.json` and
+   `ESID_XXX_request_log.json` over into the rebuilt folder instead of
+   destroying them. *Caveat:* resuming a preserved draft does not
+   re-send record metadata — if the re-prep changed the README or
+   metadata, fix the record description in the Zenodo web UI after the
+   upload completes.
+2. **Request-log fallback** — if `upload_state.json` is missing or
+   unreadable but the folder's `ESID_XXX_request_log.json` (written at
+   draft creation) still holds the `record_id`, the run resumes that
+   draft and rewrites the state file automatically.
+3. **Title guard (last line of defense)** — before creating any fresh
+   draft, the uploader searches your account for a record with the
+   same title (exact match after trimming whitespace and case):
+   - existing **draft** with that title → it is *resumed* instead of
+     duplicated (logged loudly as `DUPLICATE GUARD`);
+   - existing **published** record → the dataset **fails** with a
+     `DuplicateTitleError` instead of creating a duplicate — the folder
+     stays in `Staging_Area/` for review;
+   - search failure → the dataset fails (fail-closed: a failed run is
+     retryable, a duplicate record is permanent).
+   Disable per run with `--skip-title-guard` — only for the rare case
+   where a second record with an identical title is truly intended.
+   Resumed uploads (including everything `finish_stuck_uploads.py`
+   does) bypass the guard naturally, since they already know their
+   record id.
+
+### Missing-state diagnosis (`Resources/diagnose_missing_states.py`)
+
+`finish_stuck_uploads.py` only attempts folders that HAVE
+`upload_state.json` — folders without one are skipped at DEBUG level,
+i.e. **silently excluded from every recovery run**. This tool explains
+why each no-state folder ended up that way:
+
+```bash
+# Read-only diagnosis (add --log azus_upload.log to quote log evidence)
+python Resources/diagnose_missing_states.py --log azus_upload.log
+
+# Healer: where a surviving ESID_XXX_request_log.json still holds the
+# draft's record_id, re-create upload_state.json pointing at it
+python Resources/diagnose_missing_states.py --restore-states
+```
+
+Probable causes it distinguishes (most→least specific): draft exists on
+Zenodo but the state file was lost (request log holds the record id —
+**restore it, or the next run creates a duplicate record**); attempt
+reached the upload phase but draft creation failed; folder re-prepped
+after a successful upload (record already on Zenodo!); no ZIP in the
+folder (skipped with zero logging); tracker skip
+(`Records/uploaded_files.txt`); no collectors-CSV row; pre-draft
+failure recorded in `failed_results.csv`; or no evidence of any
+attempt (probably never covered by your `--esid` filters).
+
+Output: `missing_state_diagnosis_YYYYMMDD_HHMMSS.csv` with the full
+evidence per folder (ZIP/tracker/collector/artifact flags, prep
+sentinel mtime, latest failure message) plus Probable Cause and
+Suggested Action columns. `--restore-states` never overwrites an
+existing state file. Exit `0` = every folder has a state file, `1` =
+folders diagnosed, `2` = usage error.
+
 ### Content audit (`Resources/audit_prep_completeness.py`)
 
 `prep_all_datasets.py`'s skip check is intentionally cheap: it trusts

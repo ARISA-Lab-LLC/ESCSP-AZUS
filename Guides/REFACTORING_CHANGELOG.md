@@ -1,10 +1,273 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — `audit_wav_integrity.py` QC hardening: every size double-checked
+
+Reported symptom: folders labelled as having zero-byte WAVs that did
+not. QC audit found the tool trusted a SINGLE size measurement and had
+several silent-error paths:
+
+- `stat().st_size` was trusted blindly. On the project's Dropbox volume,
+  cloud "online-only" / macOS dataless placeholder files can report
+  `st_size == 0` while the real bytes are in the cloud → falsely counted
+  as zero-byte. (Most likely the reported symptom.)
+- Match was decided on aggregate `(count, total_bytes)`. Two different
+  file sets with the same count and total (e.g. two WAVs with swapped
+  sizes, or a truncation offset by padding) passed as a FALSE `Match=YES`.
+- macOS AppleDouble sidecars (`._name.WAV`) end in `.wav` and were
+  counted as recordings, inflating counts and creating phantom tiny WAVs.
+- The `Disk WAV GB` column rounded any folder under ~5 MB to `0.0` — also
+  readable as "zero".
+
+Rewrite (same CLI; simpler pure-function core):
+
+- **Every size measured two independent ways, with a Cross-Check column
+  per side.** Disk: `stat` size vs the WAV's own RIFF/WAVE header
+  (declares `filesize − 8`); disagreement is flagged, never trusted. A
+  `stat=0` file whose header is readable is flagged as a placeholder —
+  NOT counted as zero-byte (fixes the symptom). Truncated files
+  (`stat < header`) are now caught. ZIP: `file_size` vs CRC/compressed
+  size (a `size=0` entry must have `CRC=0`); a nonzero CRC means the size
+  field is unreliable.
+- **Match is now per-file (`{name: size}`), not aggregate** — a swapped
+  or truncated WAV is caught even when counts and totals coincide.
+  Duplicate basenames inside the ZIP are detected explicitly.
+- **Aggregate self-check (belt-and-suspenders):** every file is recorded
+  once in a per-side ledger; `WavStats.verify()` independently re-derives
+  the reported count, total bytes, size map, and zero/tiny counts from
+  that ledger and confirms they match the incrementally-accumulated
+  fields. A summary line reports `Internal self-check: PASSED/FAILED`;
+  a failure marks the ESID a problem (exit 1) and prints "DO NOT trust
+  the totals for these rows". Catches accumulation-logic bugs, not just
+  per-file measurement errors.
+- AppleDouble `._*` sidecars skipped and counted separately.
+- `Disk/ZIP WAV Size` human-readable columns (B/KB/MB/GB) replace the
+  rounding-to-0.0 GB columns; exact `Bytes` columns remain authoritative.
+- Exit 1 on any cross-check discrepancy, not just mismatches/zero/tiny.
+
+Tests: `tests/test_audit_wav_integrity.py` — 33 stdlib-unittest tests.
+Pure-function tests for RIFF parsing, disk classification (incl. the
+placeholder-zero symptom and truncation), ZIP classification (incl. the
+size-0/CRC-nonzero lie), and per-file Match (incl. the aggregate
+false-YES regression: A=500/B=2000 vs A=2000/B=500 now correctly `NO`);
+real-file + real-ZIP integration (sidecar/nested exclusion, duplicate
+basename, corrupt ZIP); and end-to-end CLI exit codes. Full `tests/`
+suite: 59 tests, all passing.
+
+## July 2026 — `find_missing_esids.py` QC hardening + first unit-test suite
+
+The tool produced FALSE-COMPLETE results (genuinely missing ESIDs not
+reported). QC audit found the defect class: an ESID that never makes it
+into the parsed master set can never be flagged missing, and three code
+paths lost ESIDs silently — (1) `re.sub(r"\D","",cell)` concatenated
+every digit in a cell (`"ESID 073 (2024)"` → 732024; Excel float
+`"73.0"` → 730), (2) first-substring column matching could bind to the
+wrong ESID-like column, (3) blank/garbled cells were skipped without a
+trace.
+
+Rewrite (same CLI + new `--master-column`/`--report-column` overrides):
+
+- Hard project invariant enforced: ESIDs are 000–999; anything else is
+  flagged as a parsing artifact, never included.
+- Deterministic per-cell parsing that never guesses (single number, or
+  exactly one ESID-prefixed number; Excel floats normalized; everything
+  else listed with row number + verbatim cell).
+- Deterministic column selection: exact `ESID#`/`ESID` match beats fuzzy;
+  multiple fuzzy candidates are an exit-2 error, not a guess; the chosen
+  column and sample raw→parsed values are echoed.
+- Per-file accounting equation, duplicate-value report, encoding
+  (UTF-8→cp1252) and semicolon-delimiter guards, runtime self-check of
+  the answer's set invariants.
+- Exit 0 only when nothing is missing AND every cell parsed — data-
+  quality problems force exit 1 with a "RESULTS MAY BE INCOMPLETE"
+  banner, so a false complete cannot hide.
+
+New `tests/` directory (repo's first): `tests/test_find_missing_esids.py`
+— 26 stdlib-unittest tests: per-cell parsing, column selection, encoding/
+delimiter guards, three false-complete regression tests, a 200-iteration
+randomized property test (tool output must equal an independent set
+difference), and end-to-end CLI exit-code tests. The suite immediately
+caught one bug in the rewrite itself (`sys.exit("msg")` exits 1, not 2 —
+fixed with a `_die()` helper). Run with:
+`python3 -m unittest discover -s tests`.
+
 ## Summary
 
 Transformed AZUS from an Eclipse Soundscapes–specific tool into a **generalizable
 citizen science data upload platform**.  All project-specific identity is now in
 configuration files, not Python code.
+
+---
+
+## July 2026 — Duplicate prevention (Case-7 root fix) + four visibility defects
+
+Duplicate Zenodo records were being created whenever a staging folder's
+link to its draft (`upload_state.json`) was lost — the next run made a
+fresh draft. Fixed in three layers plus the four defects that let it
+happen silently.
+
+### Layer A — re-prep preserves the draft link (`Resources/prepare_dataset.py`)
+
+Replacing an existing staging folder used to `rmtree` it wholesale,
+destroying `upload_state.json` and `ESID_XXX_request_log.json`. The move
+block now stashes both in memory before the delete and restores them into
+the rebuilt folder after the atomic rename
+(`_stash_upload_artifacts` / `_restore_upload_artifacts`). Caveat: a
+resumed draft does not re-send metadata — fix descriptions in the web UI
+if the re-prep changed them.
+
+### Layer B — request-log fallback (`standalone_tasks.py`)
+
+When `upload_state.json` is missing/unreadable but the folder's request
+log still holds the draft's `record_id`
+(`_recover_draft_id_from_request_log`), the run resumes that draft; the
+uploader rewrites the state file, self-healing the folder.
+
+### Layer C — same-title guard (`standalone_uploader.py`)
+
+Last line of defense when all local evidence is gone. Before creating a
+fresh draft, `upload_to_zenodo()` searches `GET /user/records` for the
+intended title (exact normalized match client-side; handles both Zenodo
+serializations):
+
+- matching unpublished draft → adopted/resumed instead of duplicated
+- matching published record → new `DuplicateTitleError` → dataset fails
+  with a clear message; nothing is created; folder stays for review
+- search failure → fail-closed (a failed run is retryable, a duplicate
+  is permanent)
+
+New CLI escape hatch: `--skip-title-guard` (default: guard ON). Resume
+paths — including everything `finish_stuck_uploads.py` does — bypass the
+guard naturally. `_api_get_with_retry` gained an optional `params`
+passthrough for the search query.
+
+### Layer D — four visibility/robustness defects fixed
+
+1. `stats["skipped"]` was initialized and printed but never incremented —
+   `get_upload_data()` now takes the shared stats dict and counts tracker
+   skips, and each tracker-skipped dataset is named at INFO.
+2. An ESID folder with no ZIP was skipped with zero logging — now a
+   WARNING plus a `failed_results.csv` row
+   ("No ZIP file found in staging folder").
+3. A broken upload manifest raised out of `create_upload_data()` and
+   aborted the whole batch — now isolated per ESID: error logged, failure
+   row written, remaining datasets continue.
+4. `finish_stuck_uploads.py` hid no-state folders at DEBUG — discovery
+   now returns them, and they are listed at INFO with a pointer to
+   `diagnose_missing_states.py`, plus a count in the found-summary.
+
+---
+
+## July 2026 — `Resources/diagnose_missing_states.py`: why is upload_state.json missing?
+
+Investigation finding: `finish_stuck_uploads.py` only attempts folders
+that HAVE `upload_state.json` — no-state folders are skipped at DEBUG
+level and never counted in its summary, so they are silently excluded
+from every recovery run. The state file is only created once a run
+reaches draft creation, and the pipeline has multiple
+silent-or-nearly-silent ways to stop short of that (no ZIP in folder:
+zero logging; tracker skip: aggregate count only; collectors-CSV row
+missing; Phase-1/config failures; draft-POST failures; re-prep wiping
+the folder; state-write failure; `--esid` filter exclusion at DEBUG).
+
+New diagnostic (read-only by default):
+
+- For every no-state folder in `Staging_Area/`, gathers: ZIP presence,
+  tracker membership, collectors-CSV row, `ESID_XXX_metadata.json`
+  (attempt reached upload phase), `ESID_XXX_request_log.json` — whose
+  `record_id` proves a live draft exists on Zenodo — success/failure
+  results rows, `.prep_complete` mtime, and (with `--log`, repeatable)
+  per-ESID lines from azus_upload.log keyed on the pipeline's verbatim
+  error strings.
+- Classifies each folder with a decision tree ordered like the real
+  pipeline (artifacts > success-row > no-ZIP > tracker > collectors >
+  failure-rows > no-evidence) and emits Probable Cause + Suggested
+  Action per row to `missing_state_diagnosis_YYYYMMDD_HHMMSS.csv`.
+- **`--restore-states` (opt-in healer):** where a readable request log
+  holds the record_id, writes a fresh `upload_state.json`
+  (`"restored_from"` marker included) so `finish_stuck_uploads.py`
+  resumes the existing draft instead of a future run minting a
+  duplicate. Never overwrites an existing state file.
+
+Known defects recorded during the investigation (separate fixes,
+deliberately NOT in this change): `stats["skipped"]` never incremented
+(summary always prints 0); no-ZIP folders skipped with zero logging;
+`read_upload_manifest` FileNotFoundError propagates uncaught and can
+abort a whole category batch; `finish_stuck_uploads.py` should surface
+excluded no-state folders at INFO with a summary count.
+
+---
+
+## July 2026 — `Resources/list_upload_states.py`: upload-state listing
+
+Companion diagnostic to the duplicate-record check. Scans
+`Staging_Area/` and `Uploaded_Data/` for `upload_state.json` files and
+writes one CSV row per file found: `ESID#`, `Location`, `Folder`,
+`Record ID`, `Zenodo URL`, `State Created`, `Resumed`, `Notes`.
+
+- Staging rows = drafts with incomplete uploads; Uploaded rows =
+  completed uploads and the record each became.
+- ESID folders without a state file are counted in the log only (not an
+  error — they haven't uploaded yet).
+- Unreadable state files / missing `record_id` are flagged in `Notes`;
+  exit `1` on any such anomaly, `0` otherwise, `2` on usage errors.
+- Read-only, stdlib only, no network. Cross-reference `Record ID`
+  against `find_duplicate_records.py` output to spot stray records no
+  local folder claims.
+
+---
+
+## July 2026 — `Resources/find_duplicate_records.py`: duplicate-title check on Zenodo
+
+Duplicate records were observed on Zenodo (root cause: a lost
+`upload_state.json` forces the next run to create a fresh draft, leaving
+the old record behind). New read-only diagnostic:
+
+- Fetches record titles from the project community listing (public API,
+  tokenless) and/or the account's own records including drafts
+  (`/api/user/records`, token required) — `--scope both|community|account`,
+  default `both`, hard-requires the token for any scope touching drafts
+  (no silent degradation).
+- Reports two duplicate group types to a timestamped CSV: **exact-title**
+  (identical normalized titles across non-version records) and
+  **same-esid** (same ESID in the title, different title text — catches
+  template drift). Records sharing a version group are never flagged.
+- Handles BOTH Zenodo serializations (verified against production):
+  InvenioRDM shape (`parent.id`, `pids.doi.identifier`, `is_published`)
+  and the legacy shape the community listing returns (`conceptrecid`,
+  top-level `doi`, `status`). Unauthenticated page size capped at 25 by
+  Zenodo — handled automatically.
+- Summary separates unpublished strays (safely deletable drafts) from
+  published duplicates (curation decision). The tool deletes nothing.
+- Exit codes: 0 clean / 1 duplicates found / 2 usage-auth-API error.
+
+First live run (community scope, 83 records) found one real duplicate:
+ESID#002 published twice (records 14888401 and 20990631).
+
+---
+
+## July 2026 — `Resources/audit_wav_integrity.py`: per-ESID WAV integrity report
+
+New diagnostic for the ongoing upload failures: rule out bad source
+data before burning another 43 GB transfer.
+
+Walks every `ESID_NNN` subfolder of a raw-data folder and writes one
+CSV row per ESID (`wav_integrity_report_YYYYMMDD_HHMMSS.csv` in the
+cwd, `--output` to override) comparing side by side:
+
+- Disk `.WAV` files (top level of the raw folder only): count, exact
+  bytes, GB, zero-byte count, tiny count (`0 < size <
+  --tiny-threshold`, default 1024 bytes).
+- `.wav` entries inside the matching `ESID_NNN.zip` (auto-located in
+  `Staging_Area/` then `Uploaded_Data/`): same columns, from the ZIP
+  index only (no extraction), uncompressed sizes.
+- `Match` verdict (`YES`/`NO`/`N/A`) plus a `Notes` column explaining
+  every non-clean state (no ZIP, unreadable ZIP, files on one side
+  only, differing totals).
+
+`--verbose` names every offending file in the log. Exit `1` when any
+zero-byte/tiny WAV, mismatch, or unreadable ZIP is found; `ZIP Not
+Found` alone is informational. Stdlib only (`zipfile`), no new
+dependencies, no changes to any existing file.
 
 ---
 

@@ -17,6 +17,13 @@ Python code.
 
 ## Upload Resilience
 
+- **Duplicate prevention (three layers)** — re-prepping a staging folder now
+  preserves its `upload_state.json`/request-log link to the existing Zenodo
+  draft; a lost state file is recovered from the request log automatically;
+  and before creating any fresh record the uploader searches the account for
+  a same-title record — an existing draft is resumed, an existing published
+  record fails the dataset instead of duplicating it (`--skip-title-guard`
+  to override).
 - **Auto-retry** on transient SSL/connection drops and HTTP 5xx (3 attempts,
   30s/90s/270s backoff per file PUT). Override the attempt count with
   `--upload-attempts N` on `standalone_tasks.py` and
@@ -42,6 +49,43 @@ Python code.
   sentinel file as its very last action. `prep_all_datasets.py`'s skip check
   requires that sentinel, so an interrupted preparation cannot be silently
   skipped on the next batch run — the partial folder is re-prepped instead.
+- **WAV integrity audit** — `Resources/audit_wav_integrity.py` walks every
+  `ESID_NNN` subfolder of a raw-data folder and writes one CSV row per ESID
+  comparing the `.WAV` files on disk against the `.wav` entries inside the
+  matching `ESID_NNN.zip` (auto-located in `Staging_Area/` or
+  `Uploaded_Data/`): counts, exact bytes + human-readable size, zero-byte
+  files, tiny files (`--tiny-threshold`, default 1 KB), and a per-file
+  disk-vs-ZIP `Match` verdict. **Every size is measured two independent
+  ways** — disk `stat` vs the WAV's own RIFF header, and ZIP `file_size` vs
+  its CRC — with a `Cross-Check` column that flags any disagreement (cloud
+  placeholder files that falsely report zero bytes, truncated recordings,
+  unreliable ZIP size fields). macOS `._*` sidecar files are excluded.
+  Exit 1 on any problem or cross-check discrepancy. Covered by
+  `tests/test_audit_wav_integrity.py`.
+- **Duplicate-record check** — `Resources/find_duplicate_records.py` fetches
+  every record title from the project community and/or your Zenodo account
+  (drafts included) and reports duplicate-title groups to a CSV — with a
+  guard so legitimate versions of one record are never flagged. Read-only;
+  catches the stray extra records left behind when a lost
+  `upload_state.json` forced a fresh draft. `--scope community` needs no
+  API token; the full `--scope both` run requires `set_env.sh`.
+- **Upload-state listing** — `Resources/list_upload_states.py` scans
+  `Staging_Area/` and `Uploaded_Data/` for `upload_state.json` files and
+  lists them in a CSV (ESID, location, Zenodo record id/URL, creation
+  time). Shows at a glance which drafts are incomplete, which uploads
+  completed as which records, and flags unreadable state files.
+  Cross-reference its `Record ID` column against
+  `find_duplicate_records.py` output to identify stray records.
+- **Missing-state diagnosis** — `Resources/diagnose_missing_states.py`
+  explains WHY a `Staging_Area/` folder has no `upload_state.json`
+  (folders without one are silently excluded from `finish_stuck_uploads.py`
+  recovery). It gathers all pipeline evidence — tracker entries, results
+  CSVs, collectors CSV, metadata/request-log artifacts, prep sentinel,
+  optional log grep — and reports a probable cause + suggested action per
+  folder. With `--restore-states` it re-creates the state file from a
+  surviving request log's `record_id`, re-linking the folder to its
+  existing Zenodo draft so re-runs resume it instead of minting a
+  duplicate.
 - **Content audit / legacy migration** — `Resources/audit_prep_completeness.py`
   walks raw ESID folders, matches them against `Staging_Area/` and
   `Uploaded_Data/`, deep-audits each (folder contents + `unzip -l` of the ZIP)
@@ -128,6 +172,7 @@ in every dataset upload:
 
 See the `Guides/` directory for full documentation:
 
+- `UPLOAD_RECOVERY_WORKFLOW.md` — Restarting failed uploads without creating duplicates (assess → heal → resolve → restart → verify)
 - `TEST_UPLOAD_GUIDE.md` — Step-by-step test upload walkthrough
 - `DIRECTORY_STRUCTURE_GUIDE.md` — Full directory and file structure reference
 - `CITATIONS_USER_GUIDE.md` — How to configure citations and related works

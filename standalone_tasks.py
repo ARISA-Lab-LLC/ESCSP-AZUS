@@ -811,6 +811,7 @@ def create_upload_data(
     esid_file_pairs: List[Tuple[str, str]],
     data_collectors: List[DataCollector],
     project_config: Optional[Dict[str, Any]] = None,
+    failure_results_file: Optional[str] = None,
 ) -> Tuple[List[UploadData], List[str]]:
     """Combine ESID/file pairs with collector metadata into UploadData objects.
 
@@ -818,6 +819,9 @@ def create_upload_data(
         esid_file_pairs: List of (ESID, zip_file) tuples.
         data_collectors: List of DataCollector models.
         project_config: Project config (for file discovery).
+        failure_results_file: Optional CSV path; when given, an ESID whose
+            manifest/file discovery fails gets a failure row instead of its
+            exception aborting the whole batch.
 
     Returns:
         Tuple of (upload_data_list, unmatched_esid_list).
@@ -832,9 +836,27 @@ def create_upload_data(
             unmatched_ids.append(esid)
             continue
 
-        dataset_files = find_dataset_files(
-            zip_file, project_config=project_config
-        )
+        # A broken manifest (listed files missing on disk, malformed CSV)
+        # used to raise straight out of this loop, aborting EVERY dataset
+        # in the batch.  Isolate it: record the failure, keep going.
+        try:
+            dataset_files = find_dataset_files(
+                zip_file, project_config=project_config
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            logger.error(
+                "ESID %s: manifest/file discovery failed — skipping this "
+                "dataset: %s", esid, exc,
+            )
+            if failure_results_file:
+                save_result_csv(
+                    file=failure_results_file,
+                    result=PersistedResult(
+                        esid=esid,
+                        error_message=f"Manifest/file discovery failed: {exc}",
+                    ),
+                )
+            continue
 
         # find_dataset_files drives the upload manifest, which intentionally
         # excludes README.html (its content becomes the Zenodo description
@@ -1264,6 +1286,44 @@ def save_metadata_json(
         return None
 
 
+def _recover_draft_id_from_request_log(
+    esid_dir: Path, esid: str
+) -> Optional[str]:
+    """Case-7 recovery: pull the draft's record_id from the request log.
+
+    ``upload_state.json`` can be lost while its sibling
+    ``ESID_XXX_request_log.json`` (written at draft creation) survives —
+    e.g. when the state-file write failed with a warning.  Recovering the
+    record_id from the request log lets the run RESUME the existing draft
+    instead of creating a duplicate record.  The uploader rewrites
+    ``upload_state.json`` on resume, so the folder self-heals.
+
+    Returns:
+        The record_id string, or None when no readable request log with a
+        record_id exists.
+    """
+    request_log = esid_dir / f"ESID_{esid}_request_log.json"
+    if not request_log.is_file():
+        return None
+    try:
+        payload = json.loads(request_log.read_text(encoding="utf-8"))
+        record_id = str(payload.get("record_id") or "") or None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Request log for ESID %s is unreadable (%s) — cannot recover "
+            "a draft id from it.", esid, exc,
+        )
+        return None
+    if record_id:
+        logger.warning(
+            "No usable upload_state.json for ESID %s — recovered draft %s "
+            "from %s. Resuming that draft (the state file will be "
+            "rewritten automatically).",
+            esid, record_id, request_log.name,
+        )
+    return record_id
+
+
 def upload_dataset(
     data: UploadData,
     delete_failures: bool = False,
@@ -1274,6 +1334,7 @@ def upload_dataset(
     project_config: Optional[Dict[str, Any]] = None,
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
+    title_guard: bool = True,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
 
@@ -1301,6 +1362,11 @@ def upload_dataset(
         upload_attempts: Total number of PUT attempts per file.  Defaults
             to the historical value (3).  Forwarded to
             :func:`upload_to_zenodo`.
+        title_guard: When True (default), the uploader searches the
+            account for an existing record with the same title BEFORE
+            creating a fresh draft — the last line of defense against
+            duplicate records when a folder's upload_state.json link was
+            lost.  Forwarded to :func:`upload_to_zenodo`.
 
     Returns:
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
@@ -1406,6 +1472,14 @@ def upload_dataset(
                 data.esid, exc,
             )
 
+    # Case-7 fallback: no usable state file, but the request log written
+    # at draft creation may still hold the record_id.  Without this, the
+    # run would create a fresh draft — a duplicate of the existing one.
+    if existing_draft_id is None:
+        existing_draft_id = _recover_draft_id_from_request_log(
+            esid_dir, data.esid
+        )
+
     # When deferring the ZIP: drop it from the upload list and hold back
     # the community-review submission.  Review must wait until the ZIP is
     # on the record — a community manager accepting the record publishes
@@ -1432,6 +1506,7 @@ def upload_dataset(
             state_file_path=str(state_file),
             submit_review=not defer_zip,
             upload_attempts=upload_attempts,
+            title_guard=title_guard,
         )
         return result
 
@@ -1460,6 +1535,7 @@ def get_upload_data(
     tracker: UploadTracker,
     project_config: Optional[Dict[str, Any]] = None,
     esid_filter: Optional[List[str]] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> List[UploadData]:
     """Discover and prepare datasets in a directory for upload.
 
@@ -1478,6 +1554,10 @@ def get_upload_data(
         esid_filter: Optional list of ESID number strings to upload.
             If ``None`` or empty, all discovered ESIDs are processed.
             Example: ``['004', '007', '012']``.
+        stats: Optional shared statistics dict.  When provided,
+            ``stats["skipped"]`` is incremented by the number of datasets
+            dropped because their ZIP is already in the upload tracker —
+            so the end-of-run summary reflects reality.
 
     Returns:
         List of UploadData objects ready for upload.
@@ -1533,17 +1613,41 @@ def get_upload_data(
                     )
                     continue
 
-            for zip_file in subdir.glob("ESID_*.zip"):
+            # A staging folder with no ZIP cannot be uploaded.  This used
+            # to be skipped with NO logging at all — a mis-staged dataset
+            # simply vanished from the run.  Now it is loud and recorded.
+            subdir_zips = sorted(subdir.glob("ESID_*.zip"))
+            if not subdir_zips:
+                logger.warning(
+                    "ESID folder has no ZIP — skipping: %s", subdir.name
+                )
+                m = re.match(r"^ESID[_#](\d+)", subdir.name)
+                save_result_csv(
+                    file=failure_results_file,
+                    result=PersistedResult(
+                        esid=m.group(1).zfill(3) if m else subdir.name,
+                        error_message="No ZIP file found in staging folder",
+                    ),
+                )
+                continue
+            for zip_file in subdir_zips:
                 dir_files.append(str(zip_file))
 
     logger.info("Found %d ZIP file(s) matching criteria", len(dir_files))
 
-    # Skip already-uploaded files
+    # Skip already-uploaded files.  Each skip is named individually so a
+    # dataset silently dropped by a stale tracker entry is visible, and
+    # the count feeds the shared stats so the run summary shows it.
     original_count = len(dir_files)
+    for f in dir_files:
+        if tracker.is_uploaded(f):
+            logger.info("Tracker skip (already uploaded): %s", Path(f).name)
     dir_files = [f for f in dir_files if not tracker.is_uploaded(f)]
     skipped = original_count - len(dir_files)
     if skipped:
         logger.info("Skipped %d already-uploaded file(s)", skipped)
+        if stats is not None:
+            stats["skipped"] += skipped
 
     if not dir_files:
         logger.warning("No new files to upload")
@@ -1555,6 +1659,7 @@ def get_upload_data(
         esid_file_pairs=esid_file_pairs,
         data_collectors=data_collectors,
         project_config=project_config,
+        failure_results_file=failure_results_file,
     )
 
     for esid in unmatched_ids:
@@ -1591,6 +1696,7 @@ def _process_one_dataset(
     stats_lock: threading.Lock,
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
+    title_guard: bool = True,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
@@ -1663,6 +1769,9 @@ def _process_one_dataset(
         upload_attempts: Total number of PUT attempts per file
             (``--upload-attempts`` CLI flag).  Forwarded to
             :func:`upload_dataset`.
+        title_guard: Duplicate-record guard (default True; disabled by the
+            ``--skip-title-guard`` CLI flag).  Forwarded to
+            :func:`upload_dataset`.
 
     Returns:
         None.  All results are recorded via the result CSVs and the
@@ -1693,6 +1802,7 @@ def _process_one_dataset(
             project_config=project_config,
             defer_zip=defer_zip,
             upload_attempts=upload_attempts,
+            title_guard=title_guard,
         )
     except Exception as exc:
         logger.error("%s Unexpected error during upload: %s", tag, exc)
@@ -1805,6 +1915,7 @@ def upload_datasets(
     workers: int = 1,
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
+    title_guard: bool = True,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -1858,6 +1969,12 @@ def upload_datasets(
             (``--upload-attempts`` CLI flag).  Defaults to
             ``_DEFAULT_UPLOAD_ATTEMPTS`` (3) so unmodified callers get
             identical behavior.
+        title_guard: Duplicate-record guard (default True).  Before
+            creating any fresh draft, the uploader searches the account
+            for an existing record with the same title; an existing draft
+            is resumed instead, an existing published record makes the
+            dataset fail rather than duplicate.  Disable with
+            ``--skip-title-guard``.
 
     Returns:
         Dictionary with upload statistics:
@@ -1934,6 +2051,7 @@ def upload_datasets(
             tracker=tracker,
             project_config=project_config,
             esid_filter=esid_filter,
+            stats=stats,
         )
 
         total_in_category = len(category_upload_data)
@@ -1960,6 +2078,7 @@ def upload_datasets(
             stats_lock=stats_lock,
             defer_zip=defer_zip,
             upload_attempts=upload_attempts,
+            title_guard=title_guard,
         )
 
         if workers == 1:
@@ -2090,6 +2209,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--skip-title-guard", action="store_true",
+        help=(
+            "DISABLE the duplicate-record guard. By default, before "
+            "creating any new Zenodo record, AZUS searches your account "
+            "for an existing record with the same title: an existing "
+            "DRAFT is resumed instead of duplicated, and an existing "
+            "PUBLISHED record makes the dataset fail rather than create "
+            "a duplicate. Only skip this if you truly intend to create a "
+            "second record with an identical title."
+        ),
+    )
+    parser.add_argument(
         "--defer-zip", action="store_true",
         help=(
             "Two-phase upload, phase 1: create each Zenodo record, upload "
@@ -2200,6 +2331,11 @@ def main() -> None:
             "Upload attempts: %d per file (overridden from default %d)",
             args.upload_attempts, _DEFAULT_UPLOAD_ATTEMPTS,
         )
+    if args.skip_title_guard:
+        logger.warning(
+            "Duplicate guard: DISABLED (--skip-title-guard) — records "
+            "with titles that already exist on Zenodo WILL be created."
+        )
     logger.info("=" * 70)
 
     # --- CSV pre-validation ---
@@ -2255,6 +2391,7 @@ def main() -> None:
             workers=args.workers,
             defer_zip=args.defer_zip,
             upload_attempts=args.upload_attempts,
+            title_guard=not args.skip_title_guard,
         )
 
         # --- Display summary ---

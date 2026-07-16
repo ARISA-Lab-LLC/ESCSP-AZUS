@@ -349,6 +349,7 @@ def _api_get_with_retry(
     auth_headers: Dict[str, str],
     label: str,
     allow_404: bool = False,
+    params: Optional[Dict[str, Any]] = None,
 ) -> Optional[requests.Response]:
     """Issue a GET with retry on transient errors.
 
@@ -364,6 +365,9 @@ def _api_get_with_retry(
         allow_404: if True, a 404 returns None instead of raising.  Used
             by `get_draft_record` to distinguish "draft truly gone" from
             other failures.
+        params: optional query parameters (requests handles the URL
+            encoding — important for search queries containing quotes,
+            spaces, or '#').
 
     Returns:
         The `requests.Response` on 2xx, or None if `allow_404` and the
@@ -376,7 +380,7 @@ def _api_get_with_retry(
     last_exc: Optional[BaseException] = None
     for attempt in range(1, _API_RETRY_ATTEMPTS + 1):
         try:
-            response = requests.get(url, headers=auth_headers)
+            response = requests.get(url, headers=auth_headers, params=params)
             if allow_404 and response.status_code == 404:
                 return None
             if 500 <= response.status_code < 600:
@@ -467,6 +471,52 @@ def delete_draft_file(
     # 404 is fine — the slot is already gone.
     if response.status_code != 404:
         response.raise_for_status()
+
+
+class DuplicateTitleError(Exception):
+    """Raised by the duplicate guard when creating a draft would duplicate
+    an existing record with the same title.
+
+    The unified error handler in ``upload_to_zenodo`` converts this into a
+    normal failure result, so the dataset is marked failed (and stays in
+    Staging_Area/ for human review) instead of minting a duplicate record.
+    """
+
+
+def _normalize_title(title: str) -> str:
+    """Whitespace-collapsed, case-folded title for exact comparison."""
+    return " ".join(str(title).split()).casefold()
+
+
+def _find_title_matches(
+    hits: List[Dict[str, Any]], title: str
+) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
+    """Split search hits into (matching_drafts, matching_published).
+
+    A hit "matches" when its normalized title equals the normalized target
+    title — the search API is only a candidate fetch (its matching is
+    fuzzy); this exact comparison is the real gate.
+
+    Handles both Zenodo serializations (same dual-shape mapping proven in
+    Resources/find_duplicate_records.py): published-ness comes from
+    ``is_published`` when present, else ``status == "published"``.
+    """
+    target = _normalize_title(title)
+    drafts: List[Dict[str, Any]] = []
+    published: List[Dict[str, Any]] = []
+    for hit in hits:
+        hit_title = (
+            (hit.get("metadata") or {}).get("title", "")
+            or hit.get("title", "")
+        )
+        if _normalize_title(hit_title) != target:
+            continue
+        status = str(hit.get("status", ""))
+        if bool(hit.get("is_published", status == "published")):
+            published.append(hit)
+        else:
+            drafts.append(hit)
+    return drafts, published
 
 
 def _draft_doi(draft_response: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -684,6 +734,7 @@ def upload_to_zenodo(
     state_file_path: Optional[str] = None,
     submit_review: bool = True,
     upload_attempts: int = _PUT_RETRY_ATTEMPTS,
+    title_guard: bool = True,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -716,6 +767,15 @@ def upload_to_zenodo(
             preserving historical behavior.  ``1`` means one shot per file;
             the ``--upload-attempts`` CLI flag on ``standalone_tasks.py``
             surfaces this to end users.
+        title_guard: When True (default) and no ``existing_draft_id`` was
+            supplied, search the account's records for the intended title
+            BEFORE creating a fresh draft.  A matching unpublished draft is
+            adopted (resumed) instead of duplicated; a matching published
+            record raises :class:`DuplicateTitleError` (dataset marked
+            failed, nothing created).  This is the last line of defense
+            against duplicate records when a folder's ``upload_state.json``
+            link has been lost.  Disable per-run with ``--skip-title-guard``
+            on ``standalone_tasks.py``.
 
     Returns:
         Dictionary with keys:
@@ -727,6 +787,71 @@ def upload_to_zenodo(
     is_resume = False
 
     try:
+        # --- Duplicate guard -------------------------------------------
+        # Runs ONLY when there is no local resume pointer — exactly the
+        # dangerous situation: if a record with this title already exists
+        # on Zenodo (its upload_state.json link was lost), creating a
+        # fresh draft would mint a duplicate.  Search the account's own
+        # records (drafts included) for the intended title first.
+        #
+        # Fail-closed on search errors: this search hits the same API as
+        # draft creation, and a missed guard creates a PERMANENT duplicate
+        # while a failed run is retryable.
+        if title_guard and not existing_draft_id:
+            intended_title = (config.metadata or {}).get("title", "")
+            if intended_title:
+                logger.info(
+                    "Duplicate guard: checking account for existing "
+                    "records titled %r...", intended_title,
+                )
+                guard_response = _api_get_with_retry(
+                    url=f"{credentials.base_url}user/records",
+                    auth_headers=_auth_headers(credentials),
+                    label="duplicate-guard title search",
+                    params={
+                        "q": f'metadata.title:"{intended_title}"',
+                        "size": 10,
+                    },
+                )
+                guard_hits = (
+                    guard_response.json().get("hits", {}).get("hits", [])
+                    if guard_response is not None else []
+                )
+                matching_drafts, matching_published = _find_title_matches(
+                    guard_hits, intended_title
+                )
+                if matching_published:
+                    ids = ", ".join(
+                        f"id {h.get('id')} (doi {((h.get('pids') or {}).get('doi') or {}).get('identifier') or h.get('doi') or '?'})"
+                        for h in matching_published
+                    )
+                    raise DuplicateTitleError(
+                        f"A record titled '{intended_title}' already "
+                        f"exists on Zenodo: {ids} — refusing to create a "
+                        "duplicate. Investigate with "
+                        "Resources/find_duplicate_records.py; use "
+                        "--skip-title-guard only if a same-title record "
+                        "is truly intended."
+                    )
+                if len(matching_drafts) > 1:
+                    ids = ", ".join(str(h.get("id")) for h in matching_drafts)
+                    raise DuplicateTitleError(
+                        f"Multiple existing drafts titled "
+                        f"'{intended_title}' found (ids: {ids}) — refusing "
+                        "to create another. Clean up the strays first "
+                        "(see Resources/find_duplicate_records.py)."
+                    )
+                if matching_drafts:
+                    adopted_id = str(matching_drafts[0].get("id"))
+                    logger.warning(
+                        "DUPLICATE GUARD: found existing draft %s with "
+                        "this title — resuming it instead of creating a "
+                        "new record.", adopted_id,
+                    )
+                    existing_draft_id = adopted_id
+                else:
+                    logger.info("  No existing record with this title — OK.")
+
         # --- Locate or create the draft record ---
         if existing_draft_id:
             logger.info("Resume requested for draft %s", existing_draft_id)
