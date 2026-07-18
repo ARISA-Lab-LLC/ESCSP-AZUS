@@ -1,5 +1,23 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — `number_of_tries` attempt counter in `upload_state.json`
+
+Every upload attempt against an ESID record (fresh create, resume,
+`--defer-zip` phase 1, `finish_stuck_uploads.py` recovery) now advances
+a `number_of_tries` counter in the record's `upload_state.json` —
+written in the single place the state file is produced
+(`standalone_uploader.upload_to_zenodo`), logged as "attempt #N".
+Semantics: initial value 0; the first attempt writes 1. A legacy state
+file without the field is treated as 0 and gains the field on its next
+attempt; corrupt/negative values count from 0 with a warning instead of
+failing an upload over bookkeeping. `--restore-states` writes restored
+links with the initial value 0 (restoring is not an attempt). The
+counter survives re-prep via the artifact stash. All state-file readers
+use key-specific access, so the extra field is backward/forward
+compatible everywhere (test-proven). `list_upload_states.py` gains a
+"Number of Tries" CSV column — legacy files show "0 (legacy)" so a
+blank cell can't be misread. 10 new tests; suite at 265.
+
 ## July 2026 — Supervisory-review remediation: reliability, de-drift, write-path tests, I/O
 
 A three-pass code review (core pipeline / tool suite / test coverage) found

@@ -379,6 +379,10 @@ def restore_state(ev: Evidence) -> bool:
         "zenodo_url": f"https://zenodo.org/uploads/{ev.request_log_record_id}",
         "resumed": False,
         "restored_from": ev.request_log_path.name,
+        # Restoring the draft link is NOT an upload attempt — the counter
+        # starts at its initial value and the next actual upload run
+        # advances it to 1.
+        "number_of_tries": 0,
     }
     try:
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")

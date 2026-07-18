@@ -402,3 +402,107 @@ class TestEnsureDoiReserved(_PatchingTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- number_of_tries attempt counter -----------------------------------------
+
+class TestReadNumberOfTries(unittest.TestCase):
+    """Unit behavior of the upload_state.json attempt-counter reader."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name) / "upload_state.json"
+
+    def test_missing_file_counts_from_zero(self):
+        self.assertEqual(uploader._read_number_of_tries(self.state), 0)
+
+    def test_legacy_file_without_field_counts_from_zero(self):
+        self.state.write_text(json.dumps({"record_id": "77"}))
+        self.assertEqual(uploader._read_number_of_tries(self.state), 0)
+
+    def test_existing_count_returned(self):
+        self.state.write_text(json.dumps({"number_of_tries": 3}))
+        self.assertEqual(uploader._read_number_of_tries(self.state), 3)
+
+    def test_corrupt_json_counts_from_zero(self):
+        self.state.write_text("{not json")
+        self.assertEqual(uploader._read_number_of_tries(self.state), 0)
+
+    def test_bad_value_counts_from_zero(self):
+        self.state.write_text(json.dumps({"number_of_tries": "many"}))
+        self.assertEqual(uploader._read_number_of_tries(self.state), 0)
+        self.state.write_text(json.dumps({"number_of_tries": -5}))
+        self.assertEqual(uploader._read_number_of_tries(self.state), 0)
+
+
+class TestNumberOfTriesCounter(_PatchingTestCase):
+    """Every upload attempt advances number_of_tries in upload_state.json."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.data_file = self.root / "ESID_073.zip"
+        self.data_file.write_bytes(b"zip-bytes")
+        self.state_path = self.root / "upload_state.json"
+
+        self.creds = uploader.Credentials(token="fake", base_url=_BASE_URL)
+        self._patch("get_credentials_from_env", return_value=self.creds)
+        self.search = self._patch("_api_get_with_retry")
+        self.search.return_value = FakeResponse({"hits": {"hits": []}})
+        self.create = self._patch("create_draft_record")
+        self.create.return_value = {"id": "new-1"}
+        self.get_draft = self._patch("get_draft_record")
+        self.list_files = self._patch("list_draft_files")
+        self.list_files.return_value = []
+        self._patch("upload_file_to_draft")
+        self._patch("logger")
+        tripwire = mock.MagicMock()
+        for verb in ("get", "post", "put", "delete"):
+            getattr(tripwire, verb).side_effect = AssertionError(
+                f"unexpected direct requests.{verb} call"
+            )
+        self._patch("requests", new=tripwire)
+
+    def _state(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def _run(self, **kwargs):
+        return uploader.upload_to_zenodo(
+            files=[str(self.data_file)], config=make_config(),
+            state_file_path=str(self.state_path), **kwargs,
+        )
+
+    def test_first_attempt_writes_one(self):
+        """Initial value is 0; the first attempt advances it to 1."""
+        self.assertTrue(self._run()["successful"])
+        self.assertEqual(self._state()["number_of_tries"], 1)
+
+    def test_each_resume_advances_the_counter(self):
+        self.get_draft.return_value = {
+            "id": "new-1", "is_published": False, "parent": {},
+        }
+        self._run()
+        self.assertEqual(self._state()["number_of_tries"], 1)
+        self._run(existing_draft_id="new-1")
+        self.assertEqual(self._state()["number_of_tries"], 2)
+        self._run(existing_draft_id="new-1")
+        self.assertEqual(self._state()["number_of_tries"], 3)
+
+    def test_legacy_state_file_gains_the_field_at_one(self):
+        """A pre-field state file (older AZUS) is treated as 0 and the
+        field is created on the next attempt."""
+        self.state_path.write_text(json.dumps({
+            "record_id": "new-1",
+            "created_at": "2026-01-01T00:00:00",
+            "zenodo_url": "https://zenodo.org/uploads/new-1",
+            "resumed": False,
+        }))
+        self.get_draft.return_value = {
+            "id": "new-1", "is_published": False, "parent": {},
+        }
+        self._run(existing_draft_id="new-1")
+        state = self._state()
+        self.assertEqual(state["number_of_tries"], 1)
+        self.assertEqual(state["record_id"], "new-1")

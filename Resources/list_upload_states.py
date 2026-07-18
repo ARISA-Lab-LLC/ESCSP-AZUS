@@ -71,6 +71,7 @@ _CSV_COLUMNS = [
     "Zenodo URL",
     "State Created",
     "Resumed",
+    "Number of Tries",
     "Notes",
 ]
 
@@ -111,6 +112,7 @@ def scan_directory(location: str, directory: Path) -> List[Dict[str, str]]:
             "Zenodo URL": "",
             "State Created": "",
             "Resumed": "",
+            "Number of Tries": "",
             "Notes": "",
         }
         try:
@@ -119,6 +121,13 @@ def scan_directory(location: str, directory: Path) -> List[Dict[str, str]]:
             row["Zenodo URL"] = str(state.get("zenodo_url") or "")
             row["State Created"] = str(state.get("created_at") or "")
             row["Resumed"] = str(state.get("resumed", ""))
+            # Upload-attempt counter (see standalone_uploader).  Legacy
+            # state files predate the field — shown as "0 (legacy)" so a
+            # blank cell can't be mistaken for a parse failure.
+            if "number_of_tries" in state:
+                row["Number of Tries"] = str(state["number_of_tries"])
+            else:
+                row["Number of Tries"] = "0 (legacy)"
             if not row["Record ID"]:
                 row["Notes"] = "state file has no record_id"
         except (OSError, json.JSONDecodeError) as exc:

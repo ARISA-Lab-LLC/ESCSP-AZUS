@@ -86,6 +86,34 @@ def _calculate_md5(file_path: str) -> str:
     return md5.hexdigest()
 
 
+def _read_number_of_tries(state_file: Path) -> int:
+    """Read the attempt counter from an existing ``upload_state.json``.
+
+    Returns the stored ``number_of_tries``, or 0 when the file does not
+    exist yet (first attempt), predates the field (older AZUS versions),
+    or is unreadable/malformed — in every one of those cases the caller
+    increments from 0, so the field is created at 1 on this attempt.
+
+    Args:
+        state_file: Path to the ESID's ``upload_state.json``.
+
+    Returns:
+        The prior attempt count (never negative).
+    """
+    if not state_file.is_file():
+        return 0
+    try:
+        import json as _json
+        state = _json.loads(state_file.read_text(encoding="utf-8"))
+        return max(0, int(state.get("number_of_tries", 0)))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not read number_of_tries from %s (%s) — counting "
+            "from 0.", state_file, exc,
+        )
+        return 0
+
+
 def _remote_entry_mismatch(
     entry: Dict[str, Any],
     local_size: int,
@@ -1140,11 +1168,24 @@ def upload_to_zenodo(
                     "created_at": _dt.now().isoformat(timespec="seconds"),
                     "zenodo_url": f"https://zenodo.org/uploads/{record_id}",
                     "resumed": is_resume,
+                    # Attempt counter: starts at 0 conceptually; every run
+                    # that gets far enough to upload against this record
+                    # (fresh create, resume, defer-zip phase 1, recovery
+                    # via finish_stuck_uploads) counts as one attempt.
+                    # A pre-existing state file WITHOUT the field (written
+                    # by an older AZUS) is treated as 0 and advanced —
+                    # the field is created on the next attempt.
+                    "number_of_tries": _read_number_of_tries(
+                        Path(state_file_path)
+                    ) + 1,
                 }
                 Path(state_file_path).write_text(
                     _json.dumps(state, indent=2), encoding="utf-8"
                 )
-                logger.info("  Wrote upload state file: %s", state_file_path)
+                logger.info(
+                    "  Wrote upload state file (attempt #%d): %s",
+                    state["number_of_tries"], state_file_path,
+                )
             except Exception as state_exc:
                 logger.warning(
                     "Could not write upload state file %s: %s",

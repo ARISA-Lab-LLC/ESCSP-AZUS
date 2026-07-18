@@ -38,6 +38,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "Resources"))
 import standalone_tasks as tasks  # noqa: E402
 import finish_stuck_uploads as fsu  # noqa: E402
 import diagnose_missing_states as diag  # noqa: E402
+import list_upload_states as lus  # noqa: E402
 
 
 class _TmpDirTestCase(unittest.TestCase):
@@ -423,6 +424,9 @@ class TestRestoreState(_TmpDirTestCase):
         # The restored state must point at the EXISTING draft so that
         # finish_stuck_uploads resumes it instead of minting a duplicate.
         self.assertIn("1234567", state["zenodo_url"])
+        # Restoring the link is NOT an upload attempt: the counter is
+        # written at its initial value; the next actual run makes it 1.
+        self.assertEqual(state["number_of_tries"], 0)
 
     def test_restored_state_is_discoverable_by_finish_stuck_uploads(self):
         """End-to-end handoff: the healer's output is exactly what the
@@ -457,3 +461,44 @@ class TestRestoreState(_TmpDirTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestListUploadStatesTriesColumn(unittest.TestCase):
+    """list_upload_states surfaces the number_of_tries attempt counter."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _folder_with_state(self, esid: str, state: dict) -> None:
+        folder = self.root / f"ESID_{esid}_Staging"
+        folder.mkdir()
+        (folder / "upload_state.json").write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+
+    def test_counter_shown_and_legacy_marked(self):
+        self._folder_with_state("001", {
+            "record_id": "111", "zenodo_url": "u", "created_at": "t",
+            "resumed": True, "number_of_tries": 4,
+        })
+        # Legacy state file: predates the counter field entirely.
+        self._folder_with_state("002", {
+            "record_id": "222", "zenodo_url": "u", "created_at": "t",
+            "resumed": False,
+        })
+        rows = lus.scan_directory("Staging", self.root)
+        by_esid = {r["ESID#"]: r for r in rows}
+        self.assertEqual(by_esid["001"]["Number of Tries"], "4")
+        self.assertEqual(by_esid["002"]["Number of Tries"], "0 (legacy)")
+        # The column exists in the CSV header contract.
+        self.assertIn("Number of Tries", lus._CSV_COLUMNS)
+
+    def test_unreadable_state_leaves_tries_blank_with_note(self):
+        folder = self.root / "ESID_003_Staging"
+        folder.mkdir()
+        (folder / "upload_state.json").write_text("{not json")
+        rows = lus.scan_directory("Staging", self.root)
+        self.assertEqual(rows[0]["Number of Tries"], "")
+        self.assertIn("unreadable state file", rows[0]["Notes"])
