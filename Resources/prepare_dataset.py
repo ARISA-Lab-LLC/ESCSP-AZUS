@@ -40,11 +40,11 @@ from typing import Dict, List, Optional, Tuple
 # Resolves because Python puts this script's own directory on sys.path
 # when run by path (as prep_all_datasets.py does via subprocess).
 import audit_wav_integrity
+import azus_common
 
 logger = logging.getLogger("azus.prepare")
 
-# SHA-512 read buffer — 64 KB for efficient hashing of large files
-_HASH_BUFFER_SIZE = 65_536
+
 
 # ZIP's DOS timestamp field cannot represent dates before 1980-01-01.
 # AudioMoth real-time clocks reset to the 1970 Unix epoch on power loss,
@@ -55,43 +55,76 @@ _HASH_BUFFER_SIZE = 65_536
 _ZIP_MIN_MTIME = 315_532_800  # 1980-01-01T00:00:00 UTC as a Unix epoch
 
 
+# ---------------------------------------------------------------------
+# THE PREP CONTRACT — what a completed staging folder contains.
+# ---------------------------------------------------------------------
+# audit_prep_completeness.py imports these to verify prepared folders
+# and back-fill the completion sentinel, so they must live HERE, next
+# to the code that produces the files.  If you add, remove, or rename a
+# prep output anywhere in this module, update these tuples in the same
+# change — the auditor certifies folders as complete against exactly
+# this list.
+#
+# Files that appear DIRECTLY in the staging/uploaded folder
+# (``{esid}`` = the 3-digit ESID number):
+STAGING_OUTPUT_FILES: Tuple[str, ...] = (
+    "ESID_{esid}.zip",
+    "ESID_{esid}_to_upload.csv",
+    "README.html",
+    "README.md",
+    "file_list.csv",
+    "total_eclipse_data.csv",
+)
+
+# Prep-generated metadata files that ALSO get appended into the ZIP
+# (under the ESID_NNN/ prefix), on top of the raw WAVs + CONFIG.TXT +
+# resource companions:
+ZIP_METADATA_ENTRIES: Tuple[str, ...] = (
+    "README.md",
+    "file_list.csv",
+    "total_eclipse_data.csv",
+)
+
+# Files copied only conditionally (site-Keywords dependent), so their
+# absence is ambiguous rather than proof of an incomplete prep:
+CONDITIONAL_FILES: Tuple[str, ...] = ("related_identifiers.csv",)
+
+# Prepared-folder naming templates:
+STAGING_FOLDER_TEMPLATE = "ESID_{esid}_Staging"
+UPLOADED_FOLDER_TEMPLATE = "ESID_{esid}_Uploaded"
+
+
 # ===================================================================
 #  Utility functions
 # ===================================================================
 
-def calculate_sha512(filepath: str) -> str:
-    """Calculate the SHA-512 hash of a file.
-
-    Args:
-        filepath: Path to the file.
-
-    Returns:
-        Hex-encoded SHA-512 digest string.
-    """
-    sha512_hash = hashlib.sha512()
-    with open(filepath, "rb") as fh:
-        for chunk in iter(lambda: fh.read(_HASH_BUFFER_SIZE), b""):
-            sha512_hash.update(chunk)
-    return sha512_hash.hexdigest()
+# Shared streaming SHA-512 (one definition for the whole suite).
+calculate_sha512 = azus_common.calculate_sha512
 
 
-def get_esid_from_folder(folder_name: str) -> str:
-    """Extract the ESID number from a folder name.
+def get_esid_from_folder(folder_name: str) -> Optional[str]:
+    """Extract the zero-padded ESID number from a folder name.
 
-    Handles formats: ESID#005, ESID_005, or plain '005'.
+    Handles the standard forms (ESID#005, ESID_005, unpadded ESID_5)
+    via the shared bounds-checked parser, plus a plain all-digits
+    folder name ('005').  Always returns the padded 3-digit form —
+    unpadded input used to leak through unpadded, producing staging
+    folders the batch tools' skip checks could not see.
 
     Args:
         folder_name: Name of the data folder.
 
     Returns:
-        Extracted ESID string (e.g., '005').
+        The 3-digit ESID string (e.g. '005'), or None when the name
+        carries no valid ESID.
     """
-    folder_name = folder_name.replace("#", "_")
-    if "ESID_" in folder_name:
-        return folder_name.split("ESID_")[1].split("_")[0]
-    if "ESID" in folder_name:
-        return folder_name.split("ESID")[1].split("_")[0]
-    return folder_name.strip()
+    esid = azus_common.parse_esid(folder_name)
+    if esid is not None:
+        return esid
+    bare = folder_name.strip()
+    if bare.isdigit() and len(bare) <= 3:
+        return f"{int(bare):03d}"
+    return None
 
 
 # ===================================================================
@@ -109,9 +142,11 @@ def create_zip_file(
     archive.  This ensures that extracting the ZIP produces a single,
     self-contained directory rather than a flat file dump.
 
-    SHA-512 hashes are computed during the write pass — while each source
-    file is already being read — so that no second read of potentially
-    gigabytes of WAV data is required later when building the file list.
+    SHA-512 hashes are computed IN the write pass — each source file is
+    read exactly once, with every 64 KB chunk feeding both the ZIP
+    compressor and the hasher.  (An earlier version called
+    ``zipf.write()`` and then re-hashed the file, silently reading every
+    gigabyte of raw audio twice.)
 
     Args:
         source_dir: Directory containing raw WAV files and CONFIG.TXT.
@@ -161,8 +196,30 @@ def create_zip_file(
             len(pre_1980), ", ".join(pre_1980[:5]),
         )
 
-    # Populated during the write pass — avoids a second read of large files
+    # Populated during the write pass — the ONLY read of each source file
     content_hashes: Dict[str, str] = {}
+
+    def _add_and_hash(zipf: zipfile.ZipFile, src: Path, arcname: str) -> None:
+        """Stream ``src`` into the archive, hashing each chunk in-flight.
+
+        Single-pass replacement for ``zipf.write()`` + a separate
+        ``calculate_sha512()`` call (which read the file twice).
+        ``ZipInfo.from_file`` preserves the source mtime/permissions the
+        way ``zipf.write`` does; ``strict_timestamps=False`` clamps
+        pre-1980 AudioMoth-epoch mtimes instead of raising.
+        """
+        zinfo = zipfile.ZipInfo.from_file(
+            src, arcname, strict_timestamps=False
+        )
+        zinfo.compress_type = zipfile.ZIP_DEFLATED
+        hasher = hashlib.sha512()
+        with open(src, "rb") as fh, zipf.open(zinfo, "w") as dest:
+            for chunk in iter(
+                lambda: fh.read(azus_common.HASH_BUFFER_SIZE), b""
+            ):
+                hasher.update(chunk)
+                dest.write(chunk)
+        content_hashes[src.name] = hasher.hexdigest()
 
     # strict_timestamps=False clamps pre-1980 mtimes to 1980-01-01 instead
     # of raising ValueError ("ZIP does not support timestamps before 1980").
@@ -173,15 +230,13 @@ def create_zip_file(
         # --- CONFIG.TXT first (small file, metadata context before audio) ---
         if config_file is not None:
             arcname = f"{zip_subfolder}/{config_file.name}"
-            zipf.write(config_file, arcname)
-            content_hashes[config_file.name] = calculate_sha512(str(config_file))
+            _add_and_hash(zipf, config_file, arcname)
             logger.info("  Added CONFIG.TXT → %s", arcname)
 
         # --- WAV audio files ---
         for i, wav_file in enumerate(wav_files, 1):
             arcname = f"{zip_subfolder}/{wav_file.name}"
-            zipf.write(wav_file, arcname)
-            content_hashes[wav_file.name] = calculate_sha512(str(wav_file))
+            _add_and_hash(zipf, wav_file, arcname)
             if i % 100 == 0:
                 logger.info("  ... added %d WAV files", i)
 
@@ -260,6 +315,7 @@ def create_single_collector_csv(
 # Column order used by both file list versions
 _FILE_LIST_HEADERS = [
     "File Name", "File Type", "Description", "File size (KB)",
+    "File size (Bytes)",
     "Associated Data Dictionary", "SHA-512 Hash", "Notes",
 ]
 
@@ -431,6 +487,7 @@ def create_internal_file_list(
             "File Type": file_type,
             "Description": description,
             "File size (KB)": f"{file_path.stat().st_size / 1024:.2f}",
+            "File size (Bytes)": str(file_path.stat().st_size),
             "Associated Data Dictionary": data_dict,
             "SHA-512 Hash": calculate_sha512(str(file_path)),
             "Notes": "",
@@ -449,6 +506,7 @@ def create_internal_file_list(
             "File Type": spec["File Type"],
             "Description": spec["Description"],
             "File size (KB)": f"{file_path.stat().st_size / 1024:.2f}",
+            "File size (Bytes)": str(file_path.stat().st_size),
             "Associated Data Dictionary": spec["Associated Data Dictionary"],
             "SHA-512 Hash": calculate_sha512(str(file_path)),
             "Notes": "",
@@ -469,6 +527,7 @@ def create_internal_file_list(
                 "sample rate, gain level, firmware version, and recording schedule."
             ),
             "File size (KB)": f"{config_file.stat().st_size / 1024:.2f}",
+            "File size (Bytes)": str(config_file.stat().st_size),
             "Associated Data Dictionary": "CONFIG_data_dict.csv",
             "SHA-512 Hash": config_hash,
             "Notes": "",
@@ -490,6 +549,7 @@ def create_internal_file_list(
                 "using YYYYMMDD_HHMMSS format (UTC)."
             ),
             "File size (KB)": f"{wav_file.stat().st_size / 1024:.2f}",
+            "File size (Bytes)": str(wav_file.stat().st_size),
             "Associated Data Dictionary": "WAV_data_dict.csv",
             "SHA-512 Hash": wav_hash,
             "Notes": "",
@@ -616,6 +676,7 @@ def create_external_file_list(
             "and all companion metadata files for this data collection site."
         ),
         "File size (KB)": f"{zip_size_kb:.2f}",
+        "File size (Bytes)": str(zip_path.stat().st_size),
         "Associated Data Dictionary": "N/A",
         "SHA-512 Hash": zip_hash,
         "Notes": (
@@ -1098,58 +1159,100 @@ def create_upload_manifest(output_dir: Path, esid: str) -> Path:
 _UPLOAD_ARTIFACT_PATTERNS = ("upload_state.json", "ESID_*_request_log.json")
 
 
-def _stash_upload_artifacts(folder: Path) -> Dict[str, bytes]:
-    """Read the upload-pipeline artifacts out of a folder about to be
-    deleted.  Returns {filename: content} — empty when none exist."""
-    stash: Dict[str, bytes] = {}
+def _stash_upload_artifacts(folder: Path, stash_dir: Path) -> List[str]:
+    """Copy the upload-pipeline artifacts to an ON-DISK stash before the
+    folder is deleted.
+
+    On disk — not in memory — so a crash between the ``rmtree`` and the
+    restore cannot orphan the Zenodo draft: the stash directory survives
+    the crash and the next re-prep run restores it.
+
+    Args:
+        folder: The existing staging folder about to be deleted.
+        stash_dir: Hidden directory inside Staging_Area/ to copy into
+            (created on demand).
+
+    Returns:
+        Names of the artifacts stashed (empty when none exist).
+    """
+    stashed: List[str] = []
     if not folder.is_dir():
-        return stash
+        return stashed
     for pattern in _UPLOAD_ARTIFACT_PATTERNS:
         for artifact in sorted(folder.glob(pattern)):
             try:
-                stash[artifact.name] = artifact.read_bytes()
+                stash_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(artifact, stash_dir / artifact.name)
+                stashed.append(artifact.name)
             except OSError as exc:
                 logger.warning(
                     "Could not preserve %s across re-prep: %s",
                     artifact.name, exc,
                 )
-    return stash
+    return stashed
 
 
-def _restore_upload_artifacts(folder: Path, stash: Dict[str, bytes]) -> None:
-    """Write stashed upload artifacts into the freshly prepared folder.
+def _restore_upload_artifacts(folder: Path, stash_dir: Path) -> None:
+    """Copy stashed upload artifacts into the freshly prepared folder.
 
     Keeps the folder linked to its existing Zenodo draft so the next
-    upload run RESUMES it instead of creating a duplicate record.
+    upload run RESUMES it instead of creating a duplicate record.  The
+    stash directory is removed only after EVERY artifact restored
+    cleanly — on any failure it stays on disk for the next run.
 
     Caveat (also documented in the guides): resuming a preserved draft
     does not re-send record metadata — if this re-prep changed the
     README/metadata, fix the record description in the Zenodo web UI
     after the upload completes.
+
+    Args:
+        folder: The freshly prepared staging folder.
+        stash_dir: The on-disk stash written by
+            :func:`_stash_upload_artifacts` (possibly from a prior
+            interrupted run).  No-op when absent.
     """
-    for name, content in stash.items():
+    if not stash_dir.is_dir():
+        return
+    restored: List[str] = []
+    all_ok = True
+    for artifact in sorted(p for p in stash_dir.iterdir() if p.is_file()):
         try:
-            (folder / name).write_bytes(content)
+            shutil.copy2(artifact, folder / artifact.name)
+            restored.append(artifact.name)
         except OSError as exc:
+            all_ok = False
             logger.warning(
-                "Could not restore %s after re-prep: %s", name, exc,
+                "Could not restore %s after re-prep: %s — the stash is "
+                "kept at %s for the next run.",
+                artifact.name, exc, stash_dir,
             )
-    if "upload_state.json" in stash:
+    record_id = "?"
+    state_file = folder / "upload_state.json"
+    if "upload_state.json" in restored:
         try:
             record_id = json.loads(
-                stash["upload_state.json"].decode("utf-8")
+                state_file.read_text(encoding="utf-8")
             ).get("record_id", "?")
-        except (ValueError, UnicodeDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError):
             record_id = "?"
         logger.info(
             "Preserved upload state across re-prep (record %s): %s",
-            record_id, ", ".join(sorted(stash)),
+            record_id, ", ".join(restored),
         )
-    elif stash:
+    elif restored:
         logger.info(
             "Preserved upload artifacts across re-prep: %s",
-            ", ".join(sorted(stash)),
+            ", ".join(restored),
         )
+    if all_ok:
+        try:
+            shutil.rmtree(stash_dir)
+        except OSError as exc:
+            logger.warning(
+                "Could not remove artifact stash %s: %s (harmless — it "
+                "will be reused/overwritten on the next re-prep).",
+                stash_dir, exc,
+            )
 
 
 def main() -> None:
@@ -1247,6 +1350,13 @@ def main() -> None:
         sys.exit(1)
 
     esid = get_esid_from_folder(source_dir.name)
+    if esid is None:
+        logger.error(
+            "Cannot extract an ESID from folder name %r — expected "
+            "ESID_NNN / ESID#NNN (NNN = 000-999) or a bare 1-3 digit "
+            "number.", source_dir.name,
+        )
+        sys.exit(1)
 
     if args.output_dir:
         output_dir = Path(args.output_dir)
@@ -1259,7 +1369,7 @@ def main() -> None:
     # folder name the uploader scans for, so a killed prep (or a
     # concurrent upload run) sees an incomplete ZIP as an uploadable
     # dataset.  This exact path put broken data on Zenodo.
-    staging_area_dir = Path(__file__).resolve().parent.parent / "Staging_Area"
+    staging_area_dir = azus_common.STAGING_AREA
     try:
         output_dir.resolve().relative_to(staging_area_dir.resolve())
         output_dir_in_staging = True
@@ -1417,12 +1527,24 @@ def main() -> None:
                 partial_destination,
             )
             shutil.rmtree(partial_destination)
-        upload_artifact_stash: Dict[str, bytes] = {}
+        # The artifact stash lives ON DISK so a crash between the rmtree
+        # below and the restore after the move cannot orphan the Zenodo
+        # draft: a stale stash from an interrupted run is simply restored
+        # by this run.
+        artifact_stash_dir = (
+            staging_area_dir / f".{output_dir.name}.artifact_stash"
+        )
+        if artifact_stash_dir.is_dir():
+            logger.warning(
+                "Found upload-artifact stash from a prior interrupted "
+                "re-prep: %s — restoring its contents into the new "
+                "staging folder.", artifact_stash_dir,
+            )
         if final_destination.exists():
             # Preserve the folder's link to any existing Zenodo draft
             # BEFORE destroying it — otherwise the next upload run cannot
             # resume that draft and creates a duplicate record.
-            upload_artifact_stash = _stash_upload_artifacts(final_destination)
+            _stash_upload_artifacts(final_destination, artifact_stash_dir)
             logger.warning(
                 "Replacing existing staging folder: %s", final_destination
             )
@@ -1431,8 +1553,7 @@ def main() -> None:
         shutil.move(str(output_dir), str(partial_destination))
         logger.info("Phase 2: atomic rename -> %s", final_destination)
         os.rename(str(partial_destination), str(final_destination))
-        if upload_artifact_stash:
-            _restore_upload_artifacts(final_destination, upload_artifact_stash)
+        _restore_upload_artifacts(final_destination, artifact_stash_dir)
         output_dir = final_destination
 
     # --- Summary ---
@@ -1458,7 +1579,7 @@ def main() -> None:
     #     without the sentinel and the next batch run will correctly re-prep it.
     #   * Only a fully successful prepare_dataset.py run produces a folder that
     #     other tools will treat as done.
-    sentinel = output_dir / ".prep_complete"
+    sentinel = output_dir / azus_common.PREP_SENTINEL
     sentinel.touch()
     logger.info("Wrote completion sentinel: %s", sentinel)
 

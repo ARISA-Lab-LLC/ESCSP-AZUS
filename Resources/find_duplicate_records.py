@@ -64,9 +64,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# This file lives in Resources/; the uploader module lives at the project
-# root one level up.  Make it importable before the import below.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+import azus_common
+
+# The uploader module lives at the project root one level up.  Make it
+# importable before the import below.
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from standalone_uploader import (  # noqa: E402
@@ -397,9 +399,7 @@ def main() -> None:
     output_path = (
         Path(args.output)
         if args.output
-        else Path.cwd() / datetime.now().strftime(
-            "duplicate_records_report_%Y%m%d_%H%M%S.csv"
-        )
+        else azus_common.timestamped_output_path("duplicate_records_report")
     )
 
     logger.info("=" * 70)

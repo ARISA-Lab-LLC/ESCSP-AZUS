@@ -48,6 +48,7 @@ EXIT CODES
 ==========
 * ``0`` — every re-prep attempted succeeded (or there was nothing to do)
 * ``1`` — at least one re-prep failed
+* ``2`` — usage error (missing report CSV / raw folder, malformed report)
 """
 
 from __future__ import annotations
@@ -60,13 +61,14 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-# Sibling module in Resources/ — reused for raw-folder discovery so this
-# tool never re-derives the ESID-folder-name parsing rules independently.
+# Sibling modules in Resources/ — reused for raw-folder discovery so
+# this tool never re-derives the ESID parsing rules independently.
 import audit_prep_completeness as audit
+import azus_common
 
 logger = logging.getLogger("azus.reprep")
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
 
 
 def read_report(report_path: Path) -> List[Dict[str, str]]:
@@ -149,18 +151,18 @@ def main() -> None:
     report_path = Path(args.report_csv)
     if not report_path.is_file():
         logger.error("Report CSV not found: %s", report_path)
-        sys.exit(1)
+        sys.exit(2)
 
     raw_data_dir = Path(args.raw_data_dir)
     if not raw_data_dir.is_dir():
         logger.error("Raw-data folder not found or not a directory: %s", raw_data_dir)
-        sys.exit(1)
+        sys.exit(2)
 
     try:
         rows = read_report(report_path)
     except ValueError as exc:
         logger.error("%s", exc)
-        sys.exit(1)
+        sys.exit(2)
 
     raw_by_esid = {
         padded: folder for _, padded, folder in audit.find_raw_esid_folders(raw_data_dir)

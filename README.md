@@ -112,7 +112,43 @@ Python code.
   with one command. Use `--audit-all` to ignore the sentinel and force the
   deep audit on every folder (drift detection).
 
+- **Zenodo record inventory** — `Resources/esid_record_report.py` scans the
+  account (drafts included) and the public community listing and writes one
+  CSV row per ESID data record: `ESID#, Title, Zenodo URL, Draft (y/n), DOI,
+  ERROR?`. Titles are selected by repeatable OR patterns (`--title-pattern`,
+  the last `*` = the 3-digit ESID) plus repeatable AND filters
+  (`--and-title-pattern`, e.g. `"*2024*"`). Pagination is deterministic (a
+  listing only counts as complete when a page comes back short — fixes a
+  Zenodo quirk that silently capped scans at 100 records), per-record
+  anomalies land in the `ERROR?` column (exit 1), and listing-level failures
+  abort with no CSV (exit 2). Needs the API token for draft visibility.
+- **Batch re-prep of broken staging folders** —
+  `Resources/reprep_incomplete_staging.py` reads an
+  `audit_prep_completeness.py` report and re-runs `prepare_dataset.py` on
+  every `Prep Completed = No` ESID that has NOT been uploaded yet.
+  Already-uploaded rows are skipped with a warning (fixing those means a
+  new Zenodo version — a manual decision). `--dry-run` previews the plan.
+- **ESID folder listing** — `Resources/list_esids.py MAIN_FOLDER` prints the
+  unique zero-padded ESIDs among a folder's subfolders (pipe-friendly).
+
 See `Guides/STANDALONE_README.md` for the full retry/resume/concurrency behavior.
+
+## Running the Tests
+
+The test suite is deterministic and fully offline (no Zenodo credentials,
+no network). From the project root:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+CI runs the same suite on every push (`.github/workflows/tests.yml`).
+
+## Unattended / Scripted Runs
+
+`standalone_tasks.py` asks an interactive "Proceed? (yes/no)" question
+before uploading. For cron/CI use, pass `--yes`; without it, a run whose
+stdin is not a terminal exits with code 2 instead of hanging.
 
 ## Quick Start
 

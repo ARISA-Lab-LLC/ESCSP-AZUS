@@ -75,6 +75,10 @@ from models.audiomoth import (
     DraftConfig,
     Access,
 )
+# Shared helpers live in Resources/ (see azus_common.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "Resources"))
+import azus_common  # noqa: E402
+
 from standalone_uploader import (
     upload_to_zenodo,
     get_credentials_from_env,
@@ -250,22 +254,8 @@ def build_fundings(project_config: Dict[str, Any]) -> List[Funding]:
 #  Utility functions
 # ===================================================================
 
-def calculate_sha512(filepath: str) -> str:
-    """Calculate the SHA-512 hash of a file.
-
-    Uses a 64 KB read buffer for efficient hashing of large files.
-
-    Args:
-        filepath: Path to the file.
-
-    Returns:
-        Hex-encoded SHA-512 digest string.
-    """
-    sha512_hash = hashlib.sha512()
-    with open(filepath, "rb") as fh:
-        for chunk in iter(lambda: fh.read(_HASH_BUFFER_SIZE), b""):
-            sha512_hash.update(chunk)
-    return sha512_hash.hexdigest()
+# Shared streaming SHA-512 (one definition for the whole suite).
+calculate_sha512 = azus_common.calculate_sha512
 
 
 def parse_values_from_str(string: str, delimiter: str = ":") -> List[str]:
@@ -287,7 +277,13 @@ def parse_values_from_str(string: str, delimiter: str = ":") -> List[str]:
 
 # Written by Resources/prepare_dataset.py as its very last action; its
 # absence means preparation never finished (or predates the sentinel).
-_PREP_SENTINEL_NAME = ".prep_complete"
+_PREP_SENTINEL_NAME = azus_common.PREP_SENTINEL
+
+# Set when the user interrupts a concurrent run (Ctrl+C).  Workers check
+# it before starting a dataset and the uploader checks it between files,
+# so an interrupt takes effect at the next file boundary instead of
+# after hours of queued work.  Interrupted drafts stay resumable.
+_ABORT_EVENT = threading.Event()
 
 # How many offending filenames to name in an integrity problem message
 # before collapsing the rest into a count.
@@ -305,6 +301,7 @@ def _summarize_names(names: List[str]) -> str:
 def verify_dataset_integrity(
     zip_file: str,
     verify_zip_hash: bool = True,
+    digests_out: Optional[Dict[str, str]] = None,
 ) -> List[str]:
     """Verify a prepared dataset's integrity BEFORE any upload work.
 
@@ -331,6 +328,11 @@ def verify_dataset_integrity(
             compare against the manifest.  Costs one full read of the
             archive (~minutes for a 43 GB ZIP) — small next to the
             hours-long upload it protects.
+        digests_out: Optional dict the caller supplies to receive the
+            digests computed during the hash step (keys ``"sha512"`` and
+            ``"md5"``, filled only when the hash step runs and passes).
+            Both are computed in ONE read of the archive; the md5 lets
+            the uploader skip its own separate full read of the same ZIP.
 
     Returns:
         List of human-readable problem strings.  Empty list = verified.
@@ -378,6 +380,7 @@ def verify_dataset_integrity(
         )
     else:
         listed_wav_sizes: Dict[str, str] = {}
+        listed_wav_bytes: Dict[str, str] = {}
         try:
             with open(file_list_path, "r", encoding="utf-8") as fh:
                 for row in csv.DictReader(fh):
@@ -390,12 +393,16 @@ def verify_dataset_integrity(
                         listed_wav_sizes[name] = (
                             (row.get("File size (KB)") or "").strip()
                         )
+                        listed_wav_bytes[name] = (
+                            (row.get("File size (Bytes)") or "").strip()
+                        )
         except (OSError, csv.Error) as exc:
             problems.append(
                 f"file_list.csv is unreadable ({exc}) — cannot verify "
                 "ZIP contents."
             )
             listed_wav_sizes = {}
+            listed_wav_bytes = {}
 
         if listed_wav_sizes or expected_zip_hash:
             missing = sorted(set(listed_wav_sizes) - set(zip_wav_sizes))
@@ -410,12 +417,26 @@ def verify_dataset_integrity(
                     f"{len(extra)} WAV(s) in the ZIP are not listed in "
                     f"file_list.csv: {_summarize_names(extra)}"
                 )
-            # Same "File size (KB)" formatting prep uses, so the
-            # comparison is exact, not a float-tolerance guess.
+
+            def _size_differs(name: str) -> bool:
+                # Prefer the byte-exact column (written by current prep);
+                # two different sizes can round to the same 2-decimal KB,
+                # so the KB comparison alone leaves a small blind spot
+                # when --skip-integrity-hash disables the hash backstop.
+                exact = listed_wav_bytes.get(name, "")
+                if exact:
+                    return str(zip_wav_sizes[name]) != exact
+                # Legacy manifests (pre-Bytes-column): rounded-KB compare
+                # using the same formatting prep used to write it.
+                return (
+                    f"{zip_wav_sizes[name] / 1024:.2f}"
+                    != listed_wav_sizes[name]
+                )
+
             size_mismatches = sorted(
                 name
                 for name in set(listed_wav_sizes) & set(zip_wav_sizes)
-                if f"{zip_wav_sizes[name] / 1024:.2f}" != listed_wav_sizes[name]
+                if _size_differs(name)
             )
             if size_mismatches:
                 problems.append(
@@ -440,16 +461,24 @@ def verify_dataset_integrity(
     # point reading a 43 GB archive we already know is bad).
     if verify_zip_hash and expected_zip_hash and not problems:
         logger.info(
-            "Verifying SHA-512 of %s against file_list.csv ...",
+            "Verifying SHA-512 of %s against file_list.csv (md5 computed "
+            "in the same read for the upload step)...",
             zip_path.name,
         )
-        actual_hash = calculate_sha512(str(zip_path))
+        digests = azus_common.calculate_digests(
+            str(zip_path), ("sha512", "md5")
+        )
+        actual_hash = digests["sha512"]
         if actual_hash != expected_zip_hash:
             problems.append(
                 f"ZIP SHA-512 does not match file_list.csv — the archive "
                 f"changed after preparation. Expected "
                 f"{expected_zip_hash[:16]}..., got {actual_hash[:16]}..."
             )
+        elif digests_out is not None:
+            # Only hand the digests back when the archive VERIFIED —
+            # the uploader must never trust hashes of a bad file.
+            digests_out.update(digests)
 
     if not problems:
         logger.info(
@@ -819,10 +848,7 @@ def find_dataset_files(
     dataset_dir = zip_path.parent
 
     # Extract ESID from ZIP filename (e.g., "ESID_005.zip" → "005")
-    zip_name = zip_path.stem
-    esid = None
-    if zip_name.startswith("ESID_"):
-        esid = zip_name.replace("ESID_", "").split("_")[0]
+    esid = azus_common.parse_esid(zip_path.name)
 
     # --- Try upload manifest first ---
     if esid:
@@ -919,10 +945,20 @@ def get_esid_file_pairs(files: List[str]) -> List[Tuple[str, str]]:
     Returns:
         List of (esid, file_path) tuples.
     """
-    return [
-        (Path(f).stem.split("_")[-1].strip(), f)
-        for f in files
-    ]
+    pairs: List[Tuple[str, str]] = []
+    for f in files:
+        esid = azus_common.parse_esid(Path(f).name)
+        if esid is None:
+            # The old last-underscore-segment split would have produced
+            # garbage here (e.g. "v2" from ESID_005_v2.zip) and silently
+            # attached the wrong collector metadata downstream.
+            logger.warning(
+                "Cannot parse an ESID from ZIP name %s — skipping it.",
+                Path(f).name,
+            )
+            continue
+        pairs.append((esid, f))
+    return pairs
 
 
 # ===================================================================
@@ -1192,9 +1228,13 @@ def get_draft_config(
         ))
 
     # --- Build subjects from CSV keywords ---
+    # subjects is Optional[str]: a site with no Keywords cell must yield
+    # no Subject entries, not an AttributeError (None) or a Zenodo-
+    # rejected empty Subject ("").
     subjects = [
         Subject(subject=s)
-        for s in parse_values_from_str(data_collector.subjects)
+        for s in parse_values_from_str(data_collector.subjects or "")
+        if s
     ]
 
     # --- Load related identifiers and references from CSV ---
@@ -1516,6 +1556,7 @@ def upload_dataset(
     defer_zip: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
+    zip_md5: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
 
@@ -1688,12 +1729,25 @@ def upload_dataset(
             submit_review=not defer_zip,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
+            abort_event=_ABORT_EVENT,
+            known_md5s=(
+                {Path(data.zip_file).name: zip_md5} if zip_md5 else None
+            ),
         )
         return result
 
     except Exception as exc:
-        logger.error("Exception during upload for ESID %s: %s", data.esid, exc)
-        logger.debug("Full traceback:\n%s", traceback.format_exc())
+        # upload_to_zenodo converts every KNOWN failure family (HTTP,
+        # transport, duplicate-title, integrity, bad file) into a result
+        # dict internally, so an exception arriving here is unexpected —
+        # very likely a code bug.  Log the full traceback at ERROR so it
+        # cannot hide among routine upload failures, but still convert to
+        # a failure result so one ESID never poisons the batch.
+        logger.error(
+            "UNEXPECTED exception during upload for ESID %s (%s: %s) — "
+            "likely a code bug, full traceback follows.",
+            data.esid, type(exc).__name__, exc, exc_info=True,
+        )
         return {
             "successful": False,
             "error": {
@@ -1776,18 +1830,16 @@ def get_upload_data(
             subdir.name.startswith("ESID_") or subdir.name.startswith("ESID#")
         ):
             # Apply ESID filter before adding to the work list.
-            # Extract the leading digits after "ESID_" / "ESID#" — tolerant
-            # of folder names like "ESID_073", "ESID_073_Staging" (the name
-            # prepare_dataset.py uses), or "ESID#73".
+            # Shared parser — tolerant of folder names like "ESID_073",
+            # "ESID_073_Staging" (prepare_dataset.py's name), "ESID#73".
             if normalized_filter is not None:
-                m = re.match(r"^ESID[_#](\d+)", subdir.name)
-                if m is None:
+                folder_esid_normalized = azus_common.parse_esid(subdir.name)
+                if folder_esid_normalized is None:
                     logger.debug(
                         "  Skipping %s (no ESID number in folder name)",
                         subdir.name,
                     )
                     continue
-                folder_esid_normalized = m.group(1).zfill(3)
                 if folder_esid_normalized not in normalized_filter:
                     logger.debug(
                         "  Skipping %s (not in --esid filter)", subdir.name
@@ -1802,11 +1854,11 @@ def get_upload_data(
                 logger.warning(
                     "ESID folder has no ZIP — skipping: %s", subdir.name
                 )
-                m = re.match(r"^ESID[_#](\d+)", subdir.name)
+                folder_esid = azus_common.parse_esid(subdir.name)
                 save_result_csv(
                     file=failure_results_file,
                     result=PersistedResult(
-                        esid=m.group(1).zfill(3) if m else subdir.name,
+                        esid=folder_esid if folder_esid else subdir.name,
                         error_message="No ZIP file found in staging folder",
                     ),
                 )
@@ -1974,15 +2026,23 @@ def _process_one_dataset(
     # multi-worker output.  Example: `grep '[ESID 012]' azus_upload.log`.
     tag = f"[ESID {data.esid}]"
 
+    if _ABORT_EVENT.is_set():
+        logger.warning("%s Skipped — run aborted by user (Ctrl+C).", tag)
+        with stats_lock:
+            stats["aborted"] = stats.get("aborted", 0) + 1
+        return
+
     logger.info("%s Starting (dataset %d of %d)", tag, index, total)
 
     # --- Step 0: integrity gate — nothing uploads past a problem ---
     # Runs entirely locally (no network).  A broken or unverifiable
     # dataset is marked FAILED here so an incomplete ZIP can never
     # reach Zenodo, no matter how it ended up in the staging area.
+    integrity_digests: Dict[str, str] = {}
     try:
         integrity_problems = verify_dataset_integrity(
             zip_file=data.zip_file, verify_zip_hash=verify_zip_hash,
+            digests_out=integrity_digests,
         )
     except Exception as exc:  # a gate crash must fail closed, not open
         integrity_problems = [
@@ -2028,6 +2088,9 @@ def _process_one_dataset(
             defer_zip=defer_zip,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
+            # md5 from the integrity gate's combined digest pass — saves
+            # the uploader a second full read of the (verified) ZIP.
+            zip_md5=integrity_digests.get("md5"),
         )
     except Exception as exc:
         logger.error("%s Unexpected error during upload: %s", tag, exc)
@@ -2376,11 +2439,27 @@ def upload_datasets(
                     )
                     for i, data in enumerate(category_upload_data, 1)
                 ]
-                for future in concurrent.futures.as_completed(futures):
-                    # Re-raise any exception that escaped the worker.
-                    # `_process_one_dataset` is designed to never raise,
-                    # so this is a safety net for unexpected failures.
-                    future.result()
+                try:
+                    for future in concurrent.futures.as_completed(futures):
+                        # Re-raise any exception that escaped the worker.
+                        # `_process_one_dataset` is designed to never raise,
+                        # so this is a safety net for unexpected failures.
+                        future.result()
+                except KeyboardInterrupt:
+                    # Without this, the `with` block's shutdown(wait=True)
+                    # would silently run every queued dataset and wait for
+                    # in-flight multi-GB uploads — Ctrl+C could take hours
+                    # to act.  Set the abort event (workers check it
+                    # between files), drop queued futures, and don't wait.
+                    logger.warning(
+                        "Interrupt received — cancelling queued datasets; "
+                        "in-flight workers stop at their next file "
+                        "boundary. Interrupted drafts stay resumable via "
+                        "upload_state.json."
+                    )
+                    _ABORT_EVENT.set()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
 
     return stats
 
@@ -2449,6 +2528,15 @@ def main() -> None:
             "PUBLISHED record makes the dataset fail rather than create "
             "a duplicate. Only skip this if you truly intend to create a "
             "second record with an identical title."
+        ),
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help=(
+            "Skip the interactive 'Proceed? (yes/no)' confirmation. "
+            "REQUIRED for unattended runs (cron, CI, scripts): without "
+            "it, a run whose stdin is not a terminal exits with an error "
+            "instead of hanging or crashing on the prompt."
         ),
     )
     parser.add_argument(
@@ -2615,13 +2703,22 @@ def main() -> None:
         logger.info("Dry run complete — configuration is valid")
         sys.exit(0)
 
-    # --- Confirmation prompt ---
-    print("\n⚠️  You are about to upload datasets to Zenodo.")
-    print("   This will create REAL records on Zenodo.")
-    response = input("\nProceed? (yes/no): ")
-    if response.lower() != "yes":
-        logger.info("Upload cancelled by user")
-        sys.exit(0)
+    # --- Confirmation prompt (bypass with --yes for unattended runs) ---
+    if args.yes:
+        logger.info("Confirmation skipped (--yes).")
+    elif not sys.stdin.isatty():
+        logger.error(
+            "stdin is not a terminal, so the 'Proceed?' confirmation "
+            "cannot be answered. Re-run with --yes for unattended use."
+        )
+        sys.exit(2)
+    else:
+        print("\n⚠️  You are about to upload datasets to Zenodo.")
+        print("   This will create REAL records on Zenodo.")
+        response = input("\nProceed? (yes/no): ")
+        if response.lower() != "yes":
+            logger.info("Upload cancelled by user")
+            sys.exit(0)
 
     # --- Run upload ---
     try:
@@ -2657,6 +2754,11 @@ def main() -> None:
         logger.info("Skipped:         %d", stats["skipped"])
         if stats.get("deferred"):
             logger.info("Deferred:        %d (ZIP not uploaded yet)", stats["deferred"])
+        if stats.get("aborted"):
+            logger.info(
+                "Aborted:         %d (Ctrl+C before start — re-run to upload)",
+                stats["aborted"],
+            )
         logger.info("=" * 70)
 
         if stats["failed"]:

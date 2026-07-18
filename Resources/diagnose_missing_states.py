@@ -63,22 +63,23 @@ import json
 import logging
 import re
 import sys
+
+import azus_common
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("azus.state_diag")
 
 # This file lives in Resources/; the project root is one level up.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
+_STAGING_AREA = azus_common.STAGING_AREA
 _DEFAULT_CONFIG = _PROJECT_ROOT / "Resources" / "config.json"
 
-_STATE_FILENAME = "upload_state.json"
+_STATE_FILENAME = azus_common.STATE_FILENAME
 _TRACKER_FILENAME = "uploaded_files.txt"
 
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 _ESID_ZIP_RE = re.compile(r"ESID[_#]?(\d+)\.zip$", re.IGNORECASE)
 
 # Log lines worth quoting when --log is used: the verbatim strings the
@@ -218,7 +219,7 @@ def _record_id_from_request_log(path: Path) -> str:
         return ""
 
 
-def _grep_logs(log_paths: List[Path], esid: str) -> (int, List[str]):
+def _grep_logs(log_paths: List[Path], esid: str) -> Tuple[int, List[str]]:
     """Count lines mentioning the ESID across the given logs; keep the
     ones containing a known diagnostic keyword (max 5 quoted)."""
     needles = (f"ESID {esid}", f"ESID_{esid}", f"ESID {int(esid)}")
@@ -269,7 +270,7 @@ def gather_evidence(
     ev.prior_success = numeric in success_rows
     ev.latest_failure = failure_rows.get(numeric, "")
 
-    sentinel = folder / ".prep_complete"
+    sentinel = folder / azus_common.PREP_SENTINEL
     if sentinel.is_file():
         ev.prep_mtime = datetime.fromtimestamp(
             sentinel.stat().st_mtime
@@ -285,7 +286,7 @@ def gather_evidence(
 # Classification
 # ---------------------------------------------------------------------
 
-def classify(ev: Evidence) -> (str, str):
+def classify(ev: Evidence) -> Tuple[str, str]:
     """Return (probable_cause, suggested_action) — most specific first.
 
     Order mirrors how the real pipeline works: artifacts proving a past
@@ -516,15 +517,13 @@ def main() -> None:
     for entry in sorted(_STAGING_AREA.iterdir()):
         if not entry.is_dir():
             continue
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
+        esid = azus_common.parse_esid(entry.name)
+        if esid is None:
             logger.warning("Skipping non-ESID subfolder: %s", entry.name)
             continue
         if (entry / _STATE_FILENAME).is_file():
             with_state += 1
             continue
-
-        esid = f"{int(m.group(1)):03d}"
         ev = gather_evidence(
             esid, entry, tracker_esids, collector_esids,
             success_rows, failure_rows, log_paths,

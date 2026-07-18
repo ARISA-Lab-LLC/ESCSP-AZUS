@@ -14,11 +14,10 @@ USAGE
     python Resources/list_esids.py MAIN_FOLDER
 """
 
-import re
 import sys
 from pathlib import Path
 
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
+import azus_common
 
 
 def main() -> None:
@@ -32,12 +31,12 @@ def main() -> None:
     esids = set()
     for entry in folder.iterdir():
         if entry.is_dir():
-            m = _ESID_FOLDER_RE.match(entry.name)
-            if m:
-                esids.add(int(m.group(1)))
+            padded = azus_common.parse_esid(entry.name)
+            if padded is not None:
+                esids.add(padded)
 
     for esid in sorted(esids):
-        print(f"{esid:03d}")
+        print(esid)
     print(f"{len(esids)} unique ESID(s)", file=sys.stderr)
 
 

@@ -13,7 +13,7 @@ This tool walks a top-level raw-data directory, finds every ESID
 subdirectory, looks for the matching prepared folder under either
 ``<project_root>/Staging_Area/`` or ``<project_root>/Uploaded_Data/``,
 and **verifies that every expected file is present** — both in the
-folder itself and inside the ZIP archive (via ``unzip -l``).
+folder itself and inside the ZIP archive (read via ``zipfile``).
 
 Each ESID gets one row in a 4-column CSV report (``ESID#``,
 ``Staging Area``, ``Uploaded Data``, ``Prep Completed``).
@@ -66,6 +66,7 @@ EXIT CODES
 ==========
 * ``0`` — every ESID was either "Yes" or "Ambiguous"
 * ``1`` — at least one ESID was "No" (missing files detected)
+* ``2`` — usage error (missing raw-data or Resources directory)
 """
 
 from __future__ import annotations
@@ -73,10 +74,8 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import re
-import subprocess
 import sys
-from datetime import datetime
+import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -91,58 +90,38 @@ logger = logging.getLogger("azus.audit")
 # ---------------------------------------------------------------------
 # Project layout — same conventions as the other AZUS helper tools.
 # ---------------------------------------------------------------------
-# This file lives in Resources/, so the project root is one directory up.
-# Absolute path so the tool does not care what the current working
-# directory is when it runs.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
-_UPLOADED_DATA = _PROJECT_ROOT / "Uploaded_Data"
+import azus_common
+# The audited truth-set is imported FROM THE PRODUCER: prepare_dataset.py
+# owns the canonical list of files a completed prep contains, right next
+# to the code that writes them.  A prep-output change now breaks loudly
+# here instead of this tool silently certifying incomplete folders.
+import prepare_dataset as _prep_contract
 
-# Regex used by every AZUS tool to extract the leading numeric portion
-# of an ESID folder name.  Accepts ESID_073, ESID_073_Staging,
-# ESID_073_Uploaded, ESID#73, and unpadded variants (ESID_4 -> 4).
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
+# Shared project layout (see azus_common.py).
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
+_STAGING_AREA = azus_common.STAGING_AREA
+_UPLOADED_DATA = azus_common.UPLOADED_DATA
 
+# Files that should appear DIRECTLY in the staging/uploaded folder
+# (``{esid}`` = 3-digit ESID number) — from the prep contract.
+_HARDCODED_STAGING_FILES: Tuple[str, ...] = _prep_contract.STAGING_OUTPUT_FILES
 
-# ---------------------------------------------------------------------
-# Truth sets — what prepare_dataset.py is expected to produce.
-# Derived from a careful read of Resources/prepare_dataset.py.
-# ---------------------------------------------------------------------
-# Files that should appear DIRECTLY in the staging/uploaded folder.
-# Each entry uses ``{esid}`` as a placeholder for the 3-digit ESID number.
-_HARDCODED_STAGING_FILES: Tuple[str, ...] = (
-    "ESID_{esid}.zip",
-    "ESID_{esid}_to_upload.csv",
-    "README.html",
-    "README.md",
-    "file_list.csv",
-    "total_eclipse_data.csv",
-)
+# Prep-generated files that also appear INSIDE ESID_NNN.zip (compared
+# by basename, after stripping the ESID_NNN/ prefix).
+_HARDCODED_ZIP_ENTRIES: Tuple[str, ...] = _prep_contract.ZIP_METADATA_ENTRIES
 
-# Files that should appear INSIDE ESID_NNN.zip, identified by basename.
-# The ZIP archive groups everything under an ESID_NNN/ subfolder prefix,
-# but we compare basenames after stripping the prefix.
-_HARDCODED_ZIP_ENTRIES: Tuple[str, ...] = (
-    "README.md",
-    "file_list.csv",
-    "total_eclipse_data.csv",
-)
-
-# Files whose absence is treated as Ambiguous (could be intentional)
-# rather than No.  ``related_identifiers.csv`` is conditionally copied
-# by ``prepare_dataset.py`` based on the site's Keywords, so a missing
-# one is not necessarily a defect.
-_CONDITIONAL_FILES: Tuple[str, ...] = ("related_identifiers.csv",)
+# Files whose absence is Ambiguous (conditionally copied), not No.
+_CONDITIONAL_FILES: Tuple[str, ...] = _prep_contract.CONDITIONAL_FILES
 
 # The completion sentinel touched as the very last action of
 # ``prepare_dataset.main()``.  Its presence in a folder enables this
 # tool's fast-path "Yes" return.  Its absence does NOT make a folder
 # incomplete — this tool's whole point is to vet pre-sentinel folders.
-_PREP_SENTINEL = ".prep_complete"
+_PREP_SENTINEL = azus_common.PREP_SENTINEL
 
 # Filename templates for the prepared-folder locations.
-_STAGING_FOLDER_TEMPLATE = "ESID_{esid}_Staging"
-_UPLOADED_FOLDER_TEMPLATE = "ESID_{esid}_Uploaded"
+_STAGING_FOLDER_TEMPLATE = _prep_contract.STAGING_FOLDER_TEMPLATE
+_UPLOADED_FOLDER_TEMPLATE = _prep_contract.UPLOADED_FOLDER_TEMPLATE
 
 # Source of truth for which "companion" files prepare_dataset.py copies
 # from Resources/ into each staging folder (and into the ZIP).
@@ -172,20 +151,7 @@ def find_raw_esid_folders(raw_root: Path) -> List[Tuple[int, str, Path]]:
         in ascending numeric order.  Empty list if ``raw_root`` is not a
         directory or contains no matching subdirectories.
     """
-    found: List[Tuple[int, str, Path]] = []
-    if not raw_root.is_dir():
-        return found
-    for entry in raw_root.iterdir():
-        if not entry.is_dir():
-            continue
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
-            continue
-        numeric = int(m.group(1))
-        padded = f"{numeric:03d}"
-        found.append((numeric, padded, entry))
-    found.sort(key=lambda t: t[0])
-    return found
+    return azus_common.find_esid_folders(raw_root)
 
 
 def find_in_staging(esid_padded: str) -> Optional[Path]:
@@ -329,14 +295,14 @@ def expected_zip_basenames(
 # =====================================================================
 
 def list_zip_contents(zip_path: Path) -> Optional[Set[str]]:
-    """Return the set of file basenames inside ``zip_path`` via ``unzip -l``.
+    """Return the set of file basenames inside ``zip_path``.
 
-    Uses the system ``unzip`` command in list mode rather than Python's
-    ``zipfile`` module so the audit matches what a human would see on
-    the shell (per the project spec).  This also makes the tool robust
-    to ZIP edge cases that ``zipfile`` doesn't handle (large-file
-    extensions, certain encryption modes, etc.) — ``unzip -l`` either
-    succeeds and we get a listing, or it fails and we report Ambiguous.
+    Reads the ZIP central directory with Python's ``zipfile`` — the same
+    reader every other AZUS tool (and the prep verification itself)
+    trusts against these exact archives.  This replaced an earlier
+    ``unzip -l`` subprocess whose text-output parsing was fragile and
+    whose external-binary dependency was the only one in the suite;
+    ``zipfile`` handles ZIP64 large-file archives natively.
 
     Directory entries (names ending in ``/``) are stripped — only file
     entries are returned.  Each entry is reduced to its basename so
@@ -347,9 +313,8 @@ def list_zip_contents(zip_path: Path) -> Optional[Set[str]]:
         zip_path: Path to the ZIP file to introspect.
 
     Returns:
-        A set of basenames on success, or ``None`` if ``unzip`` is not
-        installed, the ZIP is missing, or ``unzip`` exits non-zero
-        (typically meaning the archive is corrupt).  ``None`` is the
+        A set of basenames on success, or ``None`` if the ZIP is missing
+        or unreadable (typically a corrupt archive).  ``None`` is the
         caller's signal to mark the ESID as Ambiguous.
     """
     if not zip_path.is_file():
@@ -357,58 +322,18 @@ def list_zip_contents(zip_path: Path) -> Optional[Set[str]]:
         return None
 
     try:
-        result = subprocess.run(
-            ["unzip", "-l", str(zip_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.error(
-            "`unzip` command not found on PATH — install it (e.g. `apt install unzip`) "
-            "to enable ZIP audit.",
-        )
-        return None
-
-    if result.returncode != 0:
+        with zipfile.ZipFile(zip_path) as zf:
+            return {
+                name.rsplit("/", 1)[-1]
+                for name in zf.namelist()
+                if not name.endswith("/")
+            }
+    except (zipfile.BadZipFile, OSError) as exc:
         logger.warning(
-            "`unzip -l` failed for %s (exit %d): %s",
-            zip_path, result.returncode, (result.stderr or "").strip(),
+            "Could not read ZIP %s (%s: %s)",
+            zip_path, type(exc).__name__, exc,
         )
         return None
-
-    # ``unzip -l`` output structure:
-    #     Archive:  some.zip
-    #       Length      Date    Time    Name
-    #     ---------  ---------- -----   ----
-    #          0    2026-04-01 12:00   ESID_073/
-    #     123456    2026-04-01 12:00   ESID_073/20240408_120000.WAV
-    #     ...
-    #     ---------                    -------
-    #     999999                       12 files
-    #
-    # Strategy: flip an "in listing" flag at each ``---`` separator and
-    # collect file rows in between.
-    names: Set[str] = set()
-    in_listing = False
-    for line in result.stdout.splitlines():
-        if line.lstrip().startswith("---"):
-            in_listing = not in_listing
-            continue
-        if not in_listing:
-            continue
-        # Each row: "<size> <date> <time> <name>".  ``maxsplit=3`` keeps
-        # the (possibly space-containing) name intact in the last field.
-        parts = line.split(maxsplit=3)
-        if len(parts) < 4:
-            continue
-        entry_name = parts[3].rstrip()
-        # Skip directory entries — we only care about files.
-        if entry_name.endswith("/"):
-            continue
-        # Reduce to basename: "ESID_073/20240408_120000.WAV" -> "20240408_120000.WAV"
-        names.add(Path(entry_name).name)
-    return names
 
 
 # =====================================================================
@@ -437,7 +362,7 @@ def audit_one_esid(
          return ``("Yes", [])`` immediately.
       1. ZIP missing → ``"No"`` unambiguously.
       2. ``resource_files_list.csv`` couldn't be loaded → ``"Ambiguous"``.
-      3. ZIP exists but ``unzip -l`` couldn't enumerate it → ``"Ambiguous"``.
+      3. ZIP exists but its index couldn't be read → ``"Ambiguous"``.
       4. Any required Set A or Set B file is missing → ``"No"``.
       5. The conditional ``related_identifiers.csv`` is missing → ``"Ambiguous"``.
       6. ``CONFIG.TXT`` absent from BOTH raw and ZIP → ``"Ambiguous"``.
@@ -486,7 +411,7 @@ def audit_one_esid(
     if zip_contents is None:
         return (
             "Ambiguous",
-            [f"`unzip -l` failed for {zip_name} — archive corrupt or unzip missing"],
+            [f"Could not read the ZIP index of {zip_name} — archive corrupt?"],
         )
 
     # ---- Build the two truth sets ----
@@ -589,14 +514,8 @@ def backfill_sentinel_if_yes(target_folder: Path, status: str) -> None:
 # =====================================================================
 
 def default_output_path() -> Path:
-    """Return a timestamped CSV filename in the current working directory.
-
-    The timestamp prevents repeated runs from clobbering each other,
-    which matters because the report is an audit artifact one might
-    want to keep alongside prior reports.
-    """
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path.cwd() / f"prep_completeness_report_{stamp}.csv"
+    """Return a timestamped CSV filename in the current working directory."""
+    return azus_common.timestamped_output_path("prep_completeness_report")
 
 
 def write_report(rows: List[Dict[str, str]], output_path: Path) -> None:
@@ -646,7 +565,7 @@ def main() -> None:
         description=(
             "Audit completeness of prepared ESID staging and uploaded folders. "
             "Walks raw ESID directories, finds matching folders in Staging_Area/ "
-            "and Uploaded_Data/, and verifies (folder contents + unzip -l of the "
+            "and Uploaded_Data/, and verifies (folder contents + ZIP index of the "
             "ZIP) that every file prepare_dataset.py should have produced is "
             "present.  Writes a 4-column CSV report and back-fills the "
             ".prep_complete sentinel on folders the audit confirms."
@@ -696,16 +615,12 @@ def main() -> None:
     args = parser.parse_args()
 
     # ---- Configure logging once, here ----
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    azus_common.configure_logging(verbose=args.verbose)
 
     raw_data_dir = Path(args.raw_data_dir)
     if not raw_data_dir.is_dir():
         logger.error("Raw-data folder not found or not a directory: %s", raw_data_dir)
-        sys.exit(1)
+        sys.exit(2)
 
     resources_dir = Path(args.resources_dir)
     if not resources_dir.is_dir():
@@ -716,7 +631,7 @@ def main() -> None:
             resources_dir = alt
         else:
             logger.error("Resources directory not found: %s", resources_dir)
-            sys.exit(1)
+            sys.exit(2)
 
     output_path = Path(args.output) if args.output else default_output_path()
 

@@ -1,5 +1,105 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — Supervisory-review remediation: reliability, de-drift, write-path tests, I/O
+
+A three-pass code review (core pipeline / tool suite / test coverage) found
+strong integrity engineering with three systemic weaknesses: unattended-
+reliability gaps, copy-paste drift across the 11 Resources tools, and test
+coverage inverted against risk. Fixed in five phases:
+
+### Phase 1 — Reliability quick wins
+
+- **HTTP timeouts on all 11 Zenodo calls** (`standalone_uploader.py`,
+  `_REQUEST_TIMEOUT = (10, 300)`). A half-open socket used to hang a batch
+  forever WITHOUT triggering the retry machinery (no exception, no retry);
+  now it surfaces as a retryable error. Read timeout is per-socket-operation,
+  so healthy multi-hour PUTs are unaffected.
+- **Unexpected exceptions no longer masquerade as upload failures**:
+  `upload_to_zenodo` catches only the known failure families (HTTP/transport/
+  DuplicateTitle/FileIntegrity/file errors); anything else propagates and is
+  logged with a full traceback ("UNEXPECTED ... likely a code bug") while the
+  batch continues.
+- **Upload-artifact stash moved to disk** (`prepare_dataset.py`): re-prep used
+  to hold `upload_state.json`/request-log only in RAM across the `rmtree` —
+  a kill in that window orphaned the Zenodo draft (duplicate-record risk).
+  The stash now lives in `Staging_Area/.<name>.artifact_stash/`; a stale
+  stash from a killed run is restored automatically by the next run.
+- **`--yes` flag** for `standalone_tasks.py`; a non-TTY run without it exits 2
+  with a clear message instead of crashing on `input()` (cron/CI safe).
+- **Ctrl+C responsiveness** (`--workers N`): interrupt now cancels queued
+  datasets, workers check an abort event between datasets, and the uploader
+  checks it between files — interrupted drafts stay resumable. New
+  "Aborted" stat in the summary.
+- Exit-code conformance (usage errors = 2) in `audit_prep_completeness.py`
+  and `reprep_incomplete_staging.py`; the in-place-refusal test made fully
+  hermetic (runs a copied script in a throwaway project tree).
+
+### Phase 2 — `Resources/azus_common.py`: one definition of everything shared
+
+New stdlib-only shared module: `PROJECT_ROOT`/`STAGING_AREA`/`UPLOADED_DATA`,
+`PREP_SENTINEL`, `STATE_FILENAME`, `parse_esid()` (THE single ESID parser,
+000–999 bounds-checked), `find_esid_folders()`, `calculate_sha512()` /
+`calculate_digests()`, `configure_logging()`, `timestamped_output_path()`.
+Migrated: 8 copies of project-root discovery, 6 copies of the ESID folder
+regex (which had drifted into 4 variants), 3 sentinel definitions, 2 sha512
+implementations, plus the divergent ESID parsers inside `standalone_tasks.py`
+(`get_esid_file_pairs` could return "v2" for `ESID_005_v2.zip`; now all sites
+agree). `prepare_dataset.get_esid_from_folder` now always returns the padded
+3-digit form (unpadded names used to leak through and evade skip checks).
+
+Also: **the completeness truth-set now lives in the producer** —
+`prepare_dataset.py` exports `STAGING_OUTPUT_FILES`/`ZIP_METADATA_ENTRIES`/
+`CONDITIONAL_FILES`/folder templates, and `audit_prep_completeness.py`
+imports them instead of a hand-copied mirror. The auditor also reads ZIPs
+with Python `zipfile` (ZIP64-capable) instead of parsing `unzip -l` output —
+the suite's only external-binary dependency is gone.
+
+### Phase 3 — Write-path test suites (the risk-weighted coverage gap)
+
+Five new suites, 112 tests, all hermetic/offline:
+`test_prepare_dataset_atomic_move.py` (stash/restore, crash-window recovery,
+full e2e re-prep round-trip), `test_uploader_resume_heal.py` (verified-skip,
+size/md5 heal, fail-closed unreadable-local, post-commit verification,
+abort), `test_uploader_title_guard.py` (normalization, both serializations,
+adopt-vs-fail, fail-closed search, DOI-reservation idempotency),
+`test_metadata_builders.py` (creators/contributors/fundings/get_draft_config
+golden payloads, recording dates, manifests, upload-data assembly),
+`test_persistence_layer.py` (UploadTracker, result CSVs, request-log
+recovery, stuck-ESID discovery, restore-state). Also fixed a real bug the
+tests exposed: `get_draft_config` crashed on a collector with no Keywords
+(`subjects=None`) and could emit empty Subject entries.
+
+### Phase 4 — I/O efficiency on multi-GB files (safety unchanged)
+
+- `create_zip_file` now hashes WHILE compressing (one read per source file;
+  it silently read every raw WAV twice before).
+- The integrity gate computes SHA-512 **and** md5 in one read
+  (`calculate_digests`) and hands the verified md5 to the uploader
+  (`known_md5s`), eliminating the uploader's separate full read of the same
+  ZIP. Digests are only handed over when the archive VERIFIED; if the file
+  changes afterwards, the post-commit checksum comparison fails the dataset.
+- `file_list.csv` gains a **"File size (Bytes)"** column (documented in
+  `file_list_data_dict.csv`); the integrity gate compares exact bytes (two
+  sizes can round to the same 2-decimal KB), falling back to the KB compare
+  for legacy manifests. Net effect for one clean prep+upload of a 43 GB
+  dataset: raw data read once instead of twice, ZIP read twice (hash + PUT)
+  instead of four times.
+
+### Phase 5 — Docs and CI
+
+README: the three newest tools (`esid_record_report.py`,
+`reprep_incomplete_staging.py`, `list_esids.py`), a "Running the Tests"
+section, and unattended-run guidance. New `.github/workflows/tests.yml` runs
+the suite on Python 3.11/3.12 on every push/PR.
+
+Known/documented (not fixed here): template-hygiene — an unfilled
+`project_config.json` passes empty strings into Zenodo payloads with no
+early validation; `save_result` accepts but does not persist the ZIP path.
+
+Full suite after all phases: **255 tests, all passing.**
+
+---
+
 ## July 2026 — Verified-integrity uploads: no unverified ZIP reaches Zenodo
 
 Incomplete ZIPs (missing WAV files) were uploaded to Zenodo from the

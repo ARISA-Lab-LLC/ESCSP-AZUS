@@ -62,15 +62,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+import azus_common
+
 logger = logging.getLogger("azus.wav_audit")
 
-# This file lives in Resources/, so the project root is one level up.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
-_UPLOADED_DATA = _PROJECT_ROOT / "Uploaded_Data"
-
-# Accepts ESID_073, ESID_073_Staging, ESID#73 — case-insensitive.
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
+# Shared project layout (see azus_common.py).
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
+_STAGING_AREA = azus_common.STAGING_AREA
+_UPLOADED_DATA = azus_common.UPLOADED_DATA
 
 # A valid WAV has a 44-byte header before any audio; files below ~1 KB
 # contain no usable recording.
@@ -435,11 +434,11 @@ def find_raw_esid_folders(raw_root: Path) -> List[Tuple[int, str, Path]]:
     for entry in sorted(raw_root.iterdir()):
         if not entry.is_dir():
             continue
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
+        padded = azus_common.parse_esid(entry.name)
+        if padded is None:
             logger.warning("Skipping non-ESID subfolder: %s", entry.name)
             continue
-        found.append((int(m.group(1)), f"{int(m.group(1)):03d}", entry))
+        found.append((int(padded), padded, entry))
     found.sort(key=lambda t: t[0])
 
     seen: Dict[str, Path] = {}
@@ -602,11 +601,7 @@ def main() -> None:
     if args.tiny_threshold < 1:
         parser.error(f"--tiny-threshold must be >= 1 (got {args.tiny_threshold}).")
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    azus_common.configure_logging()
 
     raw_root = Path(args.raw_data_dir)
     if not raw_root.is_dir():
@@ -615,8 +610,7 @@ def main() -> None:
 
     output_path = (
         Path(args.output) if args.output
-        else Path.cwd() / datetime.now().strftime(
-            "wav_integrity_report_%Y%m%d_%H%M%S.csv")
+        else azus_common.timestamped_output_path("wav_integrity_report")
     )
 
     logger.info("=" * 70)

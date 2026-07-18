@@ -44,25 +44,24 @@ import argparse
 import csv
 import json
 import logging
-import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
+
+import azus_common
 
 logger = logging.getLogger("azus.state_list")
 
 # This file lives in Resources/; the project root is one level up.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
 _SCAN_DIRS = (
     ("Staging", _PROJECT_ROOT / "Staging_Area"),
     ("Uploaded", _PROJECT_ROOT / "Uploaded_Data"),
 )
 
-_STATE_FILENAME = "upload_state.json"
+_STATE_FILENAME = azus_common.STATE_FILENAME
 
 # Same folder-name convention as the other Resources/ tools.
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 
 _CSV_COLUMNS = [
     "ESID#",
@@ -93,11 +92,10 @@ def scan_directory(location: str, directory: Path) -> List[Dict[str, str]]:
     for entry in sorted(directory.iterdir()):
         if not entry.is_dir():
             continue
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
+        esid_padded = azus_common.parse_esid(entry.name)
+        if esid_padded is None:
             logger.warning("Skipping non-ESID subfolder: %s", entry.name)
             continue
-        esid_padded = f"{int(m.group(1)):03d}"
 
         state_file = entry / _STATE_FILENAME
         if not state_file.is_file():
@@ -162,9 +160,7 @@ def main() -> None:
     output_path = (
         Path(args.output)
         if args.output
-        else Path.cwd() / datetime.now().strftime(
-            "upload_states_report_%Y%m%d_%H%M%S.csv"
-        )
+        else azus_common.timestamped_output_path("upload_states_report")
     )
 
     logger.info("=" * 70)

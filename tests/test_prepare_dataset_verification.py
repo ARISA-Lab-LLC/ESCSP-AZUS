@@ -206,20 +206,45 @@ class TestPre1980Timestamps(unittest.TestCase):
 class TestInPlaceBuildRefusal(unittest.TestCase):
     def test_output_dir_inside_staging_area_exits_nonzero(self):
         """--output-dir pointing into Staging_Area/ must be refused
-        before any work happens (and before anything is created there)."""
+        before any work happens (and before anything is created there).
+
+        Hermetic: the tool derives its project root (and therefore
+        Staging_Area/) from its own file location, so we run a COPY of
+        the script inside a throwaway fake project tree — the test can
+        never touch the real repo's Staging_Area, and a real staging
+        folder on disk can never affect the test.
+        """
+        import shutil as _shutil
+
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = make_source_dir(root)
-            collectors = root / "collectors.csv"
+            fake_root = Path(tmp) / "fake_project"
+            fake_resources = fake_root / "Resources"
+            fake_resources.mkdir(parents=True)
+            for module in (
+                "prepare_dataset.py",
+                "audit_wav_integrity.py",
+                "azus_common.py",
+            ):
+                _shutil.copy2(
+                    _PROJECT_ROOT / "Resources" / module,
+                    fake_resources / module,
+                )
+            (fake_root / "Staging_Area").mkdir()
+
+            source = make_source_dir(Path(tmp))
+            collectors = Path(tmp) / "collectors.csv"
             collectors.write_text("ESID\n005\n", encoding="utf-8")
-            target = _PROJECT_ROOT / "Staging_Area" / "ESID_005_Staging"
+            target = fake_root / "Staging_Area" / "ESID_005_Staging"
+
             result = subprocess.run(
                 [
-                    sys.executable, str(_TOOL), str(source),
+                    sys.executable,
+                    str(fake_resources / "prepare_dataset.py"),
+                    str(source),
                     "--collector-csv", str(collectors),
                     "--output-dir", str(target),
                 ],
-                capture_output=True, text=True, cwd=_PROJECT_ROOT,
+                capture_output=True, text=True, cwd=fake_root,
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(

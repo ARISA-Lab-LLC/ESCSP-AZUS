@@ -85,11 +85,12 @@ already-prepared (skipped).  Exit code 1 if any ESID failed.
 
 import argparse
 import logging
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+import azus_common
 
 
 # ---------------------------------------------------------------------
@@ -110,7 +111,6 @@ logger = logging.getLogger("azus.prep_all")
 # We DO NOT require zero-padding here — the folder might be named
 # ESID_4 — because zfill() below normalizes the numeric value to
 # the canonical 3-digit form regardless.
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------
@@ -120,13 +120,13 @@ _ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 # project root is two directories up: ``Resources/<this file>`` →
 # project root.  We resolve to an absolute path so the rest of the
 # code does not care what the current working directory is.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
 
 # Folders the skip check looks at.  Created lazily by the rest of the
 # pipeline; if they do not exist, every ESID is treated as "not yet
 # prepared" — which is the correct behavior on a fresh install.
-_STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
-_UPLOADED_DATA = _PROJECT_ROOT / "Uploaded_Data"
+_STAGING_AREA = azus_common.STAGING_AREA
+_UPLOADED_DATA = azus_common.UPLOADED_DATA
 
 # Sentinel file that prepare_dataset.py touches as its absolute last
 # action.  Its presence inside a Staging_Area/ESID_NNN_Staging/ folder
@@ -134,7 +134,7 @@ _UPLOADED_DATA = _PROJECT_ROOT / "Uploaded_Data"
 # A folder WITHOUT this sentinel is treated as INCOMPLETE and re-prepped
 # (covers interruptions like Ctrl+C, kill -9, or a partial cross-filesystem
 # copy that left a fully-named but content-incomplete directory in place).
-_PREP_SENTINEL = ".prep_complete"
+_PREP_SENTINEL = azus_common.PREP_SENTINEL
 
 
 # =====================================================================
@@ -176,17 +176,15 @@ def discover_esid_folders(top_level: Path) -> List[Tuple[int, str, Path]]:
         if not entry.is_dir():
             continue
 
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
+        padded = azus_common.parse_esid(entry.name)
+        if padded is None:
             # Not an ESID-named folder — log at DEBUG so it shows up
             # if the user runs with verbose logging, but does not
             # clutter normal output.
             logger.debug("Skipping non-ESID directory: %s", entry.name)
             continue
 
-        numeric = int(m.group(1))
-        padded = f"{numeric:03d}"  # "4" → "004"
-        found.append((numeric, padded, entry))
+        found.append((int(padded), padded, entry))
 
     # Sort by the integer value, NOT the string.  For zero-padded names
     # ("004", "007", "012") string and integer sort agree, but if the

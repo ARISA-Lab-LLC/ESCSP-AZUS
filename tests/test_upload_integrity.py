@@ -30,7 +30,8 @@ import standalone_uploader as uploader  # noqa: E402
 
 _FILE_LIST_HEADERS = [
     "File Name", "File Type", "Description", "File size (KB)",
-    "Associated Data Dictionary", "SHA-512 Hash", "Notes",
+    "File size (Bytes)", "Associated Data Dictionary", "SHA-512 Hash",
+    "Notes",
 ]
 
 
@@ -39,15 +40,18 @@ def _sha512(path: Path) -> str:
 
 
 def _write_file_list(staging: Path, rows) -> None:
+    """rows: iterable of (name, size_kb, size_bytes, sha) tuples;
+    size_bytes may be "" to simulate a legacy (pre-Bytes-column) row."""
     with open(staging / "file_list.csv", "w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=_FILE_LIST_HEADERS)
         writer.writeheader()
-        for name, size_kb, sha in rows:
+        for name, size_kb, size_bytes, sha in rows:
             writer.writerow({
                 "File Name": name,
                 "File Type": "x",
                 "Description": "x",
                 "File size (KB)": size_kb,
+                "File size (Bytes)": size_bytes,
                 "Associated Data Dictionary": "x",
                 "SHA-512 Hash": sha,
                 "Notes": "",
@@ -59,11 +63,14 @@ def make_staging_folder(
     esid: str = "005",
     wavs=None,
     sentinel: bool = True,
+    bytes_column: bool = True,
 ) -> Path:
     """Build a valid staging folder: ZIP + matching file_list.csv + sentinel.
 
     ``wavs`` is a dict of {basename: content_bytes}; entries go into the
     ZIP under the ESID_XXX/ subfolder, exactly like prepare_dataset.py.
+    ``bytes_column=False`` produces a legacy manifest whose
+    "File size (Bytes)" cells are empty (pre-column folders).
     """
     if wavs is None:
         wavs = {
@@ -77,10 +84,16 @@ def make_staging_folder(
         for name, content in wavs.items():
             zf.writestr(f"ESID_{esid}/{name}", content)
     rows = [
-        (name, f"{len(content) / 1024:.2f}", "unused-wav-hash")
+        (
+            name,
+            f"{len(content) / 1024:.2f}",
+            str(len(content)) if bytes_column else "",
+            "unused-wav-hash",
+        )
         for name, content in wavs.items()
     ]
-    rows.insert(0, (zip_path.name, "0.00", _sha512(zip_path)))
+    zip_bytes = str(zip_path.stat().st_size) if bytes_column else ""
+    rows.insert(0, (zip_path.name, "0.00", zip_bytes, _sha512(zip_path)))
     _write_file_list(staging, rows)
     if sentinel:
         (staging / ".prep_complete").touch()
@@ -179,14 +192,89 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
     def test_file_list_without_zip_row_fails(self):
         staging = make_staging_folder(self.root)
         wav_rows = [
-            ("20240408_120000.WAV", f"{4000 / 1024:.2f}", "h"),
-            ("20240408_121000.WAV", f"{6000 / 1024:.2f}", "h"),
+            ("20240408_120000.WAV", f"{4000 / 1024:.2f}", "4000", "h"),
+            ("20240408_121000.WAV", f"{6000 / 1024:.2f}", "6000", "h"),
         ]
         _write_file_list(staging, wav_rows)
         problems = tasks.verify_dataset_integrity(
             self._zip_of(staging), verify_zip_hash=False
         )
         self.assertTrue(any("no row for" in p for p in problems))
+
+
+class TestByteExactSizesAndDigests(unittest.TestCase):
+    """Phase-4 hardening: byte-exact size checks + combined digest pass."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _zip_of(self, staging: Path) -> str:
+        return str(next(staging.glob("ESID_*.zip")))
+
+    def test_sub_kb_drift_caught_without_hash_step(self):
+        """A 1-byte truncation rounds to the same 2-decimal KB, so the
+        legacy KB comparison misses it; the byte-exact column must catch
+        it even when --skip-integrity-hash disables the hash backstop."""
+        staging = make_staging_folder(self.root)
+        zip_path = Path(self._zip_of(staging))
+        # Rebuild one WAV a single byte short of what the manifest says.
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("ESID_005/20240408_120000.WAV", b"\x01" * 3999)
+            zf.writestr("ESID_005/20240408_121000.WAV", b"\x02" * 6000)
+        problems = tasks.verify_dataset_integrity(
+            str(zip_path), verify_zip_hash=False
+        )
+        self.assertTrue(any("differ in size" in p for p in problems))
+
+    def test_legacy_manifest_falls_back_to_kb_and_passes_clean(self):
+        staging = make_staging_folder(self.root, bytes_column=False)
+        self.assertEqual(
+            tasks.verify_dataset_integrity(
+                self._zip_of(staging), verify_zip_hash=False
+            ),
+            [],
+        )
+
+    def test_digests_out_filled_only_after_verified_hash(self):
+        staging = make_staging_folder(self.root)
+        zip_path = self._zip_of(staging)
+        digests = {}
+        self.assertEqual(
+            tasks.verify_dataset_integrity(zip_path, digests_out=digests), []
+        )
+        self.assertEqual(digests["sha512"], _sha512(Path(zip_path)))
+        self.assertEqual(
+            digests["md5"], hashlib.md5(Path(zip_path).read_bytes()).hexdigest()
+        )
+
+    def test_digests_out_empty_when_hash_skipped_or_mismatched(self):
+        staging = make_staging_folder(self.root)
+        zip_path = self._zip_of(staging)
+        skipped = {}
+        tasks.verify_dataset_integrity(
+            zip_path, verify_zip_hash=False, digests_out=skipped
+        )
+        self.assertEqual(skipped, {})
+        # Tamper the recorded hash: the gate must not hand back digests
+        # for an archive that failed verification.
+        file_list = staging / "file_list.csv"
+        with open(file_list, "r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        rows[0]["SHA-512 Hash"] = "0" * 128
+        with open(file_list, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=_FILE_LIST_HEADERS)
+            writer.writeheader()
+            writer.writerows(rows)
+        mismatched = {}
+        problems = tasks.verify_dataset_integrity(
+            zip_path, digests_out=mismatched
+        )
+        self.assertTrue(any("SHA-512 does not match" in p for p in problems))
+        self.assertEqual(mismatched, {})
 
 
 class TestRemoteEntryMismatch(unittest.TestCase):

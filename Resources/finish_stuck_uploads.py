@@ -78,11 +78,12 @@ Exit code is the exit code of the underlying standalone_tasks.py run
 import argparse
 import json
 import logging
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Tuple
+
+import azus_common
 
 
 # ---------------------------------------------------------------------
@@ -98,11 +99,11 @@ logger = logging.getLogger("azus.finish_stuck")
 # This file lives in Resources/, so the project root is one level up.
 # We resolve to an absolute path so the rest of the code does not care
 # about the current working directory.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_STAGING_AREA = _PROJECT_ROOT / "Staging_Area"
+_PROJECT_ROOT = azus_common.PROJECT_ROOT
+_STAGING_AREA = azus_common.STAGING_AREA
 
 # The state-file name written by standalone_tasks.py after draft creation.
-_STATE_FILENAME = "upload_state.json"
+_STATE_FILENAME = azus_common.STATE_FILENAME
 
 
 # ---------------------------------------------------------------------
@@ -110,7 +111,6 @@ _STATE_FILENAME = "upload_state.json"
 # ---------------------------------------------------------------------
 # Accepts every reasonable form: ESID_073, ESID_073_Staging, ESID#73.
 # Tolerant in case someone created a non-standard folder name.
-_ESID_FOLDER_RE = re.compile(r"^ESID[_#](\d+)", re.IGNORECASE)
 
 
 # =====================================================================
@@ -159,8 +159,8 @@ def discover_stuck_esids() -> Tuple[List[Tuple[int, str, Path, str]], List[str]]
         if not entry.is_dir():
             continue
 
-        m = _ESID_FOLDER_RE.match(entry.name)
-        if m is None:
+        padded = azus_common.parse_esid(entry.name)
+        if padded is None:
             logger.debug("Skipping non-ESID directory: %s", entry.name)
             continue
 
@@ -196,9 +196,7 @@ def discover_stuck_esids() -> Tuple[List[Tuple[int, str, Path, str]], List[str]]
             )
             continue
 
-        numeric = int(m.group(1))
-        padded = f"{numeric:03d}"  # "73" → "073"
-        found.append((numeric, padded, entry, record_id))
+        found.append((int(padded), padded, entry, record_id))
 
     # Sort by integer value, not string — robust if the user has
     # both ESID_4 and ESID_073 sitting side by side.

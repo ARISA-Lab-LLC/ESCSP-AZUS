@@ -14,6 +14,7 @@ Environment variables required:
 import hashlib
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,8 +45,22 @@ _PUT_RETRY_BACKOFF_S = (30, 90, 270)  # before attempts 2, 3, (4 not used)
 _API_RETRY_ATTEMPTS = 3
 _API_RETRY_BACKOFF_S = (5, 15, 45)
 
-# Read-buffer size for local file hashing (matches standalone_tasks.py).
+# Read-buffer size for local file hashing.  Mirrors
+# Resources/azus_common.py HASH_BUFFER_SIZE — kept local (not imported)
+# so this lowest-level module stays importable without the Resources/
+# directory on sys.path.
 _HASH_BUFFER_SIZE = 65_536
+
+# (connect, read) timeout applied to EVERY Zenodo HTTP call.  Without a
+# timeout, a half-open connection (proxy drop, load-balancer black hole)
+# blocks forever — and never raises, so the retry/backoff machinery never
+# fires and an unattended multi-hour batch wedges on one dead socket.
+# The read timeout is per-socket-operation (time between bytes moving),
+# not total transfer time, so a healthy multi-hour PUT of a 43 GB ZIP is
+# unaffected; only a stalled connection trips it and becomes retryable.
+_CONNECT_TIMEOUT_S = 10
+_READ_TIMEOUT_S = 300
+_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
 
 
 # ===================================================================
@@ -194,6 +209,7 @@ def create_draft_record(
         url,
         json=metadata,
         headers=_auth_headers(credentials, content_type="application/json"),
+        timeout=_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
@@ -204,6 +220,7 @@ def upload_file_to_draft(
     record_id: str,
     file_path: str,
     upload_attempts: int = _PUT_RETRY_ATTEMPTS,
+    known_md5: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Upload a single file to a draft record (three-step process).
 
@@ -237,17 +254,26 @@ def upload_file_to_draft(
 
     # Local facts captured up front — what Zenodo holds after the commit
     # must match these exactly (post-commit verification below).
+    # known_md5 (from the integrity gate's combined digest pass) saves a
+    # second full read of a multi-GB ZIP; if the file changed since that
+    # hash was taken, the post-commit comparison against Zenodo's actual
+    # checksum fails the dataset — fail-closed either way.
     local_size = file_path_obj.stat().st_size
-    logger.debug("  Hashing %s (md5) for post-upload verification...",
-                 file_path_obj.name)
-    local_md5 = _calculate_md5(file_path)
+    if known_md5:
+        local_md5 = known_md5
+    else:
+        logger.debug("  Hashing %s (md5) for post-upload verification...",
+                     file_path_obj.name)
+        local_md5 = _calculate_md5(file_path)
 
     url = f"{credentials.base_url}records/{record_id}/draft/files"
     auth = _auth_headers(credentials)
 
     # Step 1: Initialize file upload
     init_data = [{"key": file_path_obj.name}]
-    response = requests.post(url, json=init_data, headers=auth)
+    response = requests.post(
+        url, json=init_data, headers=auth, timeout=_REQUEST_TIMEOUT,
+    )
     response.raise_for_status()
 
     entries = response.json().get("entries", [])
@@ -307,6 +333,7 @@ def upload_file_to_draft(
     # Step 3: Commit the file
     commit_response = requests.post(
         file_entry["links"]["commit"], headers=auth,
+        timeout=_REQUEST_TIMEOUT,
     )
     commit_response.raise_for_status()
     committed = commit_response.json()
@@ -377,7 +404,10 @@ def _put_file_content_with_retry(
     for attempt in range(1, attempts + 1):
         try:
             with open(file_path, "rb") as fh:
-                response = requests.put(url, data=fh, headers=auth_headers)
+                response = requests.put(
+                    url, data=fh, headers=auth_headers,
+                    timeout=_REQUEST_TIMEOUT,
+                )
             # Treat 5xx as a transient error worth retrying; 4xx is fatal.
             if 500 <= response.status_code < 600:
                 raise RequestException(
@@ -428,7 +458,9 @@ def publish_draft(
         HTTPError: If the publish request fails.
     """
     url = f"{credentials.base_url}records/{record_id}/draft/actions/publish"
-    response = requests.post(url, headers=_auth_headers(credentials))
+    response = requests.post(
+        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -444,7 +476,9 @@ def delete_draft(credentials: Credentials, record_id: str) -> None:
         HTTPError: If the delete request fails.
     """
     url = f"{credentials.base_url}records/{record_id}/draft"
-    response = requests.delete(url, headers=_auth_headers(credentials))
+    response = requests.delete(
+        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    )
     response.raise_for_status()
 
 
@@ -484,7 +518,10 @@ def _api_get_with_retry(
     last_exc: Optional[BaseException] = None
     for attempt in range(1, _API_RETRY_ATTEMPTS + 1):
         try:
-            response = requests.get(url, headers=auth_headers, params=params)
+            response = requests.get(
+                url, headers=auth_headers, params=params,
+                timeout=_REQUEST_TIMEOUT,
+            )
             if allow_404 and response.status_code == 404:
                 return None
             if 500 <= response.status_code < 600:
@@ -571,7 +608,9 @@ def delete_draft_file(
 ) -> None:
     """Delete a single file entry from a draft (used to clear a pending slot)."""
     url = f"{credentials.base_url}records/{record_id}/draft/files/{key}"
-    response = requests.delete(url, headers=_auth_headers(credentials))
+    response = requests.delete(
+        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    )
     # 404 is fine — the slot is already gone.
     if response.status_code != 404:
         response.raise_for_status()
@@ -694,7 +733,9 @@ def ensure_doi_reserved(
 
     logger.info("  No DOI on draft %s — reserving one...", record_id)
     url = f"{credentials.base_url}records/{record_id}/draft/pids/doi"
-    response = requests.post(url, headers=_auth_headers(credentials))
+    response = requests.post(
+        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    )
 
     if response.status_code == 400:
         # InvenioRDM answers 400 when a DOI is already present — treat as
@@ -750,6 +791,7 @@ def _create_community_review_request(
         url,
         json=payload,
         headers=_auth_headers(credentials, content_type="application/json"),
+        timeout=_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
@@ -796,6 +838,7 @@ def submit_to_community_review(
     response = requests.post(
         url,
         headers=_auth_headers(credentials, content_type="application/json"),
+        timeout=_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
@@ -839,6 +882,8 @@ def upload_to_zenodo(
     submit_review: bool = True,
     upload_attempts: int = _PUT_RETRY_ATTEMPTS,
     title_guard: bool = True,
+    abort_event: Optional["threading.Event"] = None,
+    known_md5s: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -1161,8 +1206,12 @@ def upload_to_zenodo(
                             logger.info(
                                 "  Verifying committed file %s (md5)...", key
                             )
+                            local_md5 = (
+                                (known_md5s or {}).get(key)
+                                or _calculate_md5(local_path)
+                            )
                             mismatch = _remote_entry_mismatch(
-                                entry, local_size, _calculate_md5(local_path)
+                                entry, local_size, local_md5
                             )
                     except OSError as exc:
                         # Cannot read the local file — fail the dataset
@@ -1201,6 +1250,27 @@ def upload_to_zenodo(
             f" ({len(skip_keys)} already committed)" if skip_keys else "",
         )
         for i, file_path in enumerate(to_upload, 1):
+            # File-boundary abort check: a Ctrl+C on a concurrent run
+            # must not wait for hours of remaining files.  The draft and
+            # its upload_state.json already exist, so stopping here
+            # leaves a normal resumable "stuck" upload.
+            if abort_event is not None and abort_event.is_set():
+                logger.warning(
+                    "Run aborted by user — stopping before %s. Draft %s "
+                    "remains resumable (finish_stuck_uploads.py).",
+                    Path(file_path).name, record_id,
+                )
+                return {
+                    "successful": False,
+                    "api_response": None,
+                    "error": {
+                        "type": "AbortedByUser",
+                        "error_message": (
+                            "Run interrupted (Ctrl+C) — upload stopped at "
+                            "a file boundary; re-run to resume this draft."
+                        ),
+                    },
+                }
             file_name = Path(file_path).name
             file_size_mb = Path(file_path).stat().st_size / (1024 * 1024)
 
@@ -1213,6 +1283,7 @@ def upload_to_zenodo(
             upload_file_to_draft(
                 credentials, record_id, file_path,
                 upload_attempts=upload_attempts,
+                known_md5=(known_md5s or {}).get(file_name),
             )
             elapsed = time.time() - start_time
 
@@ -1281,8 +1352,20 @@ def upload_to_zenodo(
             "error": None,
         }
 
-    except (HTTPError, RequestException, Exception) as exc:
-        # Unified error handling — extract details for HTTP errors
+    except (
+        HTTPError,
+        RequestException,
+        DuplicateTitleError,
+        FileIntegrityError,
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
+        # Unified error handling for the KNOWN failure families: HTTP /
+        # transport errors, the duplicate-title and integrity guards, and
+        # bad local files or API response shapes.  Anything OUTSIDE these
+        # is a programming error and must propagate loudly (with a
+        # traceback) instead of masquerading as "upload failed" in the
+        # failure CSV — that masking hid real defects in the past.
         if isinstance(exc, HTTPError):
             try:
                 error_details = exc.response.json()
