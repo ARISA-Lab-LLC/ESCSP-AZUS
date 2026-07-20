@@ -331,7 +331,9 @@ def gather_evidence(
     ev = Evidence(esid=esid, folder=folder)
     numeric = int(esid)
 
-    ev.zip_present = any(folder.glob("ESID_*.zip")) or any(
+    # One scan; _ESID_ZIP_RE also matches the hash/no-separator and
+    # case variants that a literal ESID_*.zip glob would miss.
+    ev.zip_present = any(
         f for f in folder.iterdir()
         if f.is_file() and _ESID_ZIP_RE.search(f.name)
     )
@@ -467,7 +469,7 @@ def restore_state(ev: Evidence) -> bool:
             state_path,
         )
         return False
-    if not ev.request_log_record_id:
+    if not ev.request_log_record_id or ev.request_log_path is None:
         return False
     state = {
         "record_id": ev.request_log_record_id,

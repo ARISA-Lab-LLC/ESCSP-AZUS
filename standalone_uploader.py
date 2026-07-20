@@ -188,7 +188,10 @@ def get_credentials_from_env() -> Credentials:
     token = os.getenv("INVENIO_RDM_ACCESS_TOKEN", "")
     base_url = os.getenv("INVENIO_RDM_BASE_URL", "")
 
-    if not token or token == "ZENODO_ACESS_TOKEN":
+    # Historical placeholder values from set_env.sh templates — the
+    # misspelled "ACESS" variant shipped in early copies, so both
+    # spellings must be treated as "not configured".
+    if not token or token in ("ZENODO_ACESS_TOKEN", "ZENODO_ACCESS_TOKEN"):
         raise ValueError(
             "INVENIO_RDM_ACCESS_TOKEN not set or still using placeholder. "
             "Update Resources/set_env.sh and run: source Resources/set_env.sh"
@@ -455,7 +458,7 @@ def _put_file_content_with_retry(
                 )
             response.raise_for_status()
             return
-        except HTTPError as exc:
+        except HTTPError:
             # 4xx — do not retry.
             raise
         except RequestException as exc:
@@ -1217,6 +1220,9 @@ def upload_to_zenodo(
 
             if not record_id:
                 raise ValueError("No record ID returned from draft creation")
+            # Normalize to str — the resume path stores str(existing_id),
+            # and record_id is interpolated into URLs and state files.
+            record_id = str(record_id)
 
             # Persist the outgoing request payload for debugging / audit
             if request_log_path:

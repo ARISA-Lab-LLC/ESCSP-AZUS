@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,7 +57,7 @@ PART_SIZE = 6 * 1024 * 1024
 NUM_PARTS = 2
 TOTAL_SIZE = PART_SIZE * NUM_PARTS
 TEST_FILE_NAME = "azus_multipart_preflight.bin"
-TEST_FILE_PATH = Path("/tmp") / TEST_FILE_NAME
+TEST_FILE_PATH = Path(tempfile.gettempdir()) / TEST_FILE_NAME
 
 
 def _minimal_draft_metadata() -> Dict[str, Any]:
@@ -291,7 +292,8 @@ def main() -> int:
             handler and reported as a FAIL result (exit code 1) rather
             than propagated to the caller.
     """
-    total_steps = 7
+    # 1 draft + 2 generate + 3 init + NUM_PARTS puts + commit + cleanup
+    total_steps = 5 + NUM_PARTS
     record_id: Optional[str] = None
 
     try:
@@ -338,9 +340,9 @@ def main() -> int:
                 chunk = fh.read(PART_SIZE)
                 started = time.time()
                 _put_part(credentials, url, chunk)
-                print(f"  -> 200 OK in {time.time() - started:.2f}s")
+                print(f"  -> OK in {time.time() - started:.2f}s")
 
-        _print_step(6, total_steps, "Committing multipart upload...")
+        _print_step(4 + NUM_PARTS, total_steps, "Committing multipart upload...")
         commit_response = _commit_file(credentials, record_id, TEST_FILE_NAME)
         server_size = commit_response.get("size")
         print(f"  -> Commit succeeded. Server reports file size: {server_size}")
@@ -350,7 +352,8 @@ def main() -> int:
             )
         print("  -> File integrity: MATCH")
 
-        _print_step(7, total_steps, f"Cleaning up test draft {record_id}...")
+        _print_step(5 + NUM_PARTS, total_steps,
+                    f"Cleaning up test draft {record_id}...")
         delete_draft(credentials, record_id)
         print("  -> Draft deleted.")
         record_id = None

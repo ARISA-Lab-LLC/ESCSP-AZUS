@@ -117,7 +117,7 @@ def human_size(num_bytes: int) -> str:
         if size < 1024 or unit == "GB":
             return f"{int(size)} {unit}" if unit == "B" else f"{size:.2f} {unit}"
         size /= 1024
-    return f"{size:.2f} GB"
+    # No code past the loop: the final ("GB") iteration always returns.
 
 
 # =====================================================================
@@ -487,6 +487,11 @@ def scan_disk_wavs(folder: Path, tiny_threshold: int) -> WavStats:
         try:
             stat_size = entry.stat().st_size
         except OSError as exc:
+            # Deliberately NOT routed through _apply: with no readable
+            # size there is nothing valid to put in the ledger/sizes
+            # map.  The discrepancy alone already fails the audit
+            # (row_has_problem), and the file's absence from the disk
+            # map surfaces as a disk-vs-ZIP mismatch note as well.
             stats.discrepancies.append((entry.name, f"stat failed: {exc}"))
             continue
         try:

@@ -46,7 +46,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, NoReturn, Optional, Set, Tuple
 
 # Project invariant (per Trae): ESIDs are three digits, 000-999.
 _ESID_MIN = 0
@@ -57,7 +57,7 @@ _DIGIT_GROUP_RE = re.compile(r"\d+")
 _ESID_PREFIXED_RE = re.compile(r"ESID[\s_#-]*(\d+)", re.IGNORECASE)
 
 
-def _die(message: str) -> None:
+def _die(message: str) -> NoReturn:
     """Print a usage/data error and exit with code 2 (the usage-error code).
 
     Does not return — calls ``sys.exit(2)`` to end the program.  (Plain
