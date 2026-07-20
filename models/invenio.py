@@ -364,6 +364,27 @@ class Metadata(BaseModel):
 
     Fields follow the InvenioRDM metadata reference:
         https://inveniordm.docs.cern.ch/reference/metadata/
+
+    Attributes:
+        resource_type: Type of the resource (required).
+        title: Record title (required).
+        creators: People or organisations credited in the citation
+            (required, at least one).
+        publication_date: Publication date in EDTF format, e.g.
+            ``"2024-04-08"`` (required).
+        rights: Optional license / rights statements.
+        description: Optional free-text description (Zenodo accepts HTML).
+        contributors: Optional contributors not credited in the citation.
+        languages: Optional resource languages.
+        dates: Optional relevant dates (e.g., the recording period).
+        version: Optional version string.
+        publisher: Optional publisher name.
+        funding: Optional funding / grant information.
+        subjects: Optional subjects or keywords.
+        communities: Optional associated Zenodo communities.
+        related_identifiers: Optional links to related works (papers,
+            datasets, software).
+        references: Optional bibliographic references.
     """
 
     resource_type: ResourceType

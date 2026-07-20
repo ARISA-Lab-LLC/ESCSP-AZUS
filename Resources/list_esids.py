@@ -21,6 +21,7 @@ import azus_common
 
 
 def main() -> None:
+    """Command-line entry point.  See the module docstring for usage."""
     if len(sys.argv) != 2:
         sys.exit("Usage: python Resources/list_esids.py MAIN_FOLDER")
 

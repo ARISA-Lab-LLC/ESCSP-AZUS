@@ -82,6 +82,15 @@ def scan_directory(location: str, directory: Path) -> List[Dict[str, str]]:
     ESID folders without a state file are counted and logged (they are
     normal for not-yet-uploaded datasets) but get no CSV row — the CSV
     lists state files, per the tool's contract.
+
+    Args:
+        location: Short label for the directory (``"Staging"`` or
+            ``"Uploaded"``) stored in each row's ``Location`` column.
+        directory: The directory to scan for ESID subfolders.
+
+    Returns:
+        One row dict per state file found, keyed by ``_CSV_COLUMNS``.
+        Empty when ``directory`` does not exist.
     """
     rows: List[Dict[str, str]] = []
     without_state = 0

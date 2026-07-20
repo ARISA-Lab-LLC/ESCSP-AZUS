@@ -113,7 +113,32 @@ _CSV_COLUMNS = [
 
 @dataclass
 class Evidence:
-    """Everything we can learn about one no-state ESID folder."""
+    """Everything we can learn about one no-state ESID folder.
+
+    Attributes:
+        esid: 3-digit ESID number string for this folder.
+        folder: The Staging_Area folder this evidence describes.
+        zip_present: Whether an ``ESID_*.zip`` exists in the folder.
+        in_tracker: Whether the ZIP is listed in
+            ``Records/uploaded_files.txt`` (a tracker skip).
+        collector_row: Whether the ESID has a row in a collectors CSV;
+            ``None`` when no collectors CSV could be read.
+        metadata_json: Whether an ``ESID_*_metadata.json`` is present
+            (proves an attempt reached the upload phase).
+        request_log_record_id: The Zenodo record_id recovered from the
+            request log, or ``""`` if none/unreadable.
+        request_log_path: Path to the request-log JSON, or ``None`` when
+            no request log exists.
+        prior_success: Whether the ESID has a row in the successful
+            results CSV.
+        latest_failure: The most recent error message from the failure
+            results CSV, or ``""``.
+        prep_mtime: ISO-8601 modification time of the ``.prep_complete``
+            sentinel, or ``""`` when absent.
+        log_mentions: Count of log lines mentioning the ESID; ``None``
+            when no ``--log`` was given.
+        log_lines: Up to five quoted diagnostic log lines for the ESID.
+    """
 
     esid: str
     folder: Path
@@ -139,6 +164,13 @@ def _esids_from_results_csv(path: Path) -> Dict[int, str]:
 
     Returns {} when the file is missing/unreadable (logged).  The CSVs
     are append-only, so the LAST row per ESID is the most recent.
+
+    Args:
+        path: Path to a results CSV (successful or failed).
+
+    Returns:
+        A dict mapping numeric ESID to its latest ``error_message``.
+        Empty when the file is missing or unreadable.
     """
     results: Dict[int, str] = {}
     if not path.is_file():
@@ -156,7 +188,15 @@ def _esids_from_results_csv(path: Path) -> Dict[int, str]:
 
 
 def _esids_from_tracker(path: Path) -> Set[int]:
-    """Numeric ESIDs whose ZIPs appear in Records/uploaded_files.txt."""
+    """Numeric ESIDs whose ZIPs appear in Records/uploaded_files.txt.
+
+    Args:
+        path: Path to the ``uploaded_files.txt`` tracker file.
+
+    Returns:
+        The set of numeric ESIDs mentioned by a ZIP line in the tracker.
+        Empty when the tracker is missing or unreadable.
+    """
     esids: Set[int] = set()
     if not path.is_file():
         logger.warning("Tracker not found (evidence unavailable): %s", path)
@@ -178,6 +218,13 @@ def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[int]]:
     insensitive) so we don't need the full parse_collectors_csv
     machinery.  Returns None when no CSV could be read at all —
     callers then report "unknown" instead of a false negative.
+
+    Args:
+        csv_paths: Collectors CSV paths configured in ``config.json``.
+
+    Returns:
+        The set of numeric ESIDs found across the readable CSVs, or
+        ``None`` when not a single CSV could be read.
     """
     esids: Set[int] = set()
     any_readable = False
@@ -210,7 +257,15 @@ def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[int]]:
 
 
 def _record_id_from_request_log(path: Path) -> str:
-    """Extract record_id from ESID_XXX_request_log.json ('' if unreadable)."""
+    """Extract record_id from ESID_XXX_request_log.json ('' if unreadable).
+
+    Args:
+        path: Path to an ``ESID_XXX_request_log.json`` file.
+
+    Returns:
+        The ``record_id`` as a string, or ``""`` when the file is
+        unreadable or lacks the field.
+    """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return str(payload.get("record_id") or "")
@@ -221,7 +276,17 @@ def _record_id_from_request_log(path: Path) -> str:
 
 def _grep_logs(log_paths: List[Path], esid: str) -> Tuple[int, List[str]]:
     """Count lines mentioning the ESID across the given logs; keep the
-    ones containing a known diagnostic keyword (max 5 quoted)."""
+    ones containing a known diagnostic keyword (max 5 quoted).
+
+    Args:
+        log_paths: Log files to scan for per-ESID mentions.
+        esid: 3-digit ESID number string to search for.
+
+    Returns:
+        A ``(count, keyword_lines)`` tuple: the total number of matching
+        lines and the last five that also contain a known diagnostic
+        keyword.
+    """
     needles = (f"ESID {esid}", f"ESID_{esid}", f"ESID {int(esid)}")
     count = 0
     keyword_lines: List[str] = []
@@ -248,7 +313,21 @@ def gather_evidence(
     failure_rows: Dict[int, str],
     log_paths: List[Path],
 ) -> Evidence:
-    """Collect every piece of evidence for one no-state folder."""
+    """Collect every piece of evidence for one no-state folder.
+
+    Args:
+        esid: 3-digit ESID number string for the folder.
+        folder: The Staging_Area folder to inspect.
+        tracker_esids: Numeric ESIDs listed in the tracker file.
+        collector_esids: Numeric ESIDs with a collectors-CSV row, or
+            ``None`` when no collectors CSV could be read.
+        success_rows: Numeric ESID -> error_message from the success CSV.
+        failure_rows: Numeric ESID -> error_message from the failure CSV.
+        log_paths: Optional log files to grep for per-ESID mentions.
+
+    Returns:
+        A fully populated ``Evidence`` instance for this folder.
+    """
     ev = Evidence(esid=esid, folder=folder)
     numeric = int(esid)
 
@@ -293,6 +372,13 @@ def classify(ev: Evidence) -> Tuple[str, str]:
     attempt outrank static conditions, and the no-ZIP check outranks
     the tracker because standalone_tasks globs for the ZIP before the
     tracker filter ever sees it.
+
+    Args:
+        ev: The gathered ``Evidence`` for one no-state folder.
+
+    Returns:
+        A ``(probable_cause, suggested_action)`` tuple of
+        human-readable strings for the report.
     """
     if ev.request_log_record_id:
         return (
@@ -363,6 +449,16 @@ def restore_state(ev: Evidence) -> bool:
 
     Refuses to overwrite an existing state file.  Returns True when a
     file was written.
+
+    Args:
+        ev: The ``Evidence`` for the folder; its
+            ``request_log_record_id`` supplies the draft link and must
+            be non-empty for a file to be written.
+
+    Returns:
+        True when a fresh ``upload_state.json`` was written; False when
+        one already exists, the record_id is missing, or the write
+        failed.
     """
     state_path = ev.folder / _STATE_FILENAME
     if state_path.exists():

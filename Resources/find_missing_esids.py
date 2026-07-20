@@ -60,8 +60,12 @@ _ESID_PREFIXED_RE = re.compile(r"ESID[\s_#-]*(\d+)", re.IGNORECASE)
 def _die(message: str) -> None:
     """Print a usage/data error and exit with code 2 (the usage-error code).
 
-    Note: ``sys.exit("message")`` exits with code 1, which would collide
-    with the "missing ESIDs found" code — hence this helper.
+    Does not return — calls ``sys.exit(2)`` to end the program.  (Plain
+    ``sys.exit("message")`` exits with code 1, which would collide with
+    the "missing ESIDs found" code — hence this helper.)
+
+    Args:
+        message: The error text written to stderr before exiting.
     """
     print(message, file=sys.stderr)
     sys.exit(2)
@@ -70,10 +74,17 @@ def _die(message: str) -> None:
 def parse_esid_cell(raw: object) -> Tuple[Optional[int], str]:
     """Parse one cell into an ESID, or explain exactly why it can't be.
 
-    Returns (esid, "ok") on success, else (None, reason) where reason is
-    "blank" for empty cells or a human-readable explanation.  Never
-    guesses: a cell with several numbers is only accepted when exactly
-    one of them is ESID-prefixed (e.g. "ESID 073 (2024)" -> 73).
+    Never guesses: a cell with several numbers is only accepted when
+    exactly one of them is ESID-prefixed (e.g. "ESID 073 (2024)" -> 73).
+
+    Args:
+        raw: The raw cell value (any type; coerced to ``str`` and
+            stripped before parsing).
+
+    Returns:
+        A ``(esid, "ok")`` tuple on success, else ``(None, reason)``
+        where ``reason`` is ``"blank"`` for empty cells or a
+        human-readable explanation of why the cell could not be parsed.
     """
     text = str(raw).strip() if raw is not None else ""
     if not text:
@@ -104,19 +115,40 @@ def parse_esid_cell(raw: object) -> Tuple[Optional[int], str]:
 
 
 def _normalize_header(header: str) -> str:
-    """Header form for exact matching: casefolded, all whitespace removed."""
+    """Header form for exact matching: casefolded, all whitespace removed.
+
+    Args:
+        header: A raw column header string.
+
+    Returns:
+        The header casefolded with all whitespace removed, for
+        whitespace- and case-insensitive exact comparison.
+    """
     return "".join(str(header).split()).casefold()
 
 
 def choose_esid_column(
     fieldnames: List[str], override: Optional[str], path: Path
 ) -> Tuple[str, List[str]]:
-    """Pick the ESID column deterministically.  Returns (column, warnings).
+    """Pick the ESID column deterministically.
 
     Priority: explicit override > exact normalized match ("esid#" then
     "esid") > a SINGLE fuzzy candidate containing "esid".  Multiple
-    candidates without an exact match abort with exit 2 — guessing among
-    columns is how a whole comparison silently goes wrong.
+    candidates without an exact match abort via :func:`_die` (exit 2) —
+    guessing among columns is how a whole comparison silently goes wrong.
+
+    Args:
+        fieldnames: The header names read from the CSV.
+        override: An explicit column name to use, bypassing detection
+            (from ``--master-column`` / ``--report-column``); None to
+            auto-detect.
+        path: The CSV path, used only for error messages.
+
+    Returns:
+        A ``(column, warnings)`` tuple: the chosen column name and a list
+        of human-readable warning strings (e.g. a header that appears
+        more than once).  Never returns when the column cannot be
+        resolved — :func:`_die` exits with code 2 instead.
     """
     warnings: List[str] = []
     names = [f for f in (fieldnames or []) if f]
@@ -124,6 +156,7 @@ def choose_esid_column(
         _die(f"ERROR: {path} has no header row.")
 
     def dup_warning(chosen: str) -> None:
+        """Warn if the ``chosen`` header appears more than once."""
         if names.count(chosen) > 1:
             warnings.append(
                 f"header {chosen!r} appears {names.count(chosen)} times in "
@@ -166,7 +199,23 @@ def choose_esid_column(
 
 @dataclass
 class FileParse:
-    """Everything learned from parsing one CSV's ESID column."""
+    """Everything learned from parsing one CSV's ESID column.
+
+    Attributes:
+        path: The CSV file that was parsed.
+        column: The ESID column header that was read.
+        esids: Set of valid ESIDs (000-999) parsed from the column.
+        total_rows: Number of data rows read (excludes the header).
+        parsed: Number of rows that yielded a valid ESID.
+        problems: ``(row, raw, reason)`` tuples for each cell that could
+            not be parsed.
+        duplicates: ``{esid: count}`` for ESIDs appearing more than once.
+        samples: Up to three ``(raw, display)`` pairs, echoing how raw
+            cells map to parsed ESIDs.
+        warnings: Human-readable warnings (e.g. a duplicated header).
+        notes: Human-readable notes (e.g. an encoding or delimiter
+            fallback).
+    """
 
     path: Path
     column: str = ""
@@ -181,8 +230,21 @@ class FileParse:
 
 
 def read_esids_file(path: Path, override: Optional[str]) -> FileParse:
-    """Parse one CSV's ESID column with full accounting.  Exits 2 on
-    unreadable files or unresolvable columns."""
+    """Parse one CSV's ESID column with full accounting.
+
+    Exits 2 (via :func:`_die`) on unreadable files or unresolvable
+    columns.  Handles UTF-8 (with BOM), a cp1252 fallback, and
+    semicolon-delimited exports, recording each fallback as a note.
+
+    Args:
+        path: The CSV file to read.
+        override: Explicit ESID column name, or None to auto-detect.
+
+    Returns:
+        A :class:`FileParse` holding the parsed ESIDs plus full
+        accounting (row counts, per-row problems, duplicates, samples,
+        warnings, and notes).
+    """
     result = FileParse(path=path)
 
     try:
@@ -228,7 +290,13 @@ def read_esids_file(path: Path, override: Optional[str]) -> FileParse:
 
 
 def print_file_audit(label: str, fp: FileParse) -> None:
-    """The per-file audit block: column, samples, accounting, problems."""
+    """Print the per-file audit block: column, samples, accounting, problems.
+
+    Args:
+        label: Heading for the block (e.g. ``"Master"`` or ``"Report"``).
+        fp: The parsed-file accounting to render, as returned by
+            :func:`read_esids_file`.
+    """
     print(f"{label}: {fp.path}")
     print(f"  Column: {fp.column!r}")
     for note in fp.notes:
@@ -258,6 +326,7 @@ def print_file_audit(label: str, fp: FileParse) -> None:
 
 
 def main() -> None:
+    """Command-line entry point.  See the module docstring for usage."""
     parser = argparse.ArgumentParser(
         description=(
             "Print the ESID numbers (000-999) that appear in the master "

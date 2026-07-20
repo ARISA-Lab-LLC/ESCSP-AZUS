@@ -17,6 +17,15 @@ On any failure, prints the offending HTTP response body and leaves the
 draft in place so you can inspect it.  Reads credentials from the same
 INVENIO_RDM_* env vars as the production uploader.
 
+Environment variables:
+    INVENIO_RDM_ACCESS_TOKEN: Zenodo API bearer token. Read indirectly
+        via ``get_credentials_from_env()`` (imported from
+        ``standalone_uploader``); a missing or placeholder value aborts
+        the test with exit code 2.
+    INVENIO_RDM_BASE_URL: Zenodo API base URL (e.g.,
+        https://zenodo.org/api/). Also read via
+        ``get_credentials_from_env()``.
+
 Usage:
     source Resources/set_env.sh
     python multipart_preflight.py
@@ -54,6 +63,10 @@ def _minimal_draft_metadata() -> Dict[str, Any]:
     """Smallest metadata Zenodo will accept for a draft record.
 
     Never published — this draft is deleted at the end of the test.
+
+    Returns:
+        A metadata payload dict (access/files/metadata blocks) suitable
+        for passing to ``create_draft_record``.
     """
     return {
         "access": {"record": "public", "files": "public"},
@@ -80,6 +93,17 @@ def _minimal_draft_metadata() -> Dict[str, Any]:
 
 
 def _generate_test_file(path: Path, size: int) -> None:
+    """Write a deterministic test file of the requested size.
+
+    Fills ``path`` with a repeating 8-byte pattern (``AZUSMPRT``) so the
+    content is reproducible and easy to eyeball, writing in 1 MB blocks
+    until ``size`` bytes have been emitted.
+
+    Args:
+        path: Destination path for the generated file (overwritten if it
+            already exists).
+        size: Total number of bytes to write.
+    """
     pattern = b"AZUSMPRT"  # 8 bytes, deterministic, easy to eyeball
     with open(path, "wb") as fh:
         remaining = size
@@ -93,6 +117,25 @@ def _generate_test_file(path: Path, size: int) -> None:
 def _init_multipart_upload(
     credentials: Credentials, record_id: str, key: str
 ) -> Dict[str, Any]:
+    """Initialize a multipart file upload on a draft record.
+
+    POSTs a single file entry declaring a multipart transfer
+    (``type`` "M", ``NUM_PARTS`` parts of ``PART_SIZE`` bytes) to the
+    draft's files endpoint.
+
+    Args:
+        credentials: Zenodo credentials.
+        record_id: ID of the draft record to attach the file to.
+        key: File name (key) to register for the upload.
+
+    Returns:
+        The parsed JSON init response, including the per-part upload
+        links when multipart is enabled.
+
+    Raises:
+        RuntimeError: If the API returns an HTTP status of 400 or above;
+            the message includes the status code and response body.
+    """
     url = f"{credentials.base_url}records/{record_id}/draft/files"
     payload = [
         {
@@ -119,6 +162,17 @@ def _init_multipart_upload(
 
 
 def _put_part(credentials: Credentials, url: str, part_bytes: bytes) -> None:
+    """Upload a single part to its pre-signed part URL.
+
+    Args:
+        credentials: Zenodo credentials (used for the auth header).
+        url: The part upload URL returned by the init response.
+        part_bytes: Raw bytes of this part to PUT.
+
+    Raises:
+        RuntimeError: If the PUT returns an HTTP status of 400 or above;
+            the message includes the URL, status code, and response body.
+    """
     response = requests.put(url, data=part_bytes, headers=_auth_headers(credentials))
     if response.status_code >= 400:
         raise RuntimeError(
@@ -128,6 +182,21 @@ def _put_part(credentials: Credentials, url: str, part_bytes: bytes) -> None:
 
 
 def _commit_file(credentials: Credentials, record_id: str, key: str) -> Dict[str, Any]:
+    """Commit a multipart upload, finalizing the file on the draft.
+
+    Args:
+        credentials: Zenodo credentials.
+        record_id: ID of the draft record holding the file.
+        key: File name (key) whose upload should be committed.
+
+    Returns:
+        The parsed JSON commit response, including the server-reported
+        file ``size``.
+
+    Raises:
+        RuntimeError: If the API returns an HTTP status of 400 or above;
+            the message includes the status code and response body.
+    """
     url = f"{credentials.base_url}records/{record_id}/draft/files/{key}/commit"
     response = requests.post(url, headers=_auth_headers(credentials))
     if response.status_code >= 400:
@@ -139,6 +208,26 @@ def _commit_file(credentials: Credentials, record_id: str, key: str) -> Dict[str
 
 
 def _extract_part_urls(init_response: Dict[str, Any], key: str) -> List[str]:
+    """Pull the ordered per-part upload URLs out of an init response.
+
+    Locates the file entry matching ``key``, reads its
+    ``links.parts`` list, and returns the part URLs sorted by part
+    number. A missing ``links.parts`` is treated as a signal that
+    multipart upload is not enabled on the instance.
+
+    Args:
+        init_response: The parsed JSON returned by
+            ``_init_multipart_upload``.
+        key: File name (key) whose part URLs to extract.
+
+    Returns:
+        The part upload URLs ordered by ascending part number.
+
+    Raises:
+        RuntimeError: If no entry matches ``key``, if the entry has no
+            ``links.parts`` (multipart likely disabled), or if the
+            number of parts does not equal ``NUM_PARTS``.
+    """
     entries = init_response.get("entries", [])
     entry = next((e for e in entries if e.get("key") == key), None)
     if entry is None:
@@ -162,16 +251,46 @@ def _extract_part_urls(init_response: Dict[str, Any], key: str) -> List[str]:
 
 
 def _print_header(text: str) -> None:
+    """Print a banner line, framed above and below by a rule of '='.
+
+    Args:
+        text: The header text to display between the two rules.
+    """
     print("=" * 60)
     print(text)
     print("=" * 60)
 
 
 def _print_step(step: int, total: int, label: str) -> None:
+    """Print a numbered step marker for the console progress output.
+
+    Args:
+        step: The 1-based index of the current step.
+        total: The total number of steps in the run.
+        label: A short description of what this step does.
+    """
     print(f"\n[Step {step}/{total}] {label}")
 
 
 def main() -> int:
+    """Run the end-to-end multipart upload pre-flight and report.
+
+    Loads credentials from the environment, creates a throwaway draft,
+    generates and multipart-uploads a test file, commits it, verifies the
+    server-reported size, and deletes the draft. On failure the draft is
+    left in place (with cleanup instructions printed) so it can be
+    inspected; the local test file is always removed.
+
+    Returns:
+        A process exit code: 0 if multipart upload works end to end, 1 if
+        any step fails, and 2 if credentials are missing or invalid.
+
+    Raises:
+        RuntimeError: Raised internally on a local or server-side
+            file-size mismatch. It is caught by this function's own
+            handler and reported as a FAIL result (exit code 1) rather
+            than propagated to the caller.
+    """
     total_steps = 7
     record_id: Optional[str] = None
 

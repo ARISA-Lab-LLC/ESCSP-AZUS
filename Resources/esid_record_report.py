@@ -121,6 +121,14 @@ USAGE
         [--output PATH]     # default: esid_record_report_YYYYMMDD_HHMMSS.csv
         [--verbose]
 
+ENVIRONMENT VARIABLES
+=====================
+    INVENIO_RDM_ACCESS_TOKEN: Zenodo API bearer token for authentication;
+        required for the account scope (which reads your account's own
+        records, drafts included).
+    INVENIO_RDM_BASE_URL: Zenodo API base URL; defaults to
+        https://zenodo.org/api/ when unset.
+
 EXIT CODES
 ==========
 * ``0`` — complete, verified report written; every ``ERROR?`` cell empty
@@ -217,7 +225,12 @@ class EsidRecord:
     error: str = ""
 
     def add_error(self, message: str) -> None:
-        """Append an anomaly message to this record's ``error`` field."""
+        """Append an anomaly message to this record's ``error`` field.
+
+        Args:
+            message: The anomaly text to record; joined to any existing
+                message with `` | ``.
+        """
         self.error = f"{self.error} | {message}" if self.error else message
 
 
@@ -275,7 +288,14 @@ def compile_filter_pattern(pattern: str) -> "re.Pattern[str]":
 
 
 def _title_from_hit(hit: Dict) -> str:
-    """Title in either serialization: ``metadata.title`` or top-level."""
+    """Title in either serialization: ``metadata.title`` or top-level.
+
+    Args:
+        hit: One raw hit dict from a Zenodo listing.
+
+    Returns:
+        The record title, or ``""`` when neither field is present.
+    """
     return (hit.get("metadata") or {}).get("title", "") or hit.get("title", "") or ""
 
 
@@ -516,9 +536,16 @@ def _reported_total(payload: Dict) -> Optional[int]:
     """Extract the listing's self-reported total hit count.
 
     InvenioRDM serves ``hits.total`` as an int; some Elasticsearch-styled
-    responses use ``{"value": N}``.  Returns None when absent.  The total
-    is used as a cross-check only — completeness is proven by paging
-    until a short page (see :func:`fetch_all_hits_verified`).
+    responses use ``{"value": N}``.  The total is used as a cross-check
+    only — completeness is proven by paging until a short page (see
+    :func:`fetch_all_hits_verified`).
+
+    Args:
+        payload: One decoded JSON page from a listing response.
+
+    Returns:
+        The reported total as an int, or None when the response carries
+        no ``hits.total``.
     """
     total = (payload.get("hits") or {}).get("total")
     if isinstance(total, dict):
@@ -527,7 +554,16 @@ def _reported_total(payload: Dict) -> Optional[int]:
 
 
 def _url_with_page(url: str, page: int) -> str:
-    """Return ``url`` with its ``page`` query parameter set to ``page``."""
+    """Return ``url`` with its ``page`` query parameter set to ``page``.
+
+    Args:
+        url: The listing URL to modify.
+        page: The 1-based page number to request.
+
+    Returns:
+        The URL with its ``page`` query parameter set (all other query
+        parameters preserved).
+    """
     parts = urlsplit(url)
     params = dict(parse_qsl(parts.query))
     params["page"] = str(page)
@@ -707,6 +743,7 @@ def build_rows(records: List[EsidRecord]) -> List[Dict[str, str]]:
     """
 
     def sort_key(rec: EsidRecord):
+        """Order by ESID, then numeric record id, then raw id string."""
         rid = rec.record_id
         return (rec.esid, int(rid) if rid.isdigit() else 0, rid)
 
@@ -755,7 +792,14 @@ def write_report(rows: List[Dict[str, str]], output_path: Path) -> None:
 
 
 def _load_community_id(project_config_path: Path) -> str:
-    """Read ``community_id`` from project_config.json, or exit 2."""
+    """Read ``community_id`` from project_config.json, or exit 2.
+
+    Args:
+        project_config_path: Path to the project_config.json file.
+
+    Returns:
+        The non-empty ``community_id`` string from the config.
+    """
     try:
         config = json.loads(project_config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

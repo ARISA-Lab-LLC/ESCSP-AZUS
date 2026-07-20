@@ -652,6 +652,10 @@ def create_external_file_list(
 
     Returns:
         Path to the overwritten file_list.csv.
+
+    Raises:
+        FileNotFoundError: If the finalized ZIP is absent from
+            ``output_dir`` when the ZIP row is being built.
     """
     file_list_path = output_dir / "file_list.csv"
     zip_path = output_dir / f"ESID_{esid}.zip"

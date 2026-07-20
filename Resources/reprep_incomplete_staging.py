@@ -72,7 +72,20 @@ _PROJECT_ROOT = azus_common.PROJECT_ROOT
 
 
 def read_report(report_path: Path) -> List[Dict[str, str]]:
-    """Read the 4-column CSV written by audit_prep_completeness.py."""
+    """Read the 4-column CSV written by audit_prep_completeness.py.
+
+    Args:
+        report_path: Path to the audit report CSV.
+
+    Returns:
+        The report rows as a list of dicts (one per data row), keyed by
+        column name.
+
+    Raises:
+        ValueError: If the CSV is missing any required column (``ESID#``,
+            ``Staging Area``, ``Uploaded Data``, ``Prep Completed``) —
+            i.e. it is not an audit_prep_completeness.py report.
+    """
     with report_path.open("r", newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         required = {"ESID#", "Staging Area", "Uploaded Data", "Prep Completed"}
@@ -94,6 +107,17 @@ def run_prepare_dataset(
     same interpreter, cwd pinned to the project root (config_path is a
     relative path by default), output streamed live rather than
     captured.
+
+    Args:
+        esid_folder: Raw ESID folder passed as prepare_dataset.py's
+            positional ``folder`` argument.
+        config_path: Path to config.json, forwarded via ``--config``
+            (relative to the project root by default).
+        eclipse_type: Forwarded via ``--eclipse-type`` (``total``,
+            ``annular``, or ``partial``).
+
+    Returns:
+        The subprocess exit code (0 on success).
     """
     cmd = [
         sys.executable,

@@ -78,7 +78,14 @@ class FileIntegrityError(Exception):
 
 
 def _calculate_md5(file_path: str) -> str:
-    """Stream a file through md5 (Zenodo's checksum algorithm)."""
+    """Stream a file through md5 (Zenodo's checksum algorithm).
+
+    Args:
+        file_path: Local path to the file to hash.
+
+    Returns:
+        The file's md5 digest as a lowercase hex string.
+    """
     md5 = hashlib.md5()
     with open(file_path, "rb") as fh:
         for chunk in iter(lambda: fh.read(_HASH_BUFFER_SIZE), b""):
@@ -265,6 +272,10 @@ def upload_file_to_draft(
             ``_PUT_RETRY_ATTEMPTS`` (3), preserving the historical
             behavior for any direct importer.  ``1`` means one shot with
             no retry after failure.
+        known_md5: Precomputed md5 hex digest of ``file_path`` from an
+            earlier integrity pass.  When supplied it is reused for the
+            post-commit verification, sparing a second full read of a
+            multi-GB file; when None the digest is computed here.
 
     Returns:
         API response with committed file details.
@@ -587,6 +598,10 @@ def get_draft_record(
 ) -> Optional[Dict[str, Any]]:
     """Fetch an existing draft record by ID.
 
+    Args:
+        credentials: Zenodo credentials.
+        record_id: Draft record ID.
+
     Returns:
         The draft record dict on 200, or None on 404 (draft truly gone).
 
@@ -617,6 +632,14 @@ def list_draft_files(
     Each entry contains at least ``key`` (filename), ``status`` ("pending"
     or "completed"), ``size``, and ``links``.
 
+    Args:
+        credentials: Zenodo credentials.
+        record_id: Draft record ID.
+
+    Returns:
+        List of file entry dicts (an empty list when the draft has no
+        files).
+
     Raises:
         HTTPError: 4xx.
         RequestException: after all API retries exhausted.
@@ -634,7 +657,18 @@ def list_draft_files(
 def delete_draft_file(
     credentials: Credentials, record_id: str, key: str
 ) -> None:
-    """Delete a single file entry from a draft (used to clear a pending slot)."""
+    """Delete a single file entry from a draft (used to clear a pending slot).
+
+    A 404 is treated as success — the slot is already gone.
+
+    Args:
+        credentials: Zenodo credentials.
+        record_id: Draft record ID.
+        key: Filename (entry key) of the file to delete.
+
+    Raises:
+        HTTPError: If the delete request fails with a status other than 404.
+    """
     url = f"{credentials.base_url}records/{record_id}/draft/files/{key}"
     response = requests.delete(
         url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
@@ -655,7 +689,16 @@ class DuplicateTitleError(Exception):
 
 
 def _normalize_title(title: str) -> str:
-    """Whitespace-collapsed, case-folded title for exact comparison."""
+    """Whitespace-collapsed, case-folded title for exact comparison.
+
+    Args:
+        title: Raw title string (any surrounding or inner whitespace, any
+            case).
+
+    Returns:
+        The title with runs of whitespace collapsed to single spaces and
+        case-folded, suitable for exact-equality comparison.
+    """
     return " ".join(str(title).split()).casefold()
 
 
@@ -671,6 +714,15 @@ def _find_title_matches(
     Handles both Zenodo serializations (same dual-shape mapping proven in
     Resources/find_duplicate_records.py): published-ness comes from
     ``is_published`` when present, else ``status == "published"``.
+
+    Args:
+        hits: Candidate record dicts returned by the Zenodo search API.
+        title: The intended title to match against (normalized internally).
+
+    Returns:
+        A ``(matching_drafts, matching_published)`` tuple: the hits whose
+        title matches exactly, partitioned into unpublished drafts and
+        already-published records.
     """
     target = _normalize_title(title)
     drafts: List[Dict[str, Any]] = []
@@ -693,8 +745,13 @@ def _find_title_matches(
 def _draft_doi(draft_response: Optional[Dict[str, Any]]) -> Optional[str]:
     """Extract the DOI identifier from a draft record dict, if one exists.
 
-    Returns the DOI string (e.g. ``"10.5281/zenodo.1234567"``) or None if
-    the draft has no DOI reserved/assigned yet.
+    Args:
+        draft_response: A draft record dict (as returned by Zenodo), or
+            None.
+
+    Returns:
+        The DOI string (e.g. ``"10.5281/zenodo.1234567"``), or None if the
+        draft is missing or has no DOI reserved/assigned yet.
     """
     if not draft_response:
         return None
@@ -953,10 +1010,33 @@ def upload_to_zenodo(
             against duplicate records when a folder's ``upload_state.json``
             link has been lost.  Disable per-run with ``--skip-title-guard``
             on ``standalone_tasks.py``.
+        abort_event: Optional cooperative-cancellation flag checked at each
+            file boundary.  When set, the upload stops before the next file
+            and returns an ``AbortedByUser`` failure result; the draft and
+            its ``upload_state.json`` stay resumable.  None disables the
+            check.
+        known_md5s: Optional mapping of filename to precomputed md5 hex
+            digest.  Digests found here are reused for per-file upload
+            verification and for resume-time checks of already-committed
+            files, sparing a second full read of large files.  Missing
+            entries are hashed on demand.
 
     Returns:
         Dictionary with keys:
             'successful' (bool), 'api_response' (dict|None), 'error' (dict|None).
+
+    Raises:
+        ValueError: If Zenodo credentials are missing or still contain
+            placeholders — propagated from ``get_credentials_from_env``,
+            which runs before the internal error handling begins.
+
+    Note:
+        The known failure families — HTTP/transport errors, the
+        duplicate-title guard (:class:`DuplicateTitleError`) and the
+        integrity guard (:class:`FileIntegrityError`), missing local
+        files, and malformed API responses — are caught internally and
+        surfaced in the ``error`` field of the returned dict rather than
+        raised.  Only unexpected programming errors propagate.
     """
     credentials = get_credentials_from_env()
     record_id: Optional[str] = None

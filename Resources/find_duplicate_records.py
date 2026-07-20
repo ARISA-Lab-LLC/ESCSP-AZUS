@@ -45,6 +45,14 @@ From the project root:
     # Log every fetched title, not just the duplicates:
     python Resources/find_duplicate_records.py --verbose
 
+ENVIRONMENT VARIABLES
+=====================
+    INVENIO_RDM_ACCESS_TOKEN: Zenodo API bearer token for authentication;
+        required for the account scope (which reads your account's own
+        records, drafts included).
+    INVENIO_RDM_BASE_URL: Zenodo API base URL; defaults to
+        https://zenodo.org/api/ when unset.
+
 EXIT CODES
 ==========
     0  no duplicates found
@@ -115,7 +123,23 @@ _CSV_COLUMNS = [
 
 @dataclass
 class RecordInfo:
-    """The fields of one Zenodo record hit that this tool cares about."""
+    """The fields of one Zenodo record hit that this tool cares about.
+
+    Attributes:
+        record_id: Zenodo record identifier.
+        parent_id: Version-group id shared by every version of one record
+            (``parent.id``, or the legacy ``conceptrecid``); records that
+            share it are versions of one another and never duplicates.
+        title: The record title exactly as it appears on Zenodo.
+        doi: Assigned DOI, or ``""`` when none has been reserved/minted.
+        status: Raw status string from the API (e.g. ``"published"``).
+        is_published: True for a published record, False for a draft or
+            in-review record.
+        created: Creation timestamp string from the API.
+        updated: Last-updated timestamp string from the API.
+        url: Web page for the record, or ``""`` when unavailable.
+        source: ``"community"``, ``"account"``, or ``"community+account"``.
+    """
 
     record_id: str
     parent_id: str
@@ -130,12 +154,22 @@ class RecordInfo:
 
     @property
     def normalized_title(self) -> str:
-        """Whitespace-collapsed, case-folded title for exact matching."""
+        """Whitespace-collapsed, case-folded title for exact matching.
+
+        Returns:
+            The title with runs of whitespace collapsed to single
+            spaces and case folded, suitable as an exact-match key.
+        """
         return " ".join(self.title.split()).casefold()
 
     @property
     def esid(self) -> Optional[str]:
-        """Zero-padded ESID number extracted from the title, if present."""
+        """Zero-padded ESID number extracted from the title, if present.
+
+        Returns:
+            The 3-digit ESID string (``"073"``) parsed from the title,
+            or None when the title carries no ESID number.
+        """
         m = _ESID_IN_TITLE_RE.search(self.title)
         return f"{int(m.group(1)):03d}" if m else None
 
@@ -159,6 +193,14 @@ def _record_from_hit(hit: Dict, source: str) -> RecordInfo:
     when ``is_published`` is absent — a published record mislabeled as
     a draft would be listed as a "safely deletable stray", which it
     is not.
+
+    Args:
+        hit: One raw hit dict from a Zenodo listing.
+        source: Origin tag stored on the record — ``"community"`` or
+            ``"account"``.
+
+    Returns:
+        The populated :class:`RecordInfo` for this hit.
     """
     status = str(hit.get("status", ""))
     parent_id = (
@@ -194,6 +236,16 @@ def fetch_all_hits(
     Follows ``links.next`` until it disappears.  All requests go through
     the uploader's retry helper, so transient 5xx responses are retried
     with backoff instead of aborting the audit.
+
+    Args:
+        first_url: Page-1 listing URL (already carrying ``?size=``).
+        headers: Auth headers (empty dict for anonymous requests).
+        label: Human-readable source name for log messages.
+
+    Returns:
+        Every hit dict from the listing, in page order.  Truncated at
+        the ``_MAX_PAGES_PER_SOURCE`` runaway guard (with a warning
+        logged) rather than raising.
     """
     hits: List[Dict] = []
     url: Optional[str] = first_url
@@ -224,18 +276,23 @@ def find_duplicate_groups(
 ) -> List[Tuple[str, str, List[RecordInfo]]]:
     """Group records into duplicate groups.
 
-    Returns a list of (group_type, group_key, members) tuples:
-
-      * ("exact-title", <normalized title>, members) — ≥2 records share
-        the normalized title AND span ≥2 distinct parent ids.  Records
-        sharing a parent are versions of one record — never duplicates.
-      * ("same-esid", <ESID>, members) — ≥2 records with the same ESID
-        in the title, ≥2 distinct parent ids, AND ≥2 distinct
-        normalized titles (identical-title cases are already covered
-        by exact-title groups).
-
     A record can legitimately appear in one group of each type (e.g.,
     two identical-title strays plus a third with a renamed title).
+
+    Args:
+        records: The records to scan, from either or both sources.
+
+    Returns:
+        A list of ``(group_type, group_key, members)`` tuples:
+
+          * ``("exact-title", <normalized title>, members)`` — ≥2 records
+            share the normalized title AND span ≥2 distinct parent ids.
+            Records sharing a parent are versions of one record — never
+            duplicates.
+          * ``("same-esid", <ESID>, members)`` — ≥2 records with the same
+            ESID in the title, ≥2 distinct parent ids, AND ≥2 distinct
+            normalized titles (identical-title cases are already covered
+            by exact-title groups).
     """
     groups: List[Tuple[str, str, List[RecordInfo]]] = []
 
@@ -274,7 +331,12 @@ def find_duplicate_groups(
 def write_report(
     groups: List[Tuple[str, str, List[RecordInfo]]], output_path: Path
 ) -> None:
-    """One CSV row per record in each duplicate group."""
+    """Write one CSV row per record in each duplicate group.
+
+    Args:
+        groups: Duplicate groups from :func:`find_duplicate_groups`.
+        output_path: Destination CSV path (overwritten if present).
+    """
     with open(output_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_CSV_COLUMNS)
         writer.writeheader()
@@ -299,7 +361,14 @@ def write_report(
 
 
 def _load_community_id(project_config_path: Path) -> str:
-    """Read community_id from project_config.json."""
+    """Read community_id from project_config.json, or exit 2.
+
+    Args:
+        project_config_path: Path to the project_config.json file.
+
+    Returns:
+        The non-empty ``community_id`` string from the config.
+    """
     try:
         config = json.loads(project_config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

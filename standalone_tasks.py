@@ -291,7 +291,16 @@ _INTEGRITY_EXAMPLE_LIMIT = 5
 
 
 def _summarize_names(names: List[str]) -> str:
-    """Format a filename list for an error message, capping the examples."""
+    """Format a filename list for an error message, capping the examples.
+
+    Args:
+        names: Filenames to render.  Only the first
+            ``_INTEGRITY_EXAMPLE_LIMIT`` are named individually.
+
+    Returns:
+        A comma-joined string of the first few names; when the list is
+        longer, the remainder is collapsed into a ``... (N total)`` tail.
+    """
     shown = ", ".join(names[:_INTEGRITY_EXAMPLE_LIMIT])
     if len(names) > _INTEGRITY_EXAMPLE_LIMIT:
         shown += f", ... ({len(names)} total)"
@@ -419,6 +428,7 @@ def verify_dataset_integrity(
                 )
 
             def _size_differs(name: str) -> bool:
+                """True when the WAV's ZIP size disagrees with the manifest."""
                 # Prefer the byte-exact column (written by current prep);
                 # two different sizes can round to the same 2-decimal KB,
                 # so the KB comparison alone leaves a small blind spot
@@ -838,6 +848,10 @@ def find_dataset_files(
 
     Returns:
         Dictionary mapping filenames to their full paths (None if missing).
+
+    Raises:
+        FileNotFoundError: If ``zip_file_path`` does not exist.
+        ValueError: If ``zip_file_path`` exists but is not a regular file.
     """
     zip_path = Path(zip_file_path)
     if not zip_path.exists():
@@ -1355,6 +1369,13 @@ class UploadTracker:
     DEFAULT_FILENAME = "uploaded_files.txt"
 
     def __init__(self, tracker_file: str = DEFAULT_FILENAME):
+        """Open (or create) the tracker file and load prior uploads.
+
+        Args:
+            tracker_file: Path to the persistence file.  Its parent
+                directory is created if missing (Records/ may not yet
+                exist on a fresh install).
+        """
         self.tracker_file = Path(tracker_file)
         # Ensure the parent directory exists (Records/ may not exist yet
         # on a fresh install).
@@ -1362,24 +1383,48 @@ class UploadTracker:
         self.uploaded_files = self._load()
 
     def _load(self) -> set:
-        """Load previously uploaded file paths from disk."""
+        """Load previously uploaded file paths from disk.
+
+        Returns:
+            Set of file paths, one per non-blank line of the tracker
+            file; an empty set when the file does not exist yet.
+        """
         if self.tracker_file.exists():
             with open(self.tracker_file, "r", encoding="utf-8") as fh:
                 return {line.strip() for line in fh if line.strip()}
         return set()
 
     def is_uploaded(self, file_path: str) -> bool:
-        """Check if a file has already been uploaded."""
+        """Check if a file has already been uploaded.
+
+        Args:
+            file_path: The file path to look up (compared verbatim
+                against the recorded paths).
+
+        Returns:
+            True if the path is already recorded as uploaded.
+        """
         return file_path in self.uploaded_files
 
     def mark_uploaded(self, file_path: str) -> None:
-        """Mark a file as successfully uploaded."""
+        """Mark a file as successfully uploaded.
+
+        Adds the path to the in-memory set and appends it to the tracker
+        file so the record survives across runs.
+
+        Args:
+            file_path: The file path to record as uploaded.
+        """
         self.uploaded_files.add(file_path)
         with open(self.tracker_file, "a", encoding="utf-8") as fh:
             fh.write(f"{file_path}\n")
 
     def get_count(self) -> int:
-        """Return the number of previously uploaded files."""
+        """Return the number of previously uploaded files.
+
+        Returns:
+            Count of distinct file paths currently tracked.
+        """
         return len(self.uploaded_files)
 
 
@@ -1519,6 +1564,11 @@ def _recover_draft_id_from_request_log(
     instead of creating a duplicate record.  The uploader rewrites
     ``upload_state.json`` on resume, so the folder self-heals.
 
+    Args:
+        esid_dir: The dataset's staging folder to search.
+        esid: Zero-padded 3-digit ESID, used to build the request-log
+            filename (``ESID_XXX_request_log.json``).
+
     Returns:
         The record_id string, or None when no readable request log with a
         record_id exists.
@@ -1589,6 +1639,10 @@ def upload_dataset(
             creating a fresh draft — the last line of defense against
             duplicate records when a folder's upload_state.json link was
             lost.  Forwarded to :func:`upload_to_zenodo`.
+        zip_md5: Pre-computed MD5 of the data ZIP (produced during
+            integrity verification), passed through as the uploader's
+            ``known_md5s`` for that archive so it can skip re-reading the
+            file to hash it.  None when no digest was carried over.
 
     Returns:
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
@@ -1796,6 +1850,9 @@ def get_upload_data(
 
     Returns:
         List of UploadData objects ready for upload.
+
+    Raises:
+        ValueError: If ``data_dir`` or ``data_collectors_file`` is empty.
     """
     if not data_dir:
         raise ValueError("Missing data directory")
@@ -2272,6 +2329,10 @@ def upload_datasets(
     Returns:
         Dictionary with upload statistics:
         {'total_processed', 'successful', 'failed', 'skipped', 'deferred'}.
+
+    Raises:
+        ValueError: If ``datasets`` is empty (nothing configured to
+            upload).
     """
     if not datasets:
         raise ValueError("No datasets configured for upload")

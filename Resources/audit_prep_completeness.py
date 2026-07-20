@@ -155,13 +155,29 @@ def find_raw_esid_folders(raw_root: Path) -> List[Tuple[int, str, Path]]:
 
 
 def find_in_staging(esid_padded: str) -> Optional[Path]:
-    """Return the matching Staging_Area folder for this ESID, or ``None``."""
+    """Return the matching Staging_Area folder for this ESID, or ``None``.
+
+    Args:
+        esid_padded: 3-digit ESID number string (e.g. ``"073"``).
+
+    Returns:
+        The matching ``Staging_Area/`` folder, or ``None`` when no such
+        directory exists.
+    """
     candidate = _STAGING_AREA / _STAGING_FOLDER_TEMPLATE.format(esid=esid_padded)
     return candidate if candidate.is_dir() else None
 
 
 def find_in_uploaded(esid_padded: str) -> Optional[Path]:
-    """Return the matching Uploaded_Data folder for this ESID, or ``None``."""
+    """Return the matching Uploaded_Data folder for this ESID, or ``None``.
+
+    Args:
+        esid_padded: 3-digit ESID number string (e.g. ``"073"``).
+
+    Returns:
+        The matching ``Uploaded_Data/`` folder, or ``None`` when no such
+        directory exists.
+    """
     candidate = _UPLOADED_DATA / _UPLOADED_FOLDER_TEMPLATE.format(esid=esid_padded)
     return candidate if candidate.is_dir() else None
 
@@ -222,6 +238,13 @@ def list_raw_wavs(raw_folder: Path) -> List[str]:
     Mirrors ``prepare_dataset.create_zip_file()``'s glob — both ``*.WAV``
     (uppercase) and ``*.wav`` (lowercase), sorted within each glob and
     concatenated.
+
+    Args:
+        raw_folder: The raw ESID folder to scan for WAV files.
+
+    Returns:
+        Sorted WAV basenames — uppercase matches first, then lowercase.
+        Empty list when ``raw_folder`` is not a directory.
     """
     if not raw_folder.is_dir():
         return []
@@ -235,6 +258,12 @@ def raw_has_config_txt(raw_folder: Path) -> bool:
 
     ``prepare_dataset.py`` accepts either case; this tool mirrors that
     tolerance so a site that used lowercase isn't flagged as missing.
+
+    Args:
+        raw_folder: The raw ESID folder to check for a CONFIG file.
+
+    Returns:
+        True if either ``CONFIG.TXT`` or ``CONFIG.txt`` is present.
     """
     return (raw_folder / "CONFIG.TXT").is_file() or (raw_folder / "CONFIG.txt").is_file()
 
@@ -251,6 +280,15 @@ def expected_folder_basenames(
 
     NOTE: ``.prep_complete`` is intentionally NOT in this set — see the
     module docstring's "primary use case" section for why.
+
+    Args:
+        esid_padded: 3-digit ESID number string (e.g. ``"073"``).
+        companions: Companion-file basenames from
+            ``resource_files_list.csv``.
+
+    Returns:
+        The set of file basenames expected directly in the staging or
+        uploaded folder (hardcoded outputs + companions + conditionals).
     """
     expected = {template.format(esid=esid_padded) for template in _HARDCODED_STAGING_FILES}
     expected.update(companions)
@@ -275,6 +313,18 @@ def expected_zip_basenames(
 
     ``CONFIG.TXT`` is added only if it actually exists in the raw folder
     (it's optional per prepare_dataset.py's design).
+
+    Args:
+        esid_padded: 3-digit ESID number string (e.g. ``"073"``).
+        raw_folder: The raw ESID folder, used to determine the WAV set
+            and whether ``CONFIG.TXT`` should be expected in the ZIP.
+        companions: Companion-file basenames from
+            ``resource_files_list.csv``.
+
+    Returns:
+        The set of basenames expected inside ``ESID_NNN.zip`` (WAVs +
+        hardcoded ZIP entries + companions + conditionals, plus
+        ``CONFIG.TXT`` when present in the raw folder).
     """
     expected: Set[str] = set(_HARDCODED_ZIP_ENTRIES)
     expected.update(companions)
@@ -493,6 +543,12 @@ def backfill_sentinel_if_yes(target_folder: Path, status: str) -> None:
 
     Logged at INFO when the sentinel is newly created so the user has
     a clear record of which folders the audit migrated.
+
+    Args:
+        target_folder: The Staging_Area or Uploaded_Data folder to
+            back-fill the sentinel into.
+        status: The audited status; the sentinel is written only when
+            this is ``"Yes"``.
     """
     if status != "Yes":
         return
@@ -514,7 +570,12 @@ def backfill_sentinel_if_yes(target_folder: Path, status: str) -> None:
 # =====================================================================
 
 def default_output_path() -> Path:
-    """Return a timestamped CSV filename in the current working directory."""
+    """Return a timestamped CSV filename in the current working directory.
+
+    Returns:
+        A ``Path`` of the form
+        ``prep_completeness_report_YYYYMMDD_HHMMSS.csv`` in ``Path.cwd()``.
+    """
     return azus_common.timestamped_output_path("prep_completeness_report")
 
 
@@ -526,6 +587,10 @@ def write_report(rows: List[Dict[str, str]], output_path: Path) -> None:
       2. ``Staging Area``    — basename of the matching Staging_Area folder, or ""
       3. ``Uploaded Data``   — basename of the matching Uploaded_Data folder, or ""
       4. ``Prep Completed``  — "Yes" | "No" | "Ambiguous"
+
+    Args:
+        rows: One dict per ESID, each keyed by the four column names.
+        output_path: Destination path for the CSV file.
     """
     fieldnames = ["ESID#", "Staging Area", "Uploaded Data", "Prep Completed"]
     with output_path.open("w", newline="", encoding="utf-8") as fh:
@@ -541,7 +606,12 @@ def write_report(rows: List[Dict[str, str]], output_path: Path) -> None:
 # =====================================================================
 
 def _print_summary(rows: List[Dict[str, str]], output_path: Path) -> None:
-    """Log a one-line tally of Yes / No / Ambiguous / no-folder counts."""
+    """Log a one-line tally of Yes / No / Ambiguous / no-folder counts.
+
+    Args:
+        rows: The report rows (as passed to ``write_report``).
+        output_path: The CSV path, echoed in the summary for reference.
+    """
     counts = {"Yes": 0, "No": 0, "Ambiguous": 0}
     no_folder_yet = 0
     for row in rows:
