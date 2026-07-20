@@ -81,7 +81,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import azus_common
 
@@ -299,6 +299,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--esid", nargs="+", metavar="ESID_OR_CSV",
+        help=(
+            "Recover only the specified stuck ESID(s). Each value is "
+            "either a 1-3 digit ESID number OR the path to a CSV whose "
+            "FIRST column lists ESIDs (e.g. a reporting tool's output; "
+            "a header row is detected and skipped). Both forms can be "
+            "mixed. Requested ESIDs that are not currently stuck are "
+            "reported and skipped. Default: recover ALL stuck ESIDs."
+        ),
+    )
+    parser.add_argument(
         "--list-only", action="store_true",
         help=(
             "Discover and print the stuck ESIDs, then exit WITHOUT "
@@ -327,6 +338,15 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    # --- Expand --esid values (numbers and/or spreadsheet paths) ---
+    requested: Optional[List[str]] = None
+    if args.esid:
+        try:
+            requested = azus_common.load_esid_args(args.esid)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
 
     # --- Banner ---
     logger.info("=" * 70)
@@ -357,6 +377,30 @@ def main() -> None:
     if not stuck:
         logger.info("No stuck uploads found in %s — nothing to do.", _STAGING_AREA)
         sys.exit(0)
+
+    # --- Apply the optional --esid filter ---
+    if requested is not None:
+        stuck_by_esid = {padded for _, padded, _, _ in stuck}
+        not_stuck = [e for e in requested if e not in stuck_by_esid]
+        for esid in not_stuck:
+            logger.warning(
+                "Requested ESID %s is not currently stuck (no folder "
+                "with %s in %s) — skipping it.",
+                esid, _STATE_FILENAME, _STAGING_AREA,
+            )
+        wanted = set(requested)
+        stuck = [t for t in stuck if t[1] in wanted]
+        logger.info(
+            "--esid filter: %d of %d requested ESID(s) are stuck and "
+            "will be recovered.",
+            len(stuck), len(requested),
+        )
+        if not stuck:
+            logger.info(
+                "None of the requested ESIDs are currently stuck — "
+                "nothing to do."
+            )
+            sys.exit(0)
 
     logger.info("")
     logger.info("Found %d stuck upload(s) (numerical order):", len(stuck))

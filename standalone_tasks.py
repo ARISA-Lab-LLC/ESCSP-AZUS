@@ -2543,11 +2543,17 @@ def main() -> None:
         help="Validate configuration without uploading",
     )
     parser.add_argument(
-        "--esid", nargs="+", metavar="ESID",
+        "--esid", nargs="+", metavar="ESID_OR_CSV",
         help=(
-            "Upload only the specified ESID(s). Accepts one or more values. "
-            "Leading zeros are optional: '4', '04', and '004' all match ESID_004. "
-            "Example: --esid 004  or  --esid 004 007 012"
+            "Upload only the specified ESID(s). Each value is either a "
+            "1-3 digit ESID number (leading zeros optional: '4', '04', "
+            "and '004' all match ESID_004) OR the path to a CSV whose "
+            "FIRST column lists ESIDs — e.g. the output of "
+            "esid_record_report.py / list_upload_states.py / "
+            "esid_wav_inventory.py (a header row is detected and "
+            "skipped automatically). The two forms can be mixed. "
+            "Examples: --esid 004 007  or  --esid esid_records.csv  "
+            "or  --esid 004 esid_records.csv"
         ),
     )
     parser.add_argument(
@@ -2655,6 +2661,18 @@ def main() -> None:
         ],
     )
 
+    # --- Expand --esid values (numbers and/or spreadsheet paths) ---
+    # Done early so a bad value or unreadable file aborts before any
+    # other work.  A junk token used to be a SILENT no-op filter that
+    # matched nothing; now it is a hard usage error.
+    esid_filter: Optional[List[str]] = None
+    if args.esid:
+        try:
+            esid_filter = azus_common.load_esid_args(args.esid)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+
     # --- Load configuration ---
     config_path = Path(args.config)
     if not config_path.exists():
@@ -2700,8 +2718,11 @@ def main() -> None:
     logger.info("Auto-publish: %s", uploads_config.get("auto_publish", False))
     logger.info("Delete failures: %s", uploads_config.get("delete_failures", False))
     logger.info("Reserve DOI: %s", uploads_config.get("reserve_doi", False))
-    if args.esid:
-        logger.info("ESID filter:  %s (all others will be skipped)", ", ".join(args.esid))
+    if esid_filter:
+        logger.info(
+            "ESID filter:  %s (all others will be skipped)",
+            ", ".join(esid_filter),
+        )
     else:
         logger.info("ESID filter:  none (all discovered ESIDs will be uploaded)")
     if args.workers > 1:
@@ -2797,7 +2818,7 @@ def main() -> None:
             delete_failures=uploads_config.get("delete_failures", False),
             reserve_doi=uploads_config.get("reserve_doi", False),
             project_config=project_config,
-            esid_filter=args.esid,
+            esid_filter=esid_filter,
             workers=args.workers,
             defer_zip=args.defer_zip,
             upload_attempts=args.upload_attempts,

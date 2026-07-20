@@ -49,12 +49,18 @@ from pathlib import Path
 from typing import Dict, List, NoReturn, Optional, Set, Tuple
 
 # Project invariant (per Trae): ESIDs are three digits, 000-999.
-_ESID_MIN = 0
-_ESID_MAX = 999
+# The canonical cell parser and its constants live in azus_common (one
+# definition for the whole suite); aliased here for compatibility.
+import azus_common
 
-_EXCEL_FLOAT_RE = re.compile(r"^(\d+)\.0+$")           # "73.0" -> "73"
-_DIGIT_GROUP_RE = re.compile(r"\d+")
-_ESID_PREFIXED_RE = re.compile(r"ESID[\s_#-]*(\d+)", re.IGNORECASE)
+_ESID_MIN = azus_common._ESID_MIN
+_ESID_MAX = azus_common._ESID_MAX
+_EXCEL_FLOAT_RE = azus_common._EXCEL_FLOAT_RE
+_DIGIT_GROUP_RE = azus_common._DIGIT_GROUP_RE
+_ESID_PREFIXED_RE = azus_common._ESID_PREFIXED_RE
+
+# Shared spreadsheet-cell ESID parser (see azus_common.parse_esid_cell).
+parse_esid_cell = azus_common.parse_esid_cell
 
 
 def _die(message: str) -> NoReturn:
@@ -69,49 +75,6 @@ def _die(message: str) -> NoReturn:
     """
     print(message, file=sys.stderr)
     sys.exit(2)
-
-
-def parse_esid_cell(raw: object) -> Tuple[Optional[int], str]:
-    """Parse one cell into an ESID, or explain exactly why it can't be.
-
-    Never guesses: a cell with several numbers is only accepted when
-    exactly one of them is ESID-prefixed (e.g. "ESID 073 (2024)" -> 73).
-
-    Args:
-        raw: The raw cell value (any type; coerced to ``str`` and
-            stripped before parsing).
-
-    Returns:
-        A ``(esid, "ok")`` tuple on success, else ``(None, reason)``
-        where ``reason`` is ``"blank"`` for empty cells or a
-        human-readable explanation of why the cell could not be parsed.
-    """
-    text = str(raw).strip() if raw is not None else ""
-    if not text:
-        return None, "blank"
-
-    m = _EXCEL_FLOAT_RE.match(text)
-    if m:  # Excel numeric-export artifact: "73.0" means 73, not 730
-        text = m.group(1)
-
-    groups = _DIGIT_GROUP_RE.findall(text)
-    if not groups:
-        return None, f"no digits found in {text!r}"
-
-    if len(groups) == 1:
-        value = int(groups[0])
-        if _ESID_MIN <= value <= _ESID_MAX:
-            return value, "ok"
-        return None, f"out of range 000-999: {groups[0]!r}"
-
-    prefixed = _ESID_PREFIXED_RE.findall(text)
-    if len(prefixed) == 1:
-        value = int(prefixed[0])
-        if _ESID_MIN <= value <= _ESID_MAX:
-            return value, "ok"
-        return None, f"ESID-prefixed value out of range 000-999: {prefixed[0]!r}"
-
-    return None, f"ambiguous — {len(groups)} numbers in cell {text!r}"
 
 
 def _normalize_header(header: str) -> str:
