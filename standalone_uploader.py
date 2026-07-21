@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from requests.exceptions import HTTPError, RequestException
@@ -44,6 +44,26 @@ _PUT_RETRY_BACKOFF_S = (30, 90, 270)  # before attempts 2, 3, (4 not used)
 # is appropriate.  Same 3-attempt ceiling for consistency with PUT retries.
 _API_RETRY_ATTEMPTS = 3
 _API_RETRY_BACKOFF_S = (5, 15, 45)
+
+# Draft-creation POST retry tuning.  Unlike a file PUT, POST /records is
+# NOT idempotent: an attempt that LOOKS failed (5xx, dropped connection)
+# may still have created the draft server-side, and a blind retry would
+# mint a duplicate record.  Every retry is therefore preceded by a
+# title-guard search that ADOPTS any draft the earlier attempt actually
+# created (see _create_draft_with_guarded_retry).  A July 2026
+# production run hit hundreds of transient HTTP 500s on exactly this
+# POST, each failing its whole dataset in one shot — hence the retry.
+_POST_RETRY_ATTEMPTS = 3
+# Backoffs before the guard search that follows each failed attempt;
+# the last value repeats when there are more attempts than entries.
+_POST_RETRY_BACKOFF_S = (30, 90)
+# Zenodo's record search is eventually consistent (records are indexed
+# AFTER the database commit), so a draft created by a failed-looking
+# POST may not be searchable yet when the guard runs.  After a retry
+# POST succeeds, wait this long and search once more — if the earlier
+# attempt's phantom draft has surfaced, the fresh (still empty) draft
+# is deleted and the run fails closed or adopts, never keeps both.
+_POST_SUCCESS_SWEEP_DELAY_S = 15
 
 # Read-buffer size for local file hashing.  Mirrors
 # Resources/azus_common.py HASH_BUFFER_SIZE — kept local (not imported)
@@ -251,6 +271,312 @@ def create_draft_record(
     )
     response.raise_for_status()
     return response.json()
+
+
+def _lucene_phrase(title: str) -> str:
+    """Quote a title as a Lucene phrase, escaping backslashes and quotes.
+
+    A title containing ``"`` embedded raw into ``metadata.title:"..."``
+    breaks the query — Zenodo would either reject it or, worse, match
+    nothing, which the guards would read as "no duplicate exists".
+
+    Args:
+        title: The record title to embed in a search query.
+
+    Returns:
+        The title wrapped in double quotes, with backslashes and double
+        quotes escaped for Lucene phrase syntax.
+    """
+    escaped = title.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _search_drafts_by_title(
+    credentials: Credentials,
+    intended_title: str,
+    label: str,
+) -> "Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
+    """Search the account's records for a title; fail closed on anything odd.
+
+    Used by both duplicate guards (the pre-creation guard and the
+    retry/sweep guard).  Unlike a plain search call, an unrecognized
+    response body — a 200 without the ``hits`` envelope from a proxy or
+    an API shape change — RAISES instead of being read as "no matches":
+    for a duplicate guard, "cannot verify" must never become "verified
+    absent".
+
+    Args:
+        credentials: Zenodo credentials.
+        intended_title: The exact record title to search for.
+        label: Human-readable call-site label for retry log lines.
+
+    Returns:
+        The ``(matching_drafts, matching_published)`` tuple from
+        :func:`_find_title_matches`.
+
+    Raises:
+        HTTPError: 4xx from the search endpoint.
+        RequestException: Transport errors after retries.
+        ValueError: If the response body lacks the search envelope.
+    """
+    guard_response = _api_get_with_retry(
+        url=f"{credentials.base_url}user/records",
+        auth_headers=_auth_headers(credentials),
+        label=label,
+        params={
+            "q": f"metadata.title:{_lucene_phrase(intended_title)}",
+            "size": 10,
+        },
+    )
+    guard_body = guard_response.json() if guard_response is not None else None
+    hits_envelope = (
+        guard_body.get("hits") if isinstance(guard_body, dict) else None
+    )
+    if not isinstance(hits_envelope, dict) or not isinstance(
+        hits_envelope.get("hits"), list
+    ):
+        raise ValueError(
+            f"{label} returned an unrecognized body shape (no hits "
+            f"envelope): {str(guard_body)[:200]}"
+        )
+    return _find_title_matches(hits_envelope["hits"], intended_title)
+
+
+def _create_draft_with_guarded_retry(
+    credentials: Credentials,
+    draft_metadata: Dict[str, Any],
+    intended_title: str,
+) -> Tuple[Dict[str, Any], bool]:
+    """Create a draft record, retrying transient failures without
+    knowingly creating a duplicate.
+
+    ``POST /records`` is not idempotent: Zenodo can return a 5xx (or the
+    connection can drop) AFTER the draft was actually created, so a
+    blind retry could mint duplicate records.  Each retry is therefore
+    guarded:
+
+    1. Attempt the POST.  A 4xx response is a real client error and is
+       raised immediately — retrying cannot help.
+    2. On a 5xx or transport error, wait (30 s, then 90 s) and search
+       the account's records for ``intended_title`` — after EVERY
+       failed attempt, including the last one, so a phantom created by
+       the final POST is still adopted rather than lost:
+
+       * exactly one matching DRAFT → the failed-looking POST actually
+         created it — fetch and ADOPT it instead of re-creating;
+       * a matching PUBLISHED record, or several drafts → raise
+         :class:`DuplicateTitleError` (never create another);
+       * no match → the POST truly failed; try again while attempts
+         remain, else re-raise the creation error.
+
+    3. When a RETRY's POST succeeds, run one more search after a short
+       delay (the post-success sweep).  Zenodo's search index is
+       eventually consistent, so an earlier attempt's phantom draft may
+       have been invisible to the guard in step 2 and only surface now.
+       If the sweep reveals any same-title record besides the one just
+       created, the just-created draft (still empty — no files, no
+       state file) is deleted and the single-stray case is adopted;
+       anything else raises :class:`DuplicateTitleError`.  If the sweep
+       search itself fails, the run fails closed WITHOUT deleting the
+       created draft — the next run's duplicate guard adopts it.
+
+    4. Fail closed everywhere else: if a guard search fails, or
+       ``intended_title`` is empty (``--skip-title-guard``), the
+       creation error is re-raised instead of retrying blind — a
+       duplicate record is permanent while a failed dataset is
+       retryable, and the next run's duplicate guard adopts any stray
+       draft this run may have left behind.
+
+    Residual risk (inherent to Zenodo's API): a phantom that is still
+    unindexed when the post-success sweep runs cannot be detected — the
+    public API offers no database-backed draft listing.  The outcome
+    degrades safely: the phantom is an empty draft, and the NEXT run's
+    duplicate guard sees two same-title drafts and fails closed until
+    they are cleaned up (Resources/find_duplicate_records.py).  A
+    duplicate can never be published by this code path.
+
+    Args:
+        credentials: Zenodo credentials.
+        draft_metadata: The full creation payload (access, files,
+            metadata, optional parent/custom_fields/pids).
+        intended_title: Record title used for the guard searches.  An
+            empty string disables retrying entirely (single shot — the
+            historical behavior).
+
+    Returns:
+        A ``(draft_response, adopted)`` tuple: the created — or
+        adopted — draft's API representation, and whether it was
+        adopted from an earlier failed-looking attempt rather than
+        created by the returning call.
+
+    Raises:
+        HTTPError: On a 4xx response (immediately), or when the final
+            allowed attempt fails with no phantom found, or when a
+            retry cannot be guarded.
+        RequestException: Same conditions, for transport-level errors.
+        DuplicateTitleError: If a guard search finds a published record
+            or multiple drafts carrying ``intended_title``, or the
+            post-success sweep cannot rule out a duplicate.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            created = create_draft_record(credentials, draft_metadata)
+        except (HTTPError, RequestException) as exc:
+            status = getattr(
+                getattr(exc, "response", None), "status_code", None
+            )
+            if status is not None and 400 <= status < 500:
+                raise  # client error — a retry would fail identically
+            if not intended_title:
+                logger.warning(
+                    "Draft creation failed and no intended title is "
+                    "available to guard a retry (--skip-title-guard?) — "
+                    "not retrying, because a blind retry could create a "
+                    "duplicate record."
+                )
+                raise
+            backoff = _POST_RETRY_BACKOFF_S[
+                min(attempt, len(_POST_RETRY_BACKOFF_S)) - 1
+            ]
+            logger.warning(
+                "Draft creation failed (attempt %d/%d): %s — waiting %ds, "
+                "then checking whether the draft was created anyway...",
+                attempt, _POST_RETRY_ATTEMPTS, exc, backoff,
+            )
+            time.sleep(backoff)
+
+            try:
+                drafts, published = _search_drafts_by_title(
+                    credentials, intended_title,
+                    "draft-creation retry guard",
+                )
+            except Exception as guard_exc:
+                logger.error(
+                    "Retry guard search failed (%s) — cannot verify that "
+                    "the draft was not already created, so NOT retrying. "
+                    "Re-run later; the duplicate guard will adopt any "
+                    "stray draft.", guard_exc,
+                )
+                raise exc from guard_exc
+
+            if published:
+                ids = ", ".join(str(h.get("id")) for h in published)
+                raise DuplicateTitleError(
+                    f"A published record titled '{intended_title}' was "
+                    f"found while retrying draft creation (ids: {ids}) — "
+                    "refusing to create a duplicate."
+                ) from exc
+            if len(drafts) > 1:
+                ids = ", ".join(str(h.get("id")) for h in drafts)
+                raise DuplicateTitleError(
+                    f"Multiple drafts titled '{intended_title}' were "
+                    f"found while retrying draft creation (ids: {ids}) — "
+                    "refusing to create another. Clean up the strays "
+                    "first (Resources/find_duplicate_records.py)."
+                ) from exc
+            if drafts:
+                adopted_id = str(drafts[0].get("id"))
+                logger.warning(
+                    "The failed-looking creation attempt DID create "
+                    "draft %s — adopting it instead of creating a "
+                    "duplicate.", adopted_id,
+                )
+                full_draft = get_draft_record(credentials, adopted_id)
+                if full_draft is None:
+                    # The search saw it but /draft 404s — contradictory
+                    # state; fail closed rather than re-POST.
+                    raise exc
+                return full_draft, True
+            if attempt >= _POST_RETRY_ATTEMPTS:
+                # The guard confirmed no phantom exists for the final
+                # attempt either — the failure is real.
+                raise
+            logger.info(
+                "  No record with this title exists — the creation "
+                "attempt truly failed; retrying (attempt %d/%d)...",
+                attempt + 1, _POST_RETRY_ATTEMPTS,
+            )
+            continue
+
+        # --- POST succeeded ---
+        if attempt == 1:
+            return created, False
+
+        # A RETRY succeeded, meaning an earlier attempt looked failed —
+        # its phantom draft may exist but have been unindexed when the
+        # guard searched.  Give the index a moment, then sweep.
+        created_id = str(created.get("id"))
+        logger.info(
+            "  Draft created on retry — sweeping for a stray duplicate "
+            "the earlier failed-looking attempt may have left..."
+        )
+        time.sleep(_POST_SUCCESS_SWEEP_DELAY_S)
+        try:
+            drafts, published = _search_drafts_by_title(
+                credentials, intended_title, "post-success duplicate sweep",
+            )
+        except Exception as sweep_exc:
+            # Cannot verify: keep the created draft (the next run's
+            # duplicate guard will adopt it) but do NOT proceed on a
+            # possibly-duplicated title.
+            raise DuplicateTitleError(
+                f"Draft {created_id} was created, but the duplicate "
+                f"sweep for '{intended_title}' failed ({sweep_exc}) — "
+                "stopping without uploading. Re-run later; the "
+                "duplicate guard will adopt the existing draft."
+            ) from sweep_exc
+
+        stray_drafts = [
+            h for h in drafts if str(h.get("id")) != created_id
+        ]
+        if not stray_drafts and not published:
+            return created, False
+
+        # A same-title record exists besides the one just created.  The
+        # just-created draft is empty (created moments ago, no files,
+        # no state file) — delete it so this run never leaves TWO new
+        # artifacts, then adopt or fail closed.
+        stray_ids = ", ".join(
+            str(h.get("id")) for h in stray_drafts + published
+        )
+        logger.warning(
+            "Post-success sweep found same-title record(s) %s besides "
+            "the just-created draft %s — deleting the fresh draft.",
+            stray_ids, created_id,
+        )
+        try:
+            delete_draft(credentials, created_id)
+        except Exception as del_exc:
+            raise DuplicateTitleError(
+                f"TWO same-title records exist for '{intended_title}' "
+                f"(just-created draft {created_id}; pre-existing "
+                f"{stray_ids}) and the fresh draft could not be "
+                f"deleted ({del_exc}). Clean up manually "
+                "(Resources/find_duplicate_records.py) before re-running."
+            ) from del_exc
+        if published or len(stray_drafts) > 1:
+            raise DuplicateTitleError(
+                f"Same-title record(s) already exist for "
+                f"'{intended_title}' (ids: {stray_ids}); the fresh "
+                f"draft {created_id} was deleted. Investigate with "
+                "Resources/find_duplicate_records.py."
+            )
+        adopted_id = str(stray_drafts[0].get("id"))
+        logger.warning(
+            "Adopting phantom draft %s created by the earlier "
+            "failed-looking attempt.", adopted_id,
+        )
+        full_draft = get_draft_record(credentials, adopted_id)
+        if full_draft is None:
+            raise DuplicateTitleError(
+                f"The sweep saw draft {adopted_id} but it could not be "
+                f"fetched; the fresh draft {created_id} was already "
+                "deleted. Re-run later — the duplicate guard will "
+                "locate the surviving draft."
+            )
+        return full_draft, True
 
 
 def upload_file_to_draft(
@@ -972,6 +1298,7 @@ def upload_to_zenodo(
     title_guard: bool = True,
     abort_event: Optional["threading.Event"] = None,
     known_md5s: Optional[Dict[str, str]] = None,
+    zip_filename: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -999,11 +1326,15 @@ def upload_to_zenodo(
             until every file (including the deferred ZIP) is uploaded,
             because a community manager accepting the record publishes it —
             and published records cannot accept new files.
-        upload_attempts: Total number of PUT attempts per file (step 2 of
-            the per-file upload).  Defaults to ``_PUT_RETRY_ATTEMPTS`` (3),
-            preserving historical behavior.  ``1`` means one shot per file;
-            the ``--upload-attempts`` CLI flag on ``standalone_tasks.py``
-            surfaces this to end users.
+        upload_attempts: Total number of PUT attempts for the data ZIP
+            (step 2 of the per-file upload).  Defaults to
+            ``_PUT_RETRY_ATTEMPTS`` (3); ``1`` means one shot.  The
+            ``--upload-attempts`` CLI flag on ``standalone_tasks.py``
+            surfaces this to end users.  When ``zip_filename`` is given,
+            this setting applies ONLY to that file — every other
+            (small) file always gets the default ``_PUT_RETRY_ATTEMPTS``
+            attempts.  When ``zip_filename`` is None, it applies to all
+            files (the historical behavior, kept for direct callers).
         title_guard: When True (default) and no ``existing_draft_id`` was
             supplied, search the account's records for the intended title
             BEFORE creating a fresh draft.  A matching unpublished draft is
@@ -1023,6 +1354,9 @@ def upload_to_zenodo(
             verification and for resume-time checks of already-committed
             files, sparing a second full read of large files.  Missing
             entries are hashed on demand.
+        zip_filename: Basename of the dataset's data ZIP within
+            ``files``.  Scopes ``upload_attempts`` to that one file (see
+            above).  None applies ``upload_attempts`` to every file.
 
     Returns:
         Dictionary with keys:
@@ -1064,21 +1398,14 @@ def upload_to_zenodo(
                     "Duplicate guard: checking account for existing "
                     "records titled %r...", intended_title,
                 )
-                guard_response = _api_get_with_retry(
-                    url=f"{credentials.base_url}user/records",
-                    auth_headers=_auth_headers(credentials),
-                    label="duplicate-guard title search",
-                    params={
-                        "q": f'metadata.title:"{intended_title}"',
-                        "size": 10,
-                    },
-                )
-                guard_hits = (
-                    guard_response.json().get("hits", {}).get("hits", [])
-                    if guard_response is not None else []
-                )
-                matching_drafts, matching_published = _find_title_matches(
-                    guard_hits, intended_title
+                # Shared hardened search: Lucene-escapes the title and
+                # raises on an unrecognized response body instead of
+                # reading it as "no matches" (fail closed).
+                matching_drafts, matching_published = (
+                    _search_drafts_by_title(
+                        credentials, intended_title,
+                        "duplicate-guard title search",
+                    )
                 )
                 if matching_published:
                     ids = ", ".join(
@@ -1215,7 +1542,24 @@ def upload_to_zenodo(
             if getattr(config, "pids", None):
                 draft_metadata["pids"] = config.pids
 
-            draft_response = create_draft_record(credentials, draft_metadata)
+            # Guarded retry: transient 5xx/transport failures are retried,
+            # but never blindly — each retry first checks whether the
+            # failed-looking POST actually created the draft and adopts
+            # it if so.  Without a title to guard with (--skip-title-
+            # guard), creation stays single-shot.
+            intended_title = (
+                (config.metadata or {}).get("title", "") if title_guard
+                else ""
+            )
+            draft_response, adopted_draft = _create_draft_with_guarded_retry(
+                credentials, draft_metadata, intended_title
+            )
+            if adopted_draft:
+                # An adopted draft may pre-date this run and carry file
+                # entries — route it through the resume-time file
+                # listing/verification pass (same as an adoption by the
+                # duplicate guard above).
+                is_resume = True
             record_id = draft_response.get("id")
 
             if not record_id:
@@ -1242,7 +1586,10 @@ def upload_to_zenodo(
                 except Exception as log_exc:
                     logger.warning("Could not save request log: %s", log_exc)
 
-            logger.info("Draft created with ID: %s", record_id)
+            logger.info(
+                "Draft %s with ID: %s",
+                "adopted" if adopted_draft else "created", record_id,
+            )
 
         # --- Write resume-state file (idempotent — safe to overwrite) ---
         if state_file_path and record_id:
@@ -1406,10 +1753,20 @@ def upload_to_zenodo(
                 i, len(to_upload), file_name, file_size_mb,
             )
 
+            # --upload-attempts tunes ONLY the data ZIP (the multi-GB
+            # transfer where retry cost matters); companion files keep
+            # the default.  A None zip_filename (direct caller) keeps
+            # the historical apply-to-all behavior.
+            attempts_for_file = (
+                upload_attempts
+                if zip_filename is None or file_name == zip_filename
+                else _PUT_RETRY_ATTEMPTS
+            )
+
             start_time = time.time()
             upload_file_to_draft(
                 credentials, record_id, file_path,
-                upload_attempts=upload_attempts,
+                upload_attempts=attempts_for_file,
                 known_md5=(known_md5s or {}).get(file_name),
             )
             elapsed = time.time() - start_time

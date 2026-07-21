@@ -253,7 +253,14 @@ def classify_zip_entry(
                 discrepancy=(f"size=0 but CRC={crc:#010x} is nonzero — "
                              "entry has data; size field unreliable"),
             )
-        if compress_size > 0:
+        # An empty entry's legitimate compressed size depends on the
+        # method: STORED holds 0 bytes, but DEFLATE encodes "no data"
+        # as a 2-byte final empty block (b"\\x03\\x00") — prep writes
+        # every entry DEFLATED, so genuinely empty WAVs arrive this
+        # way.  Anything larger means the entry holds data the size
+        # field is hiding.
+        empty_ceiling = 2 if compress_type == zipfile.ZIP_DEFLATED else 0
+        if compress_size > empty_ceiling:
             return SizeVerdict(
                 is_zero=False, is_tiny=False,
                 discrepancy=(f"size=0 but compressed size={compress_size} — "
@@ -577,7 +584,7 @@ def find_raw_esid_folders(raw_root: Path) -> List[Tuple[int, str, Path]]:
         if padded is None:
             logger.warning("Skipping non-ESID subfolder: %s", entry.name)
             continue
-        found.append((int(padded), padded, entry))
+        found.append((azus_common.esid_sort_key(padded), padded, entry))
     found.sort(key=lambda t: t[0])
 
     seen: Dict[str, Path] = {}

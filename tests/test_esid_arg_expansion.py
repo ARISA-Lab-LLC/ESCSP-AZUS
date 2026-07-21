@@ -203,6 +203,51 @@ class TestFinishStuckEsidFilter(_TmpTestCase):
         self.assertIn("neither", result.stdout + result.stderr)
 
 
+class TestUploadOrderFollowsFilter(_TmpTestCase):
+    """get_upload_data returns datasets in the ORDER the --esid values
+    were given (CLI order / spreadsheet row order), not directory-scan
+    or numeric order."""
+
+    def _get_order(self, esid_filter):
+        import standalone_tasks as tasks
+        from types import SimpleNamespace
+
+        staging = self.root / "Staging_Area"
+        staging.mkdir(exist_ok=True)
+        for esid in ("004", "007", "012"):
+            folder = staging / f"ESID_{esid}_Staging"
+            folder.mkdir(exist_ok=True)
+            (folder / f"ESID_{esid}.zip").write_bytes(b"zip")
+
+        def fake_create_upload_data(esid_file_pairs, **_kwargs):
+            return ([SimpleNamespace(esid=e) for e, _ in esid_file_pairs],
+                    [])
+
+        tracker = mock.MagicMock()
+        tracker.is_uploaded.return_value = False
+        with mock.patch.object(tasks, "parse_collectors_csv",
+                               return_value=[]), \
+             mock.patch.object(tasks, "create_upload_data",
+                               side_effect=fake_create_upload_data):
+            result = tasks.get_upload_data(
+                data_dir=str(staging),
+                data_collectors_file="collectors.csv",
+                dataset_category="Total",
+                failure_results_file=str(self.root / "fail.csv"),
+                tracker=tracker,
+                esid_filter=esid_filter,
+            )
+        return [d.esid for d in result]
+
+    def test_order_matches_the_given_list_not_the_directory(self):
+        self.assertEqual(self._get_order(["12", "004", "7"]),
+                         ["012", "004", "007"])
+
+    def test_reversed_input_reverses_the_upload_order(self):
+        self.assertEqual(self._get_order(["7", "12", "4"]),
+                         ["007", "012", "004"])
+
+
 class TestStandaloneTasksCli(_TmpTestCase):
     """standalone_tasks.py --esid expansion at the CLI boundary."""
 

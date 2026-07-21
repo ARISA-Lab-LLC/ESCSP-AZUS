@@ -103,28 +103,30 @@ calculate_sha512 = azus_common.calculate_sha512
 
 
 def get_esid_from_folder(folder_name: str) -> Optional[str]:
-    """Extract the zero-padded ESID number from a folder name.
+    """Extract the canonical ESID from a folder name.
 
-    Handles the standard forms (ESID#005, ESID_005, unpadded ESID_5)
-    via the shared bounds-checked parser, plus a plain all-digits
-    folder name ('005').  Always returns the padded 3-digit form —
-    unpadded input used to leak through unpadded, producing staging
-    folders the batch tools' skip checks could not see.
+    Handles the standard forms (ESID#005, ESID_005, unpadded ESID_5,
+    suffixed ESID#120A / ESID_122_Part_1_of_2) via the shared
+    bounds-checked parser, plus a bare folder name with no ``ESID``
+    prefix ('005', '120A').  Always returns the canonical form (padded
+    3-digit number plus any suffix) — unpadded input used to leak
+    through unpadded, producing staging folders the batch tools' skip
+    checks could not see.
 
     Args:
         folder_name: Name of the data folder.
 
     Returns:
-        The 3-digit ESID string (e.g. '005'), or None when the name
-        carries no valid ESID.
+        The canonical ESID string (e.g. '005', '120A'), or None when
+        the name carries no valid ESID.
     """
     esid = azus_common.parse_esid(folder_name)
     if esid is not None:
         return esid
-    bare = folder_name.strip()
-    if bare.isdigit() and len(bare) <= 3:
-        return f"{int(bare):03d}"
-    return None
+    try:
+        return azus_common.normalize_esid(folder_name)
+    except ValueError:
+        return None
 
 
 # ===================================================================
@@ -181,20 +183,34 @@ def create_zip_file(
     # WAV files sorted for deterministic archive ordering
     wav_files = sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
 
-    # Surface files whose mtime predates the ZIP timestamp epoch — their
-    # ZIP-entry timestamps get clamped to 1980-01-01 (see
-    # strict_timestamps=False below).  An unset AudioMoth clock is also a
-    # data-quality signal worth having in the prep log.
+    # Files whose mtime predates the ZIP timestamp epoch (an unset
+    # AudioMoth clock stamps 1970) get their FILESYSTEM modification
+    # time clamped to 1980-01-01T00:00:00 UTC — the earliest time ZIP's
+    # DOS field can represent.  Only the file's system metadata changes:
+    # the filename (which carries the recording time) and the file's
+    # CONTENTS are never touched.  If the metadata cannot be written
+    # (e.g. a read-only mount), strict_timestamps=False below still
+    # clamps the ZIP-entry timestamp so the archive is created either
+    # way.
     candidates = ([config_file] if config_file is not None else []) + wav_files
-    pre_1980 = [f.name for f in candidates if f.stat().st_mtime < _ZIP_MIN_MTIME]
+    pre_1980 = [f for f in candidates if f.stat().st_mtime < _ZIP_MIN_MTIME]
     if pre_1980:
         logger.warning(
             "  %d file(s) have modification times before 1980 (AudioMoth "
-            "clock was likely unset) — their ZIP-entry timestamps will be "
-            "clamped to 1980-01-01. Recording times in the WAV filenames "
-            "are unaffected. First few: %s",
-            len(pre_1980), ", ".join(pre_1980[:5]),
+            "clock was likely unset) — clamping their filesystem "
+            "modification times to 1980-01-01. Filenames and file "
+            "contents are unaffected. First few: %s",
+            len(pre_1980), ", ".join(f.name for f in pre_1980[:5]),
         )
+        for f in pre_1980:
+            try:
+                os.utime(f, (f.stat().st_atime, _ZIP_MIN_MTIME))
+            except OSError as exc:
+                logger.warning(
+                    "  Could not update modification time of %s (%s) — "
+                    "its ZIP-entry timestamp will be clamped instead.",
+                    f.name, exc,
+                )
 
     # Populated during the write pass — the ONLY read of each source file
     content_hashes: Dict[str, str] = {}
@@ -723,6 +739,12 @@ def verify_zip_against_source(zip_path: Path, source_dir: Path) -> List[str]:
     ``audit_wav_integrity`` and cross-check every size two independent
     ways (disk stat vs RIFF header; ZIP size field vs CRC).
 
+    Genuinely zero-byte source WAVs (a dead recorder wrote no audio;
+    the cross-check corroborates the empty stat) are allowed and only
+    warned about — the size-map comparison still proves each exists in
+    the ZIP as exactly 0 bytes.  Placeholder-style files whose stat
+    size disagrees with their readable bytes remain fatal.
+
     No full-CRC ``testzip()`` pass — that would decompress gigabytes,
     and the index + per-file-size comparison already catches the
     short-ZIP failure class this defends against.
@@ -747,8 +769,22 @@ def verify_zip_against_source(zip_path: Path, source_dir: Path) -> List[str]:
 
     for name, reason in disk_stats.discrepancies:
         problems.append(f"Source WAV failed its size cross-check — {name}: {reason}")
-    for name in disk_stats.zero_names:
-        problems.append(f"Source WAV is zero bytes: {name}")
+    # Genuinely empty WAVs (0 bytes on disk AND corroborated by the
+    # cross-check — a dead/failed AudioMoth writes these) are part of
+    # the dataset and belong in the archive.  They are warned about,
+    # not failed: the size-map comparison below still proves each one
+    # exists in the ZIP as exactly 0 bytes.  Placeholder-style files
+    # (stat says 0 but bytes are readable) remain fatal — they land in
+    # ``discrepancies`` above, never in ``zero_names``.
+    if disk_stats.zero_names:
+        logger.warning(
+            "%d source WAV(s) are genuinely zero bytes (recorder wrote "
+            "no audio) — included in the ZIP as empty files: %s",
+            len(disk_stats.zero_names),
+            ", ".join(disk_stats.zero_names[:5]) + (
+                " ..." if len(disk_stats.zero_names) > 5 else ""
+            ),
+        )
     for name, reason in zip_stats.discrepancies:
         problems.append(f"ZIP entry failed its size cross-check — {name}: {reason}")
 
@@ -1357,8 +1393,9 @@ def main() -> None:
     if esid is None:
         logger.error(
             "Cannot extract an ESID from folder name %r — expected "
-            "ESID_NNN / ESID#NNN (NNN = 000-999) or a bare 1-3 digit "
-            "number.", source_dir.name,
+            "ESID_NNN / ESID#NNN (NNN = 000-999, optionally followed "
+            "by a suffix like 120A or 122_Part_1_of_2) or a bare "
+            "ESID with no prefix.", source_dir.name,
         )
         sys.exit(1)
 

@@ -12,6 +12,7 @@ Usage:
     python standalone_tasks.py [--config Resources/config.json] [--dry-run]
     python standalone_tasks.py --config Resources/config.json --esid 004
     python standalone_tasks.py --config Resources/config.json --esid 004 007 012
+    python standalone_tasks.py --save-terminal-output   # tee screen to Records/*.txt
 
 Design notes for future Prefect integration:
     Every public function in this module is a plain synchronous function.
@@ -39,7 +40,7 @@ import time
 import zipfile
 from pathlib import Path
 from string import Template
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 # ---------------------------------------------------------------------------
 # Project models (no external dependencies beyond Pydantic)
@@ -284,6 +285,375 @@ _PREP_SENTINEL_NAME = azus_common.PREP_SENTINEL
 # so an interrupt takes effect at the next file boundary instead of
 # after hours of queued work.  Interrupted drafts stay resumable.
 _ABORT_EVENT = threading.Event()
+
+
+# ===================================================================
+#  Terminal-output tee (--save-terminal-output)
+# ===================================================================
+
+# Log format shared by the screen/log handlers AND the tee files, so the
+# saved .txt files read exactly like the terminal did.
+_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# The active tee handler for this run, or None unless the
+# --save-terminal-output flag was given.  Module-level (like
+# _ABORT_EVENT) so _process_one_dataset can route its own dataset's
+# output without threading the handler through every caller.
+_TEE_HANDLER: Optional["_TerminalTeeHandler"] = None
+
+
+class _TerminalTeeHandler(logging.Handler):
+    """Tee the run's screen output into per-phase ``.txt`` review files.
+
+    Attached to the ROOT logger alongside the normal screen and
+    ``azus_upload.log`` handlers (which are untouched — the screen
+    output never changes), this handler writes a copy of every log
+    line into one of three kinds of file in the ``Records/`` folder,
+    all sharing one run-start timestamp (``YYYY-MM-DD_HHMM``):
+
+    * ``<stamp>_Standalone_terminal_output_pre.txt`` — everything
+      logged before the first dataset upload attempt begins.
+    * ``<stamp>_ESID_<esid>_upload_attempt_<NNN>.txt`` — everything one
+      dataset's attempt logs (integrity gate, upload, archive move,
+      result write), including the un-prefixed ``standalone_uploader``
+      lines.  ``NNN`` starts at ``001`` and increments until the name
+      does not collide with an existing file, so nothing is ever
+      overwritten.
+    * ``<stamp>_Standalone_terminal_output_post.txt`` — everything
+      logged after upload attempts have started that belongs to no
+      specific dataset (normally the final summary block).
+
+    Lifecycle: the handler starts in a buffering state because the
+    Records/ folder is only known once the configuration file has been
+    read; :meth:`activate` then opens the pre file and flushes the
+    buffer.  :meth:`begin_esid` / :meth:`end_esid` bracket one
+    dataset's attempt — each attempt runs entirely within one thread
+    (the main thread for ``--workers 1``, one pool thread otherwise),
+    so a ``threading.local`` slot is enough to route every log record
+    the attempt emits, whichever module logged it.  The first
+    :meth:`begin_esid` closes the pre file.  :meth:`close` (invoked by
+    ``logging.shutdown()`` at exit) closes whatever is still open.
+
+    A tee failure (unwritable Records/ folder, disk full) must never
+    crash or stop an upload run: the handler disables itself, reports
+    the problem once through the normal logging path, and the run
+    continues with screen output only.
+    """
+
+    def __init__(self) -> None:
+        """Create the handler in its pre-activation buffering state.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        super().__init__()
+        self._records_dir: Optional[Path] = None
+        self._stamp: str = ""
+        self._buffer: List[str] = []
+        self._pre_file: Optional[TextIO] = None
+        self._post_file: Optional[TextIO] = None
+        self._uploads_started = False
+        self._disabled = False
+        # Attempt files still open, so close() can sweep up files of
+        # worker threads that never reached end_esid (e.g. Ctrl+C).
+        self._open_esid_files: set = set()
+        self._local = threading.local()
+
+    def activate(self, records_dir: Path, stamp: str) -> None:
+        """Open the pre file in ``records_dir`` and flush buffered lines.
+
+        Called from :func:`main` as soon as the configuration file has
+        been read (the Records/ folder is derived from it).  Everything
+        logged between handler attachment and this call was buffered in
+        memory and is written to the pre file first, so the pre file
+        starts at the very first log line of the run.
+
+        Args:
+            records_dir: Directory that receives all tee files (the
+                ``Records/`` folder; created if missing).
+            stamp: Run-start timestamp, ``YYYY-MM-DD_HHMM`` — shared by
+                every file this run writes.
+
+        Returns:
+            None.  On failure (directory not creatable, pre file not
+            writable) the tee disables itself and logs one warning;
+            the run itself is never interrupted.
+        """
+        self.acquire()
+        warn: Optional[BaseException] = None
+        try:
+            if self._disabled or self._records_dir is not None:
+                return
+            try:
+                records_dir = Path(records_dir)
+                records_dir.mkdir(parents=True, exist_ok=True)
+                self._stamp = stamp
+                self._records_dir = records_dir
+                self._pre_file = self._open_phase_file("pre")
+                for line in self._buffer:
+                    self._pre_file.write(line + "\n")
+                self._buffer.clear()
+            except OSError as exc:
+                self._disabled = True
+                self._records_dir = None
+                self._pre_file = None
+                self._buffer.clear()
+                warn = exc
+        finally:
+            self.release()
+        if warn is not None:
+            logger.warning(
+                "--save-terminal-output disabled — could not open the "
+                "terminal-output file in %s: %s", records_dir, warn,
+            )
+
+    def begin_esid(self, esid: str) -> None:
+        """Start routing this thread's log output to an ESID attempt file.
+
+        The first call also flips the run from the "pre" phase to the
+        "uploads started" phase and closes the pre file (under the
+        handler lock, so no thread can be caught mid-write to it).
+
+        Args:
+            esid: The dataset's ESID — used in the attempt filename
+                ``<stamp>_ESID_<esid>_upload_attempt_<NNN>.txt``.
+
+        Returns:
+            None.  If the attempt file cannot be opened, this thread's
+            output falls through to the post file instead — the upload
+            itself is never interrupted.
+        """
+        self.acquire()
+        try:
+            if self._disabled or self._records_dir is None:
+                return
+            if not self._uploads_started:
+                self._uploads_started = True
+                if self._pre_file is not None:
+                    self._pre_file.close()
+                    self._pre_file = None
+            try:
+                handle: Optional[TextIO] = self._open_attempt_file(esid)
+            except OSError:
+                handle = None
+            if handle is not None:
+                self._open_esid_files.add(handle)
+            self._local.esid_file = handle
+        finally:
+            self.release()
+
+    def end_esid(self) -> None:
+        """Stop per-ESID routing for this thread and close its file.
+
+        Safe to call when :meth:`begin_esid` never ran on this thread
+        (it is a no-op then), so callers can put it in a ``finally``.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        self.acquire()
+        try:
+            handle = getattr(self._local, "esid_file", None)
+            self._local.esid_file = None
+            if handle is not None:
+                self._open_esid_files.discard(handle)
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+        finally:
+            self.release()
+
+    def mirror(self, text: str) -> None:
+        """Copy one non-logging screen line (a ``print``) into the tee.
+
+        The interactive confirmation prompt is the only screen output
+        that bypasses the logging module; :func:`main` mirrors those
+        lines here so the pre file is a complete record of the screen.
+
+        Args:
+            text: The line exactly as it appeared on screen (without
+                the trailing newline).
+
+        Returns:
+            None.  A write failure disables the tee (reported once via
+            a normal log warning) rather than interrupting the run.
+        """
+        if self._disabled:
+            return
+        self.acquire()
+        warn: Optional[BaseException] = None
+        try:
+            try:
+                self._write_phase_line(text)
+            except OSError as exc:
+                self._disabled = True
+                warn = exc
+        finally:
+            self.release()
+        if warn is not None:
+            logger.warning(
+                "--save-terminal-output disabled — could not write to "
+                "the terminal-output file: %s", warn,
+            )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Write one formatted log record to the appropriate tee file.
+
+        Called by the logging framework (under the handler lock) for
+        every record that reaches the root logger.  Routing: a thread
+        inside :meth:`begin_esid`/:meth:`end_esid` writes to its ESID
+        attempt file; any other thread writes to the pre file (or the
+        in-memory buffer before :meth:`activate`) until uploads start,
+        and to the post file afterwards.
+
+        Args:
+            record: The log record to tee.
+
+        Returns:
+            None.  Failures are reported through the standard
+            :meth:`logging.Handler.handleError` path and never
+            propagate into the upload run.
+        """
+        if self._disabled:
+            return
+        try:
+            message = self.format(record)
+            esid_file = getattr(self._local, "esid_file", None)
+            if esid_file is not None:
+                esid_file.write(message + "\n")
+            else:
+                self._write_phase_line(message)
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        """Close every tee file that is still open.
+
+        Invoked by ``logging.shutdown()`` at interpreter exit, which
+        covers every exit path of :func:`main` — including the log
+        lines written after the summary block and straggler worker
+        threads after a Ctrl+C.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        self.acquire()
+        try:
+            for handle in list(self._open_esid_files):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            self._open_esid_files.clear()
+            for handle in (self._pre_file, self._post_file):
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except OSError:
+                        pass
+            self._pre_file = None
+            self._post_file = None
+            self._buffer.clear()
+        finally:
+            self.release()
+        super().close()
+
+    def _write_phase_line(self, text: str) -> None:
+        """Write one line to the current non-ESID phase destination.
+
+        The caller must hold the handler lock (:meth:`emit` is called
+        under it by the framework; :meth:`mirror` acquires it).
+
+        Args:
+            text: The formatted line to write (no trailing newline).
+
+        Returns:
+            None.
+
+        Raises:
+            OSError: If the phase file cannot be opened or written —
+                callers convert this into a disable-and-warn, never a
+                crash.
+        """
+        if self._records_dir is None:
+            self._buffer.append(text)
+        elif not self._uploads_started:
+            if self._pre_file is not None:
+                self._pre_file.write(text + "\n")
+        else:
+            if self._post_file is None:
+                self._post_file = self._open_phase_file("post")
+            self._post_file.write(text + "\n")
+
+    def _open_phase_file(self, kind: str) -> TextIO:
+        """Open the pre or post file, never overwriting an existing one.
+
+        The first choice is ``<stamp>_Standalone_terminal_output_<kind>.txt``;
+        if a file of that name already exists (two runs started in the
+        same minute writing to the same Records/ folder), ``_002``,
+        ``_003``, … is appended to the stem until the exclusive create
+        succeeds.
+
+        Args:
+            kind: ``"pre"`` or ``"post"``.
+
+        Returns:
+            The opened, line-buffered text file.
+
+        Raises:
+            OSError: If no candidate file can be created.
+        """
+        base = f"{self._stamp}_Standalone_terminal_output_{kind}"
+        counter = 1
+        while True:
+            name = f"{base}.txt" if counter == 1 else f"{base}_{counter:03d}.txt"
+            try:
+                return open(
+                    self._records_dir / name, "x",
+                    encoding="utf-8", buffering=1,
+                )
+            except FileExistsError:
+                counter += 1
+
+    def _open_attempt_file(self, esid: str) -> TextIO:
+        """Open a per-ESID attempt file with the next free counter.
+
+        Tries ``<stamp>_ESID_<esid>_upload_attempt_001.txt`` first and
+        increments the counter until a name does not collide with an
+        existing file, so an earlier attempt's record is never
+        overwritten.
+
+        Args:
+            esid: The dataset's ESID (used verbatim in the filename).
+
+        Returns:
+            The opened, line-buffered text file.
+
+        Raises:
+            OSError: If no candidate file can be created.
+        """
+        counter = 1
+        while True:
+            name = (
+                f"{self._stamp}_ESID_{esid}_upload_attempt_{counter:03d}.txt"
+            )
+            try:
+                return open(
+                    self._records_dir / name, "x",
+                    encoding="utf-8", buffering=1,
+                )
+            except FileExistsError:
+                counter += 1
 
 # How many offending filenames to name in an integrity problem message
 # before collapsing the rest into a count.
@@ -1057,12 +1427,16 @@ def create_upload_data(
     Returns:
         Tuple of (upload_data_list, unmatched_esid_list).
     """
-    collector_dict = {dc.esid: dc for dc in data_collectors}
+    # Both sides of this join are canonical ESIDs (the CSV side via the
+    # DataCollector validator, the folder side via parse_esid); the join
+    # itself is case-insensitive so a suffix case mismatch between a
+    # folder name and the CSV (ESID_120a vs 120A) still matches.
+    collector_dict = {dc.esid.casefold(): dc for dc in data_collectors}
     upload_data: List[UploadData] = []
     unmatched_ids: List[str] = []
 
     for esid, zip_file in esid_file_pairs:
-        if esid not in collector_dict:
+        if esid.casefold() not in collector_dict:
             logger.warning("No collector info found for ESID: %s", esid)
             unmatched_ids.append(esid)
             continue
@@ -1114,7 +1488,7 @@ def create_upload_data(
 
         data = UploadData(
             esid=esid,
-            data_collector=collector_dict[esid],
+            data_collector=collector_dict[esid.casefold()],
             zip_file=zip_file,
             readme_html=str(readme_html_path) if readme_html_path.exists() else None,
             readme_md=str(readme_md_path) if readme_md_path.exists() else None,
@@ -1259,8 +1633,11 @@ def get_draft_config(
     title_template = Template(
         project_config.get("title_template", "$esid")
     )
+    # The ESID renders in its display form: underscores become spaces
+    # ("122_Part_1_of_2" -> "ESID#122 Part 1 of 2").  Plain 3-digit
+    # ESIDs are unaffected, so existing record titles do not change.
     title = title_template.safe_substitute(
-        esid=data_collector.esid,
+        esid=azus_common.esid_display(data_collector.esid),
         eclipse_date=data_collector.eclipse_date,
         eclipse_label=data_collector.eclipse_label(),
     )
@@ -1607,6 +1984,7 @@ def upload_dataset(
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     zip_md5: Optional[str] = None,
+    skip_date_check: bool = False,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
 
@@ -1631,7 +2009,8 @@ def upload_dataset(
             left in the staging folder — exactly the state a "stuck" upload
             leaves behind — so Resources/finish_stuck_uploads.py can upload
             the ZIP and submit the record for review later.
-        upload_attempts: Total number of PUT attempts per file.  Defaults
+        upload_attempts: Total number of PUT attempts for the data
+            ZIP (companion files always keep the default).  Defaults
             to the historical value (3).  Forwarded to
             :func:`upload_to_zenodo`.
         title_guard: When True (default), the uploader searches the
@@ -1643,6 +2022,17 @@ def upload_dataset(
             integrity verification), passed through as the uploader's
             ``known_md5s`` for that archive so it can skip re-reading the
             file to hash it.  None when no digest was carried over.
+        skip_date_check: When True, a dataset whose WAV names carry no
+            valid recording dates is uploaded anyway with its recording
+            dates recorded as not available — the record's
+            Collected-dates metadata entry is omitted rather than
+            invented (``--skip-date-check`` CLI flag).
+
+    Raises:
+        Nothing propagates to the caller: internal ``ValueError`` raises
+        (unusable recording dates, failed Eclipse-Date fallback) are
+        caught by this function's own phase handlers and converted into
+        the returned failure dict.
 
     Returns:
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
@@ -1663,10 +2053,35 @@ def upload_dataset(
     # it exists on disk regardless of what happens during the upload.
     # ------------------------------------------------------------------
     try:
-        # Extract recording dates from the ZIP archive
-        start_date, end_date = get_recording_dates(
-            zip_file=data.zip_file, project_config=project_config
-        )
+        # Extract recording dates from the ZIP archive.  When every WAV
+        # name fails the date parse (unset AudioMoth clock -> 19700101_*
+        # names below minimum_recording_year, or hex names from old
+        # firmware), --skip-date-check uploads the dataset anyway with
+        # its recording dates recorded as not available (the record's
+        # Collected-dates metadata entry is omitted).
+        try:
+            start_date, end_date = get_recording_dates(
+                zip_file=data.zip_file, project_config=project_config
+            )
+        except ValueError as date_exc:
+            if not skip_date_check:
+                raise ValueError(
+                    f"{date_exc} Re-run with --skip-date-check to "
+                    "upload anyway with the recording dates recorded "
+                    "as not available."
+                ) from date_exc
+            # "Not available": Zenodo's schema requires a valid EDTF
+            # value in any dates entry, so the honest representation is
+            # to OMIT the Collected-dates entry from the record rather
+            # than invent a date.  get_draft_config leaves metadata
+            # dates out entirely when both fields are None.
+            logger.warning(
+                "  --skip-date-check: no valid WAV filename dates for "
+                "ESID %s — the record will carry NO recording-date "
+                "metadata (dates not available).",
+                data.esid,
+            )
+            start_date = end_date = None
         logger.debug("  Recording period: %s to %s", start_date, end_date)
 
         data.data_collector.first_recording_day = start_date
@@ -1787,6 +2202,9 @@ def upload_dataset(
             known_md5s=(
                 {Path(data.zip_file).name: zip_md5} if zip_md5 else None
             ),
+            # Scope --upload-attempts to the data ZIP; companion files
+            # always keep the uploader's default retry behavior.
+            zip_filename=Path(data.zip_file).name,
         )
         return result
 
@@ -1831,7 +2249,10 @@ def get_upload_data(
     When ``esid_filter`` is provided, only ESIDs in that list are processed;
     all others are silently skipped.  ESID numbers are compared as
     zero-padded three-digit strings so ``'4'``, ``'04'``, and ``'004'`` all
-    match a folder named ``ESID_004``.
+    match a folder named ``ESID_004``.  The returned datasets are ordered
+    by the FILTER's order (the ``--esid`` command-line order, or the
+    spreadsheet's row order) — not numerically and not by directory-scan
+    order — so uploads happen in the order the user listed them.
 
     Args:
         data_dir: Directory containing ESID subdirectories with ZIP files.
@@ -1842,6 +2263,7 @@ def get_upload_data(
         project_config: Parsed project_config.json.
         esid_filter: Optional list of ESID number strings to upload.
             If ``None`` or empty, all discovered ESIDs are processed.
+            When given, the list's order becomes the upload order.
             Example: ``['004', '007', '012']``.
         stats: Optional shared statistics dict.  When provided,
             ``stats["skipped"]`` is incremented by the number of datasets
@@ -1849,7 +2271,8 @@ def get_upload_data(
             so the end-of-run summary reflects reality.
 
     Returns:
-        List of UploadData objects ready for upload.
+        List of UploadData objects ready for upload — in filter order
+        when ``esid_filter`` was given, else in discovery order.
 
     Raises:
         ValueError: If ``data_dir`` or ``data_collectors_file`` is empty.
@@ -1859,14 +2282,26 @@ def get_upload_data(
     if not data_collectors_file:
         raise ValueError("Missing data collectors file")
 
-    # Normalize filter values to zero-padded 3-digit strings so that
-    # '4', '04', and '004' all resolve to '004' for comparison.
+    # Normalize filter values to canonical ESIDs ('4', '04', '004' all
+    # resolve to '004'; suffixed ids like 120A pass through) and compare
+    # casefolded so a suffix case mismatch cannot hide a dataset.  The
+    # order map remembers each ESID's position in the GIVEN list (first
+    # occurrence wins) — the final dataset list is sorted by it so
+    # uploads run in the user's order, not directory-scan order.
     normalized_filter: Optional[set] = None
+    filter_order: Dict[str, int] = {}
     if esid_filter:
-        normalized_filter = {str(e).strip().zfill(3) for e in esid_filter}
+        # First occurrence wins for both position and display case.
+        ordered: Dict[str, str] = {}
+        for value in esid_filter:
+            canonical = azus_common.normalize_esid(value)
+            ordered.setdefault(canonical.casefold(), canonical)
+        normalized_filter = set(ordered)
+        filter_order = {key: i for i, key in enumerate(ordered)}
         logger.info(
-            "ESID filter active — restricting upload to: %s",
-            ", ".join(sorted(normalized_filter)),
+            "ESID filter active — restricting upload to (in this "
+            "order): %s",
+            ", ".join(ordered.values()),
         )
 
     logger.info("Loading data collectors from: %s", data_collectors_file)
@@ -1897,7 +2332,7 @@ def get_upload_data(
                         subdir.name,
                     )
                     continue
-                if folder_esid_normalized not in normalized_filter:
+                if folder_esid_normalized.casefold() not in normalized_filter:
                     logger.debug(
                         "  Skipping %s (not in --esid filter)", subdir.name
                     )
@@ -1962,11 +2397,21 @@ def get_upload_data(
             ),
         )
 
+    if filter_order:
+        # Upload in the order the ESIDs were given (--esid order /
+        # spreadsheet row order).  Stable sort: anything unexpectedly
+        # absent from the map keeps its relative position at the end.
+        upload_data.sort(
+            key=lambda d: filter_order.get(
+                d.esid.casefold(), len(filter_order)
+            )
+        )
+
     logger.info("Prepared %d dataset(s) for upload", len(upload_data))
     return upload_data
 
 
-def _process_one_dataset(
+def _process_one_dataset_inner(
     index: int,
     total: int,
     data: UploadData,
@@ -1988,6 +2433,7 @@ def _process_one_dataset(
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     verify_zip_hash: bool = True,
+    skip_date_check: bool = False,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
@@ -2061,9 +2507,9 @@ def _process_one_dataset(
             so ``Resources/finish_stuck_uploads.py`` can upload the ZIP and
             finish the record later.  Nothing is written to the success CSV
             or the upload tracker, because the record is not complete yet.
-        upload_attempts: Total number of PUT attempts per file
-            (``--upload-attempts`` CLI flag).  Forwarded to
-            :func:`upload_dataset`.
+        upload_attempts: Total number of PUT attempts for the data
+            ZIP (``--upload-attempts`` CLI flag; companion files always
+            keep the default).  Forwarded to :func:`upload_dataset`.
         title_guard: Duplicate-record guard (default True; disabled by the
             ``--skip-title-guard`` CLI flag).  Forwarded to
             :func:`upload_dataset`.
@@ -2071,6 +2517,10 @@ def _process_one_dataset(
             gate re-hashes the ZIP and compares against ``file_list.csv``
             (``--skip-integrity-hash`` disables just this step; the
             sentinel and ZIP-contents checks always run).
+        skip_date_check: Upload datasets whose WAV names carry no
+            valid recording dates with the dates recorded as not
+            available (``--skip-date-check``); forwarded to
+            :func:`upload_dataset`.
 
     Returns:
         None.  All results are recorded via the result CSVs and the
@@ -2148,6 +2598,7 @@ def _process_one_dataset(
             # md5 from the integrity gate's combined digest pass — saves
             # the uploader a second full read of the (verified) ZIP.
             zip_md5=integrity_digests.get("md5"),
+            skip_date_check=skip_date_check,
         )
     except Exception as exc:
         logger.error("%s Unexpected error during upload: %s", tag, exc)
@@ -2246,6 +2697,46 @@ def _process_one_dataset(
         logger.error("%s DONE (failed)", tag)
 
 
+def _process_one_dataset(
+    index: int,
+    total: int,
+    data: UploadData,
+    **kwargs: Any,
+) -> None:
+    """Run one ESID dataset job, teeing its output when enabled.
+
+    A thin wrapper around :func:`_process_one_dataset_inner`, which does
+    all of the real work — see its docstring for the full contract and
+    thread-safety notes.  When ``--save-terminal-output`` is active,
+    everything the attempt logs between entry and return — including
+    the un-prefixed ``standalone_uploader`` lines — is routed to this
+    ESID's ``..._upload_attempt_NNN.txt`` file for the duration of the
+    call (each attempt runs entirely within one thread, so the routing
+    is per-thread).
+
+    Args:
+        index: 1-based position of this dataset in the queue (for logs).
+        total: Total number of datasets queued (for logs).
+        data: The :class:`UploadData` bundle for this ESID.
+        kwargs: Forwarded verbatim to
+            :func:`_process_one_dataset_inner` (the shared locks,
+            result-file paths, tracker, stats, and per-run flags).
+
+    Returns:
+        None.  Results are recorded exactly as described in
+        :func:`_process_one_dataset_inner`; a failed upload never
+        raises.
+    """
+    tee = _TEE_HANDLER
+    if tee is not None and not _ABORT_EVENT.is_set():
+        tee.begin_esid(data.esid)
+    try:
+        _process_one_dataset_inner(index=index, total=total, data=data, **kwargs)
+    finally:
+        if tee is not None:
+            tee.end_esid()
+
+
 def upload_datasets(
     datasets: List[Dict[str, str]],
     successful_results_file: str,
@@ -2262,6 +2753,7 @@ def upload_datasets(
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     verify_zip_hash: bool = True,
+    skip_date_check: bool = False,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -2301,7 +2793,8 @@ def upload_datasets(
         project_config: Parsed project_config.json.
         esid_filter: Optional list of ESID number strings to upload.
             If ``None`` or empty, all discovered ESIDs are processed.
-            Passed through to :func:`get_upload_data`.
+            The list's order becomes the upload order.  Passed through
+            to :func:`get_upload_data`.
         workers: Number of ESID datasets to upload concurrently.
             ``1`` (default) means sequential — identical to the original
             behavior.  Values greater than 1 enable parallel uploads via
@@ -2311,10 +2804,10 @@ def upload_datasets(
             stay in ``Staging_Area/`` and are counted under the
             ``'deferred'`` stat.  Finish them later with
             ``Resources/finish_stuck_uploads.py``.
-        upload_attempts: Total number of PUT attempts per file
-            (``--upload-attempts`` CLI flag).  Defaults to
-            ``_DEFAULT_UPLOAD_ATTEMPTS`` (3) so unmodified callers get
-            identical behavior.
+        upload_attempts: Total number of PUT attempts for the data
+            ZIP (``--upload-attempts`` CLI flag; companion files always
+            keep the default).  Defaults to ``_DEFAULT_UPLOAD_ATTEMPTS``
+            (3) so unmodified callers get identical behavior.
         title_guard: Duplicate-record guard (default True).  Before
             creating any fresh draft, the uploader searches the account
             for an existing record with the same title; an existing draft
@@ -2325,6 +2818,9 @@ def upload_datasets(
             integrity gate re-hashes its ZIP against ``file_list.csv``.
             ``--skip-integrity-hash`` disables just the hash step; the
             sentinel and ZIP-contents checks always run.
+        skip_date_check: Upload datasets whose WAV names carry no
+            valid recording dates with the dates recorded as not
+            available (``--skip-date-check``); forwarded per dataset.
 
     Returns:
         Dictionary with upload statistics:
@@ -2434,6 +2930,7 @@ def upload_datasets(
             upload_attempts=upload_attempts,
             title_guard=title_guard,
             verify_zip_hash=verify_zip_hash,
+            skip_date_check=skip_date_check,
         )
 
         if workers == 1:
@@ -2546,12 +3043,15 @@ def main() -> None:
         "--esid", nargs="+", metavar="ESID_OR_CSV",
         help=(
             "Upload only the specified ESID(s). Each value is either a "
-            "1-3 digit ESID number (leading zeros optional: '4', '04', "
-            "and '004' all match ESID_004) OR the path to a CSV whose "
+            "literal ESID — a 1-3 digit number (leading zeros optional: "
+            "'4', '04', and '004' all match ESID_004) or a suffixed id "
+            "like 120A or 122_Part_1_of_2 — OR the path to a CSV whose "
             "FIRST column lists ESIDs — e.g. the output of "
             "esid_record_report.py / list_upload_states.py / "
             "esid_wav_inventory.py (a header row is detected and "
             "skipped automatically). The two forms can be mixed. "
+            "Datasets are uploaded in the order given — the command-"
+            "line order and/or the spreadsheet's row order. "
             "Examples: --esid 004 007  or  --esid esid_records.csv  "
             "or  --esid 004 esid_records.csv"
         ),
@@ -2574,15 +3074,18 @@ def main() -> None:
         "--upload-attempts", type=int, default=_DEFAULT_UPLOAD_ATTEMPTS,
         metavar="N",
         help=(
-            "Total number of PUT attempts per file before that file is "
-            "marked failed and the run moves on (default: "
-            f"{_DEFAULT_UPLOAD_ATTEMPTS}). N=1 means one shot per file "
-            "with no retry; N=3 is the historical behavior with "
-            "30s / 90s backoffs between attempts. Valid range: 1 to 3. "
-            "Only affects file uploads (PUTs); the smaller metadata GET "
-            "retries are unchanged. If a run finishes with failures, "
-            "'python Resources/finish_stuck_uploads.py' remains the "
-            "ESID-level retry loop."
+            "Total number of PUT attempts for the DATA ZIP before the "
+            "dataset is marked failed and the run moves on (default: "
+            f"{_DEFAULT_UPLOAD_ATTEMPTS}). N=1 means one shot with no "
+            "retry; N=3 is the historical behavior with 30s / 90s "
+            "backoffs between attempts. Valid range: 1 to 3. Applies "
+            "ONLY to the multi-GB data ZIP — companion files (README, "
+            "CSVs) always keep the default 3 attempts, and the "
+            "draft-creation call has its own duplicate-guarded retry "
+            "(3 attempts, 30s/90s backoffs) that never re-creates a "
+            "draft the failed attempt actually made. If a run finishes "
+            "with failures, 'python Resources/finish_stuck_uploads.py' "
+            "remains the ESID-level retry loop."
         ),
     )
     parser.add_argument(
@@ -2615,6 +3118,37 @@ def main() -> None:
             ".prep_complete sentinel, ZIP readability, and the "
             "ZIP-contents-vs-file_list.csv cross-check. Use only when "
             "re-running a batch whose ZIPs were already hash-verified."
+        ),
+    )
+    parser.add_argument(
+        "--skip-date-check", action="store_true",
+        help=(
+            "When a dataset's WAV filenames carry NO valid recording "
+            "dates (unset AudioMoth clock -> 19700101_* names, or hex "
+            "names from old firmware), upload it anyway with the "
+            "recording dates recorded as not available — the record's "
+            "Collected-dates metadata entry is omitted rather than "
+            "invented. Datasets whose filenames DO parse keep their "
+            "real dates — this is a per-dataset fallback, not a "
+            "blanket override."
+        ),
+    )
+    parser.add_argument(
+        "--save-terminal-output", action="store_true",
+        help=(
+            "Also save everything this run prints to the screen as .txt "
+            "files in the Records/ folder (the screen output itself is "
+            "unchanged). Three kinds of file are written, all sharing "
+            "one run-start timestamp: "
+            "<date>_<time>_Standalone_terminal_output_pre.txt "
+            "(everything before the first upload attempt), one "
+            "<date>_<time>_ESID_<esid>_upload_attempt_001.txt per "
+            "dataset attempt (the 001 counter increments so an existing "
+            "file is never overwritten), and "
+            "<date>_<time>_Standalone_terminal_output_post.txt "
+            "(everything after — normally the summary). Output printed "
+            "before the configuration file has been read is captured "
+            "too, unless the run dies that early."
         ),
     )
     parser.add_argument(
@@ -2654,12 +3188,24 @@ def main() -> None:
     # --- Configure logging ---
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format=_LOG_FORMAT,
         handlers=[
             logging.FileHandler("azus_upload.log"),
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+    # --- Attach the terminal-output tee (--save-terminal-output) ---
+    # Attached before the first log line so nothing is missed; it
+    # buffers in memory until the Records/ folder is known (activate()
+    # below).  The screen and azus_upload.log handlers are untouched.
+    global _TEE_HANDLER
+    tee_handler: Optional[_TerminalTeeHandler] = None
+    if args.save_terminal_output:
+        tee_handler = _TerminalTeeHandler()
+        tee_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        logging.getLogger().addHandler(tee_handler)
+        _TEE_HANDLER = tee_handler
 
     # --- Expand --esid values (numbers and/or spreadsheet paths) ---
     # Done early so a bad value or unreadable file aborts before any
@@ -2688,6 +3234,20 @@ def main() -> None:
         sys.exit(1)
 
     uploads_config = config_data["uploads"]
+
+    # --- Activate the terminal-output tee now that Records/ is known ---
+    # The Records dir is derived exactly like the tracker's: the parent
+    # of the successful-results CSV.  The run-start timestamp is shared
+    # by every .txt file this run writes.
+    if tee_handler is not None:
+        from datetime import datetime as _dt
+        records_dir = Path(
+            uploads_config.get(
+                "successful_results_file", "Records/successful_results.csv"
+            )
+        ).parent
+        tee_handler.activate(records_dir, _dt.now().strftime("%Y-%m-%d_%H%M"))
+        logger.info("Saving a copy of terminal output to: %s", records_dir)
 
     # --- Load project identity ---
     project_config_path = config_data.get("project_config", None)
@@ -2748,6 +3308,12 @@ def main() -> None:
             "Duplicate guard: DISABLED (--skip-title-guard) — records "
             "with titles that already exist on Zenodo WILL be created."
         )
+    if args.skip_date_check:
+        logger.warning(
+            "Date fallback: ON (--skip-date-check) — datasets without "
+            "valid WAV filename dates will be uploaded with NO "
+            "recording-date metadata (dates not available)."
+        )
     if args.skip_integrity_hash:
         logger.warning(
             "Integrity gate: sentinel + ZIP-contents checks ON; ZIP "
@@ -2798,6 +3364,13 @@ def main() -> None:
         print("\n⚠️  You are about to upload datasets to Zenodo.")
         print("   This will create REAL records on Zenodo.")
         response = input("\nProceed? (yes/no): ")
+        # The prompt is the only screen output that bypasses logging;
+        # mirror it (and the answer) so the pre file stays a complete
+        # record of the screen.
+        if tee_handler is not None:
+            tee_handler.mirror("⚠️  You are about to upload datasets to Zenodo.")
+            tee_handler.mirror("   This will create REAL records on Zenodo.")
+            tee_handler.mirror(f"Proceed? (yes/no): {response}")
         if response.lower() != "yes":
             logger.info("Upload cancelled by user")
             sys.exit(0)
@@ -2824,6 +3397,7 @@ def main() -> None:
             upload_attempts=args.upload_attempts,
             title_guard=not args.skip_title_guard,
             verify_zip_hash=not args.skip_integrity_hash,
+            skip_date_check=args.skip_date_check,
         )
 
         # --- Display summary ---

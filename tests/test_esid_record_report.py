@@ -105,6 +105,17 @@ class TestCompileTitlePattern(unittest.TestCase):
         self.assertIsNone(m.match_title_any(_DEFAULT_RES, f"{_T}73"))
         self.assertIsNone(m.match_title_any(_DEFAULT_RES, f"{_T}0733"))
 
+    def test_suffixed_esid_is_captured_in_canonical_form(self):
+        # Suffixed ESIDs render with spaces in titles; the report must
+        # carry the full canonical (underscored) id, never just "122".
+        self.assertEqual(
+            m.match_title_any(_DEFAULT_RES, f"{_T}122 Part 1 of 2"),
+            "122_Part_1_of_2",
+        )
+        self.assertEqual(
+            m.match_title_any(_DEFAULT_RES, f"{_T}120A"), "120A"
+        )
+
     def test_trailing_text_allowed(self):
         self.assertEqual(
             m.match_title_any(_DEFAULT_RES, f"{_T}073 (v2)"), "073"

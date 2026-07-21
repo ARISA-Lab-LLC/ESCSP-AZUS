@@ -124,6 +124,21 @@ class TestClassifyZip(unittest.TestCase):
         self.assertTrue(v.is_zero)
         self.assertIsNone(v.discrepancy)
 
+    def test_true_empty_deflated_two_byte_stream(self):
+        """DEFLATE encodes 'no data' as a 2-byte final block — prep
+        writes every entry DEFLATED, so a genuinely empty WAV arrives
+        exactly like this and must classify as zero, not flagged."""
+        v = m.classify_zip_entry(0, 2, zipfile.ZIP_DEFLATED, 0, self.T)
+        self.assertTrue(v.is_zero)
+        self.assertIsNone(v.discrepancy)
+
+    def test_stored_empty_with_nonzero_compressed_is_flagged(self):
+        """The 2-byte allowance is DEFLATE-only: a STORED entry with
+        any compressed bytes is hiding data."""
+        v = m.classify_zip_entry(0, 2, zipfile.ZIP_STORED, 0, self.T)
+        self.assertFalse(v.is_zero)
+        self.assertIsNotNone(v.discrepancy)
+
     def test_size_zero_but_crc_nonzero_is_flagged(self):
         v = m.classify_zip_entry(0, 500, zipfile.ZIP_DEFLATED, 0x1234, self.T)
         self.assertFalse(v.is_zero)

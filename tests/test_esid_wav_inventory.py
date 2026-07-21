@@ -41,16 +41,30 @@ class TestExactFolderMatching(_TmpTestCase):
         for name in (
             "ESID#073",            # match
             "ESID#004",            # match
+            "ESID#120A",           # suffixed ESID — match (real ESID)
+            "ESID#122_Part_1_of_2",  # suffixed ESID — match
             "ESID_073",            # underscore variant — excluded
             "ESID_073_Staging",    # staging folder — excluded
             "ESID#73",             # 2 digits — excluded
             "ESID#0733",           # 4 digits — excluded
-            "ESID#073_backup",     # trailing text — excluded
+            "ESID#12A",            # suffixed but only 2 digits — excluded
             "notes",
         ):
             (self.root / name).mkdir()
         found = m.find_exact_esid_folders(self.root)
-        self.assertEqual([f.name for f in found], ["ESID#004", "ESID#073"])
+        self.assertEqual(
+            [f.name for f in found],
+            ["ESID#004", "ESID#073", "ESID#120A", "ESID#122_Part_1_of_2"],
+        )
+
+    def test_suffixed_folder_row_carries_full_esid(self):
+        # A suffixed raw folder is a DISTINCT ESID and its row must say
+        # so — "120A" truncated to "120" would credit the wrong site.
+        folder = self.root / "ESID#120A"
+        folder.mkdir()
+        (folder / "20240408_120000.WAV").write_bytes(b"\x00" * 32)
+        row = m.summarize_folder(folder, min_year=2023)
+        self.assertEqual(row["ESID#"], "120A")
 
     def test_case_variants_match(self):
         # Folder-name case is irrelevant: esid#073 and Esid#012 are

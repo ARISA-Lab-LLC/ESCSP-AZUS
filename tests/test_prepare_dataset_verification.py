@@ -110,12 +110,38 @@ class TestVerifyZipAgainstSource(unittest.TestCase):
             any("cross-check" in p for p in problems), problems
         )
 
-    def test_zero_byte_source_wav_fails(self):
+    def test_zero_byte_source_wav_is_included_not_failed(self):
+        """A genuinely empty WAV (dead recorder) belongs in the dataset:
+        it ships in the ZIP as 0 bytes and verification only warns.
+
+        Uses the REAL writer (create_zip_file, DEFLATED entries): an
+        empty deflated entry has a 2-byte compressed stream, which the
+        ZIP-side classifier must accept as genuinely empty.
+        """
         source = make_source_dir(self.root)
         (source / "20240408_150000.WAV").write_bytes(b"")
+        zip_path, _ = prep.create_zip_file(source, self.out, "005")
+        with self.assertLogs("azus.prepare", level="WARNING") as captured:
+            problems = prep.verify_zip_against_source(zip_path, source)
+        self.assertEqual(problems, [])
+        self.assertTrue(
+            any("zero bytes" in m for m in captured.output), captured.output
+        )
+        with zipfile.ZipFile(zip_path) as zf:
+            entry = [i for i in zf.infolist()
+                     if i.filename.endswith("20240408_150000.WAV")]
+            self.assertEqual(len(entry), 1)
+            self.assertEqual(entry[0].file_size, 0)
+            self.assertEqual(entry[0].compress_type, zipfile.ZIP_DEFLATED)
+
+    def test_zero_byte_wav_missing_from_zip_still_fails(self):
+        """Allowing zero-byte WAVs must not weaken the presence check:
+        an empty WAV that never made it into the ZIP is still fatal."""
+        source = make_source_dir(self.root)
         zip_path = zip_from_source(source, self.out)
+        (source / "20240408_150000.WAV").write_bytes(b"")  # added AFTER zip
         problems = prep.verify_zip_against_source(zip_path, source)
-        self.assertTrue(any("zero bytes" in p for p in problems), problems)
+        self.assertTrue(problems, "missing empty WAV must fail verification")
 
     def test_empty_source_folder_fails(self):
         source = self.root / "ESID_006"
@@ -188,6 +214,27 @@ class TestPre1980Timestamps(unittest.TestCase):
         self.assertIn("CONFIG.TXT", content_hashes)
         with zipfile.ZipFile(zip_path) as zf:
             self.assertIn("ESID_005/CONFIG.TXT", zf.namelist())
+
+    def test_source_mtime_clamped_metadata_only(self):
+        """A pre-1980 source file gets its FILESYSTEM mtime clamped to
+        the ZIP epoch — the filename and contents must be untouched."""
+        source = make_source_dir(self.root)
+        epoch_wav = source / "19700101_000000.WAV"
+        write_wav(epoch_wav, 3000)
+        os.utime(epoch_wav, (0, 0))
+        original_bytes = epoch_wav.read_bytes()
+
+        prep.create_zip_file(source, self.out, "005")
+
+        self.assertEqual(
+            epoch_wav.stat().st_mtime, prep._ZIP_MIN_MTIME,
+            "source mtime must be clamped to 1980-01-01",
+        )
+        self.assertTrue(epoch_wav.exists(), "filename must not change")
+        self.assertEqual(
+            epoch_wav.read_bytes(), original_bytes,
+            "file contents must not change",
+        )
 
     def test_add_files_to_zip_accepts_1970_mtime_file(self):
         source = make_source_dir(self.root)

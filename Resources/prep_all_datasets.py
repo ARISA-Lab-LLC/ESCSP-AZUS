@@ -101,16 +101,12 @@ logger = logging.getLogger("azus.prep_all")
 
 
 # ---------------------------------------------------------------------
-# Regex: extract the leading numeric portion of an ESID folder name.
+# ESID folder names
 # ---------------------------------------------------------------------
-# Accepts every reasonable form we've seen in the wild:
-#     ESID_073, ESID_073_Staging, ESID_073_anything, ESID#73
-# The capture group is the variable-width digit run that immediately
-# follows the underscore or "#".
-#
-# We DO NOT require zero-padding here — the folder might be named
-# ESID_4 — because zfill() below normalizes the numeric value to
-# the canonical 3-digit form regardless.
+# Parsed by azus_common.parse_esid — the single suite-wide grammar:
+#     ESID_073, ESID_073_Staging, ESID#73, ESID_4 (padded to 004),
+#     and suffixed ids like ESID_120A / ESID_122_Part_1_of_2.
+# The canonical form is the zero-padded 3-digit number plus any suffix.
 
 
 # ---------------------------------------------------------------------
@@ -141,31 +137,35 @@ _PREP_SENTINEL = azus_common.PREP_SENTINEL
 #  Discovery
 # =====================================================================
 
-def discover_esid_folders(top_level: Path) -> List[Tuple[int, str, Path]]:
+def discover_esid_folders(
+    top_level: Path,
+) -> List[Tuple[Tuple[int, str], str, Path]]:
     """Find every ESID subdirectory inside ``top_level``.
 
-    Returns a list of ``(numeric_esid, padded_str, folder_path)``
-    tuples, sorted in ascending numeric order.
+    Returns a list of ``(sort_key, canonical_esid, folder_path)``
+    tuples, sorted in ascending ESID order (numeric part first, then
+    any suffix).
 
     Example — a folder containing ``ESID_073``, ``ESID_007``, and
     ``ESID_4`` will return::
 
-        [(4,  "004", .../ESID_4),
-         (7,  "007", .../ESID_007),
-         (73, "073", .../ESID_073)]
+        [((4, ""),  "004", .../ESID_4),
+         ((7, ""),  "007", .../ESID_007),
+         ((73, ""), "073", .../ESID_073)]
 
     Folders whose names do not match the ESID pattern (e.g.,
     ``.DS_Store``, ``backup/``, ``notes/``) are silently ignored —
-    only the regex-matching ones are returned.
+    only the grammar-matching ones are returned.
 
     Args:
         top_level: The parent folder containing ESID subdirectories.
 
     Returns:
         Empty list if no ESID folders are found OR if ``top_level``
-        is not a directory.  Otherwise a numerically sorted list.
+        is not a directory.  Otherwise a list sorted by the shared
+        ESID sort key.
     """
-    found: List[Tuple[int, str, Path]] = []
+    found: List[Tuple[Tuple[int, str], str, Path]] = []
 
     if not top_level.is_dir():
         return found
@@ -184,12 +184,13 @@ def discover_esid_folders(top_level: Path) -> List[Tuple[int, str, Path]]:
             logger.debug("Skipping non-ESID directory: %s", entry.name)
             continue
 
-        found.append((int(padded), padded, entry))
+        found.append((azus_common.esid_sort_key(padded), padded, entry))
 
-    # Sort by the integer value, NOT the string.  For zero-padded names
-    # ("004", "007", "012") string and integer sort agree, but if the
-    # input folder has mixed-width names (ESID_4 alongside ESID_007),
-    # numeric sort gives the right answer where string sort would not.
+    # Sort by the shared ESID sort key (numeric part first, then any
+    # suffix), NOT the raw string.  For zero-padded names ("004",
+    # "007", "012") string and key sort agree, but if the input folder
+    # has mixed-width names (ESID_4 alongside ESID_007) the key gives
+    # the right answer where string sort would not.
     found.sort(key=lambda t: t[0])
     return found
 

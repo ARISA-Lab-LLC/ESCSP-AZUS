@@ -7,7 +7,8 @@ Scan the project's Zenodo presence via the API and write one CSV row per
 record whose title matches ANY of the ESID data-record patterns
 (``--title-pattern``, repeatable; defaults to ``*ESID #*`` OR ``*ESID#*``
 — covering both title forms observed on production Zenodo.  In each
-pattern the LAST ``*`` stands for the 3-digit ESID number, any earlier
+pattern the LAST ``*`` stands for the ESID (3-digit number plus any
+suffix), any earlier
 ``*`` matches arbitrary text such as the date/label prefix):
 
     ESID#, Title, Zenodo URL, Draft (y/n), DOI, ERROR?
@@ -34,8 +35,11 @@ matches **at least one** ``--title-pattern`` (OR) **and every**
 ``--and-title-pattern`` (AND).
 
 ``--title-pattern`` (OR, repeatable)
-    The LAST ``*`` stands for **exactly three digits** — the ESID; any
-    earlier ``*`` matches arbitrary text; everything else is literal.
+    The LAST ``*`` stands for the ESID — **exactly three digits** plus
+    any suffix (suffixed ESIDs render with spaces in titles, e.g.
+    ``ESID#122 Part 1 of 2``, and are reported in canonical underscored
+    form ``122_Part_1_of_2``); any earlier ``*`` matches arbitrary
+    text; everything else is literal.
 
 ``--and-title-pattern`` (AND, repeatable, optional)
     A pure filter: every ``*`` matches arbitrary text, nothing is
@@ -170,7 +174,8 @@ _DEFAULT_PROJECT_CONFIG = _PROJECT_ROOT / "Resources" / "project_config.json"
 _DEFAULT_BASE_URL = "https://zenodo.org/api/"
 
 # The shapes of an ESID data-record title.  Wildcard semantics: the LAST
-# "*" stands for the 3-digit ESID number; any earlier "*" matches
+# "*" stands for the ESID (3-digit number + optional suffix); any
+# earlier "*" matches
 # arbitrary text.  A record is in scope when its title matches ANY of
 # the patterns — the defaults cover both title forms observed on
 # production Zenodo: "ESID #NNN" (with space) and "ESID#NNN" (without).
@@ -202,7 +207,8 @@ class EsidRecord:
     Attributes:
         record_id: Zenodo record identifier (e.g. ``"14888071"``).
         title: The record title exactly as it appears on Zenodo.
-        esid: Zero-padded 3-digit ESID captured from the title.
+        esid: Canonical ESID captured from the title (zero-padded
+            3-digit number plus any suffix, e.g. ``122_Part_1_of_2``).
         doi: Assigned DOI, or ``""`` when none has been reserved/minted.
         is_draft: True for an unpublished draft, False for published,
             None when the state could not be determined (see ``error``).
@@ -236,33 +242,39 @@ class EsidRecord:
 def compile_title_pattern(pattern: str) -> "re.Pattern[str]":
     """Compile an OR pattern (``--title-pattern``) into a regex.
 
-    Wildcard semantics: the LAST ``*`` stands for the 3-digit ESID
-    number; any earlier ``*`` matches arbitrary text (e.g. the leading
-    ``*`` in the default ``*ESID #*`` lets any date/label prefix
-    through).  Every other character is matched literally.  Matching is
-    case-insensitive, anchored at the START of the title, and tolerant
-    of trailing text after the pattern.  ``(?!\\d)`` stops a 4+-digit
-    number from passing as a 3-digit ESID plus trailing text.
+    Wildcard semantics: the LAST ``*`` stands for the ESID — the
+    3-digit number plus, in a title, any display-form suffix (suffixed
+    ESIDs like ``122_Part_1_of_2`` render with spaces in titles:
+    ``ESID#122 Part 1 of 2``, so everything word-like after the digits
+    is treated as the suffix).  Any earlier ``*`` matches arbitrary
+    text (e.g. the leading ``*`` in the default ``*ESID #*`` lets any
+    date/label prefix through).  Every other character is matched
+    literally.  Matching is case-insensitive, anchored at the START of
+    the title, and tolerant of trailing text after the pattern.
+    ``(?!\\d)`` stops a 4+-digit number from passing as a 3-digit ESID
+    plus trailing digits.
 
     Args:
         pattern: User-facing pattern, e.g. ``"*ESID #*"``.
 
     Returns:
-        Compiled case-insensitive regex whose group 1 is the ESID.
+        Compiled case-insensitive regex whose group 1 is the ESID in
+        its title (display) form — :func:`match_title` converts it to
+        the canonical underscored form.
 
     Raises:
         ReportError: If the pattern contains no ``*``.
     """
     if "*" not in pattern:
         raise ReportError(
-            f"--title-pattern must contain a '*' (the 3-digit ESID "
+            f"--title-pattern must contain a '*' (the ESID "
             f"placeholder); got {pattern!r}."
         )
     head, _, tail = pattern.rpartition("*")
     literal_parts = head.split("*")
     regex = (
         r".*?".join(re.escape(part) for part in literal_parts)
-        + r"(\d{3})(?!\d)"
+        + r"(\d{3}(?!\d)[A-Za-z0-9_ ]*)"
         + re.escape(tail)
     )
     return re.compile(regex, re.IGNORECASE)
@@ -299,30 +311,43 @@ def _title_from_hit(hit: Dict) -> str:
 
 
 def match_title(title_re: "re.Pattern[str]", title: str) -> Optional[str]:
-    """Return the 3-digit ESID if the title matches the pattern.
+    """Return the canonical ESID if the title matches the pattern.
+
+    The capture is the ESID's display form (suffix words separated by
+    spaces); it is converted to the canonical underscored form for the
+    report (``ESID#122 Part 1 of 2`` → ``122_Part_1_of_2``).
 
     Args:
         title_re: A regex from :func:`compile_title_pattern`.
         title: Record title to test.
 
     Returns:
-        The captured 3-digit ESID string, or None on no match.
+        The canonical ESID string (zero-padded 3 digits plus any
+        suffix), or None on no match.
     """
     m = title_re.match(title)
-    return m.group(1) if m else None
+    if m is None:
+        return None
+    capture = m.group(1).strip()
+    try:
+        return azus_common.normalize_esid(capture)
+    except ValueError:
+        # Defensive: a capture the grammar rejects falls back to the
+        # bare 3-digit number rather than aborting the whole report.
+        return capture[:3]
 
 
 def match_title_any(
     title_res: List["re.Pattern[str]"], title: str
 ) -> Optional[str]:
-    """Return the 3-digit ESID from the first OR pattern that matches.
+    """Return the canonical ESID from the first OR pattern that matches.
 
     Args:
         title_res: Regexes from :func:`compile_title_pattern`.
         title: Record title to test.
 
     Returns:
-        The captured 3-digit ESID string, or None if no pattern matches.
+        The canonical ESID string, or None if no pattern matches.
     """
     for title_re in title_res:
         esid = match_title(title_re, title)
@@ -348,7 +373,7 @@ def title_in_scope(
         title: Record title to test.
 
     Returns:
-        The 3-digit ESID, or None when the title is out of scope.
+        The canonical ESID, or None when the title is out of scope.
     """
     esid = match_title_any(title_res, title)
     if esid is None:
@@ -429,7 +454,7 @@ def record_from_hit(
         source: ``"community"`` or ``"account"``.
         web_base: Web root for constructed URLs (e.g.
             ``"https://zenodo.org/"``).
-        esid: The 3-digit ESID already captured from the title.
+        esid: The canonical ESID already captured from the title.
 
     Returns:
         The populated :class:`EsidRecord` (``error`` non-empty when the
@@ -744,7 +769,8 @@ def build_rows(records: List[EsidRecord]) -> List[Dict[str, str]]:
     def sort_key(rec: EsidRecord):
         """Order by ESID, then numeric record id, then raw id string."""
         rid = rec.record_id
-        return (rec.esid, int(rid) if rid.isdigit() else 0, rid)
+        return (azus_common.esid_sort_key(rec.esid),
+                int(rid) if rid.isdigit() else 0, rid)
 
     draft_cell = {True: "y", False: "n", None: "?"}
     rows = [
@@ -765,7 +791,7 @@ def build_rows(records: List[EsidRecord]) -> List[Dict[str, str]]:
     # one is a code bug (raise); a missing URL or unknown draft state is
     # an API-data anomaly and must be explained in the ERROR? cell.
     for row in rows:
-        if not re.fullmatch(r"\d{3}", row["ESID#"]):
+        if not re.fullmatch(r"\d{3}(?:[A-Za-z_][A-Za-z0-9_]*)?", row["ESID#"]):
             raise ReportError(f"Self-check failed: malformed ESID {row!r}")
         if not row["Title"]:
             raise ReportError(f"Self-check failed: empty title {row!r}")
@@ -831,7 +857,8 @@ def main() -> None:
             "Only records whose title matches a pattern are reported "
             "(or even validated). May be given multiple times — a title "
             "matching ANY pattern is in scope. The LAST '*' of each "
-            "pattern stands for the 3-digit ESID number; any earlier '*' "
+            "pattern stands for the ESID (3-digit number + optional suffix); "
+            "any earlier '*' "
             "matches arbitrary text; everything else is literal. Matched "
             "case-insensitively against the start of the title. "
             f"Default: {' OR '.join(repr(p) for p in _DEFAULT_TITLE_PATTERNS)}"

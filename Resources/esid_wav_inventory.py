@@ -4,10 +4,12 @@
 PURPOSE
 =======
 Scan the immediate subfolders of a directory and, for every folder
-named ``ESID#NNN`` (a ``#``, then exactly three digits, nothing else;
-case-insensitive — ``ESID_073``, ``ESID_073_Staging``, ``ESID#73`` and
-other variants are deliberately ignored), summarize its top-level WAV
-files into one CSV row:
+named ``ESID#NNN`` or ``ESID#NNN<suffix>`` (a ``#``, then exactly
+three digits, then optionally a letters/digits/underscores suffix that
+starts with a non-digit — e.g. ``ESID#073``, ``ESID#120A``,
+``ESID#122_Part_1_of_2``; case-insensitive.  ``ESID_073`` underscore
+forms, ``ESID_073_Staging``, and unpadded ``ESID#73`` are deliberately
+ignored), summarize its top-level WAV files into one CSV row:
 
     ESID#, Number of Wave files, Total size of wave files (GB),
     Number of Wave files with timestamps of 2023 or greater
@@ -57,12 +59,16 @@ import azus_common
 
 logger = logging.getLogger("azus.wav_inventory")
 
-# Raw-folder hash syntax only: "ESID#" + exactly three digits, full
-# match, any letter case.  Deliberately stricter than
-# azus_common.parse_esid (which accepts ESID_073, suffixes like
-# _Staging, and unpadded numbers) — this tool inventories the raw
-# hash-named folders and nothing else.
-_EXACT_ESID_FOLDER_RE = re.compile(r"^ESID#(\d{3})$", re.IGNORECASE)
+# Raw-folder hash syntax only: "ESID#" + exactly three digits plus an
+# optional suffix (120A, 122_Part_1_of_2 — per the suite-wide ESID
+# grammar, suffixed ids are real, distinct ESIDs), full match, any
+# letter case.  Still stricter than azus_common.parse_esid, which also
+# accepts ESID_073 underscore forms, template tails like _Staging, and
+# unpadded numbers — this tool inventories the raw hash-named folders
+# and nothing else.
+_EXACT_ESID_FOLDER_RE = re.compile(
+    r"^ESID#(\d{3})(?!\d)([A-Za-z_][A-Za-z0-9_]*)?$", re.IGNORECASE
+)
 
 _CSV_COLUMNS = [
     "ESID#",
@@ -129,8 +135,9 @@ def summarize_folder(folder: Path, min_year: int) -> Dict[str, str]:
             "(unset clock or old-firmware naming).",
             folder.name, count - recent, count, min_year,
         )
+    esid_match = _EXACT_ESID_FOLDER_RE.match(folder.name)
     return {
-        "ESID#": _EXACT_ESID_FOLDER_RE.match(folder.name).group(1),
+        "ESID#": esid_match.group(1) + (esid_match.group(2) or ""),
         "Number of Wave files": str(count),
         "Total size of wave files (GB)": f"{total_bytes / _BYTES_PER_GB:.3f}",
         "Number of Wave files with timestamps of 2023 or greater": str(recent),
@@ -138,15 +145,15 @@ def summarize_folder(folder: Path, min_year: int) -> Dict[str, str]:
 
 
 def find_exact_esid_folders(root: Path) -> List[Path]:
-    """Immediate subfolders of ``root`` named exactly ``ESID#NNN``.
+    """Immediate subfolders of ``root`` named ``ESID#NNN[suffix]``.
 
     Args:
         root: Directory containing raw ESID folders.
 
     Returns:
-        Matching folders sorted by ESID number.  Non-matching entries
-        (including ``ESID_NNN`` underscore variants and staging folders)
-        are logged at DEBUG and skipped.
+        Matching folders in ESID order (numeric part, then suffix).
+        Non-matching entries (including ``ESID_NNN`` underscore
+        variants and staging folders) are logged at DEBUG and skipped.
     """
     matches: List[Path] = []
     for entry in sorted(root.iterdir()):
@@ -156,7 +163,13 @@ def find_exact_esid_folders(root: Path) -> List[Path]:
             matches.append(entry)
         else:
             logger.debug("Skipping (not ESID#NNN syntax): %s", entry.name)
-    matches.sort(key=lambda p: int(_EXACT_ESID_FOLDER_RE.match(p.name).group(1)))
+
+    def folder_key(path: Path):
+        """ESID sort key for a matched ESID#... folder name."""
+        m = _EXACT_ESID_FOLDER_RE.match(path.name)
+        return azus_common.esid_sort_key(m.group(1) + (m.group(2) or ""))
+
+    matches.sort(key=folder_key)
     return matches
 
 

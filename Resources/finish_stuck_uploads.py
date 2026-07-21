@@ -196,10 +196,13 @@ def discover_stuck_esids() -> Tuple[List[Tuple[int, str, Path, str]], List[str]]
             )
             continue
 
-        found.append((int(padded), padded, entry, record_id))
+        found.append(
+            (azus_common.esid_sort_key(padded), padded, entry, record_id)
+        )
 
-    # Sort by integer value, not string — robust if the user has
-    # both ESID_4 and ESID_073 sitting side by side.
+    # Sort by the shared ESID key (numeric part, then suffix), not the
+    # string — robust if the user has both ESID_4 and ESID_073 sitting
+    # side by side.
     found.sort(key=lambda t: t[0])
     excluded.sort()
     return found, excluded
@@ -214,6 +217,7 @@ def run_recovery(
     config_path: str,
     workers: int,
     upload_attempts: int = 3,
+    skip_date_check: bool = False,
 ) -> int:
     """Re-run standalone_tasks.py against just the stuck ESIDs.
 
@@ -234,9 +238,14 @@ def run_recovery(
         stuck_esids: Padded ESID strings, e.g. ["007", "012", "073"].
         config_path: Passed through unchanged.
         workers: How many to upload concurrently (1 = sequential).
-        upload_attempts: Total PUT attempts per file, forwarded as
+        upload_attempts: Total PUT attempts for the data ZIP
+            (companion files keep the default), forwarded as
             ``--upload-attempts N`` to standalone_tasks.py.  Default 3
             matches standalone_tasks.py's default (historical behavior).
+        skip_date_check: Forwarded as ``--skip-date-check`` — needed
+            when resuming a dataset that was originally uploaded with
+            the dates-not-available fallback (its WAV names still carry
+            no valid recording dates).
 
     Returns:
         The exit code of standalone_tasks.py.  0 if all finished
@@ -250,6 +259,8 @@ def run_recovery(
         "--workers", str(workers),
         "--upload-attempts", str(upload_attempts),
     ]
+    if skip_date_check:
+        cmd.append("--skip-date-check")
     logger.info("Running: %s", " ".join(cmd))
     # cwd = project root so relative paths in config.json resolve correctly.
     # No timeout — multi-GB ZIPs can legitimately take hours.
@@ -290,7 +301,7 @@ def main() -> None:
     parser.add_argument(
         "--upload-attempts", type=int, default=3, metavar="N",
         help=(
-            "Total number of PUT attempts per file before that file is "
+            "Total number of PUT attempts for the DATA ZIP before it is "
             "marked failed (default: 3). N=1 means one shot per file with "
             "no retry; N=3 is the historical behavior with 30s / 90s "
             "backoffs. Valid range: 1 to 3. Forwarded to "
@@ -299,10 +310,20 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--skip-date-check", action="store_true",
+        help=(
+            "Forwarded to standalone_tasks.py: upload datasets whose "
+            "WAV filenames carry no valid recording dates with the "
+            "dates recorded as not available (needed when resuming a "
+            "dataset that was originally uploaded with this flag)."
+        ),
+    )
+    parser.add_argument(
         "--esid", nargs="+", metavar="ESID_OR_CSV",
         help=(
             "Recover only the specified stuck ESID(s). Each value is "
-            "either a 1-3 digit ESID number OR the path to a CSV whose "
+            "either a literal ESID (a 1-3 digit number, or a suffixed "
+            "id like 120A / 122_Part_1_of_2) OR the path to a CSV whose "
             "FIRST column lists ESIDs (e.g. a reporting tool's output; "
             "a header row is detected and skipped). Both forms can be "
             "mixed. Requested ESIDs that are not currently stuck are "
@@ -380,16 +401,19 @@ def main() -> None:
 
     # --- Apply the optional --esid filter ---
     if requested is not None:
-        stuck_by_esid = {padded for _, padded, _, _ in stuck}
-        not_stuck = [e for e in requested if e not in stuck_by_esid]
+        stuck_by_esid = {padded.casefold() for _, padded, _, _ in stuck}
+        not_stuck = [e for e in requested
+                     if e.casefold() not in stuck_by_esid]
         for esid in not_stuck:
             logger.warning(
                 "Requested ESID %s is not currently stuck (no folder "
                 "with %s in %s) — skipping it.",
                 esid, _STATE_FILENAME, _STAGING_AREA,
             )
-        wanted = set(requested)
-        stuck = [t for t in stuck if t[1] in wanted]
+        # Case-insensitive membership so a suffix case mismatch between
+        # the filter and the folder name cannot hide a stuck dataset.
+        wanted = {esid.casefold() for esid in requested}
+        stuck = [t for t in stuck if t[1].casefold() in wanted]
         logger.info(
             "--esid filter: %d of %d requested ESID(s) are stuck and "
             "will be recovered.",
@@ -441,6 +465,7 @@ def main() -> None:
         config_path=args.config,
         workers=args.workers,
         upload_attempts=args.upload_attempts,
+        skip_date_check=args.skip_date_check,
     )
 
     # --- Final status ---

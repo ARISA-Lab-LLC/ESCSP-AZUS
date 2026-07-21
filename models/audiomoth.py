@@ -12,9 +12,23 @@ No external dependencies beyond Pydantic. Prefect and prefect_invenio_rdm
 are no longer required.
 """
 
-from typing import Optional, List, Dict, Any
+import sys
 from enum import Enum
-from pydantic import BaseModel, ConfigDict, Field, AliasChoices
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
+
+# The canonical ESID grammar lives in Resources/azus_common.py (one
+# definition for the whole suite); models/ sits next to Resources/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "Resources"))
+import azus_common  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +68,9 @@ class DataCollector(BaseModel):
     column headers (e.g., ``DataCollector.model_validate(row_dict)``).
 
     Attributes:
-        esid: Unique site/dataset identifier.
+        esid: Unique site/dataset identifier, normalized to canonical
+            form (zero-padded 3-digit number plus optional suffix,
+            e.g. ``004``, ``120A``, ``122_Part_1_of_2``).
         affiliation: Semicolon-delimited collector affiliations.
         files_date_time_mode: How WAV file timestamps were set.
         first_recording_day: Earliest recording date (set at upload time).
@@ -77,6 +93,30 @@ class DataCollector(BaseModel):
 
     esid: str = Field(
         validation_alias=AliasChoices("esid", "ESID"))
+
+    @field_validator("esid")
+    @classmethod
+    def _canonical_esid(cls, value: str) -> str:
+        """Normalize the CSV's ESID cell to the canonical form.
+
+        Pure 1-3 digit values are zero-padded (``5`` → ``005``);
+        suffixed ids (``120A``, ``122_Part_1_of_2``, or the display
+        form ``122 Part 1 of 2``) normalize to the underscored
+        canonical form.  This keeps the collector join against
+        folder-derived ESIDs exact.
+
+        Args:
+            value: The raw ESID cell value from the collectors CSV.
+
+        Returns:
+            The canonical ESID string.
+
+        Raises:
+            ValueError: If the cell does not fit the ESID grammar
+                (surfaces as a normal pydantic validation error during
+                CSV pre-validation).
+        """
+        return azus_common.normalize_esid(value)
 
     affiliation: str = Field(
         validation_alias=AliasChoices("affiliation", "Data Collector Affiliations"))

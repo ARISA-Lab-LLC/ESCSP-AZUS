@@ -63,27 +63,37 @@ class TestParseEsidCell(unittest.TestCase):
             self.assertNotEqual(status, "ok")
 
     def test_plain_forms(self):
-        self.ok("073", 73)
-        self.ok("73", 73)
-        self.ok(" 73 ", 73)
-        self.ok("000", 0)          # ESID 000 is valid
-        self.ok("999", 999)
+        self.ok("073", "073")
+        self.ok("73", "073")
+        self.ok(" 73 ", "073")
+        self.ok("000", "000")      # ESID 000 is valid
+        self.ok("999", "999")
+
+    def test_suffixed_forms(self):
+        # Extended grammar: 3 digits + a suffix starting with a
+        # non-digit; the display form (spaces) normalizes too.
+        self.ok("120A", "120A")
+        self.ok("122_Part_1_of_2", "122_Part_1_of_2")
+        self.ok("122 Part 1 of 2", "122_Part_1_of_2")
+        self.bad("12A")            # suffixed ids need the full 3 digits
 
     def test_prefixed_forms(self):
-        self.ok("ESID_073", 73)
-        self.ok("ESID#73", 73)
-        self.ok("esid 073", 73)
-        self.ok("ESID-073", 73)
+        self.ok("ESID_073", "073")
+        self.ok("ESID#73", "073")
+        self.ok("esid 073", "073")
+        self.ok("ESID-073", "073")
+        self.ok("ESID#120A", "120A")
+        self.ok("ESID 122 Part 1 of 2", "122_Part_1_of_2")
 
     def test_excel_float_artifact(self):
         # "73.0" means 73 — the old code read it as 730.
-        self.ok("73.0", 73)
-        self.ok("73.00", 73)
+        self.ok("73.0", "073")
+        self.ok("73.00", "073")
 
     def test_prefixed_among_other_numbers(self):
         # Old code concatenated to 732024; parser must isolate the
         # ESID-prefixed group.
-        self.ok("ESID 073 (2024)", 73)
+        self.ok("ESID 073 (2024)", "073")
 
     def test_ambiguous_is_rejected_not_guessed(self):
         self.bad("12 or 13")
@@ -148,28 +158,28 @@ class TestFileGuards(unittest.TestCase):
     def test_bom(self):
         p = self.tmp / "bom.csv"
         p.write_bytes("﻿ESID,Name\n073,x\n".encode("utf-8"))
-        self.assertEqual(read_esids_file(p, None).esids, {73})
+        self.assertEqual(read_esids_file(p, None).esids, {"073"})
 
     def test_cp1252(self):
         p = self.tmp / "cp1252.csv"
         p.write_bytes("ESID,Name\n073,Jos\xe9\n".encode("cp1252"))
         fp = read_esids_file(p, None)
-        self.assertEqual(fp.esids, {73})
+        self.assertEqual(fp.esids, {"073"})
         self.assertTrue(any("cp1252" in n for n in fp.notes))
 
     def test_semicolon_delimiter(self):
         p = self.tmp / "semi.csv"
         p.write_text("ESID;Name\n073;x\n074;y\n", encoding="utf-8")
         fp = read_esids_file(p, None)
-        self.assertEqual(fp.esids, {73, 74})
+        self.assertEqual(fp.esids, {"073", "074"})
         self.assertTrue(any("semicolon" in n for n in fp.notes))
 
     def test_duplicates_are_counted(self):
         p = self.tmp / "dup.csv"
         write_csv(p, ["ESID"], [["073"], ["73"], ["074"]])
         fp = read_esids_file(p, None)
-        self.assertEqual(fp.esids, {73, 74})
-        self.assertEqual(fp.duplicates, {73: 2})
+        self.assertEqual(fp.esids, {"073", "074"})
+        self.assertEqual(fp.duplicates, {"073": 2})
 
 
 class TestFalseCompleteRegressions(unittest.TestCase):
@@ -224,11 +234,14 @@ class TestPropertyRandomized(unittest.TestCase):
                                [[f"{e:03d}"] for e in sorted(master_set)])
             report = write_csv(tmp / f"r{i}.csv", ["ESID#"],
                                [[f"{e:03d}"] for e in sorted(report_set)])
+            master_padded = {f"{e:03d}" for e in master_set}
+            report_padded = {f"{e:03d}" for e in report_set}
             m = read_esids_file(master, None)
             r = read_esids_file(report, None)
-            self.assertEqual(m.esids, master_set)
-            self.assertEqual(r.esids, report_set)
-            self.assertEqual(m.esids - r.esids, master_set - report_set)
+            self.assertEqual(m.esids, master_padded)
+            self.assertEqual(r.esids, report_padded)
+            self.assertEqual(m.esids - r.esids,
+                             master_padded - report_padded)
             self.assertFalse(m.problems or r.problems)
 
 

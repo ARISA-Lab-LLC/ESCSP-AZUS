@@ -201,8 +201,10 @@ def main() -> None:
     for location, directory in _SCAN_DIRS:
         rows.extend(scan_directory(location, directory))
 
-    # Numeric ESID order, Staging before Uploaded within one ESID.
-    rows.sort(key=lambda r: (int(r["ESID#"]), r["Location"] != "Staging"))
+    # ESID order (numeric part, then suffix), Staging before Uploaded
+    # within one ESID.
+    rows.sort(key=lambda r: (azus_common.esid_sort_key(r["ESID#"]),
+                             r["Location"] != "Staging"))
 
     try:
         with open(output_path, "w", newline="", encoding="utf-8") as fh:

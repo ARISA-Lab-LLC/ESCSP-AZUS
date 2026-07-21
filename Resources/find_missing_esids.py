@@ -11,7 +11,8 @@ DATA-QUALITY DESIGN (this tool must never be silently wrong)
 An ESID that fails to parse can never be reported missing — so nothing
 is ever skipped silently:
 
-  * Valid ESIDs are exactly 000-999 (project invariant).  Any parsed
+  * Valid ESIDs are a 3-digit number 000-999 plus an optional suffix
+    (project invariant — e.g. 073, 120A, 122_Part_1_of_2).  Any parsed
     number outside that range is BY DEFINITION a parsing artifact and
     is flagged, never included.
   * Every blank or unparseable cell is counted and listed with its row
@@ -48,9 +49,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, NoReturn, Optional, Set, Tuple
 
-# Project invariant (per Trae): ESIDs are three digits, 000-999.
-# The canonical cell parser and its constants live in azus_common (one
-# definition for the whole suite); aliased here for compatibility.
+# Project invariant (per Trae): ESIDs are a three-digit number 000-999
+# plus an optional letters/digits/underscores suffix (073, 120A,
+# 122_Part_1_of_2).  The canonical cell parser and its constants live
+# in azus_common (one definition for the whole suite); aliased here
+# for compatibility.
 import azus_common
 
 _ESID_MIN = azus_common._ESID_MIN
@@ -167,7 +170,8 @@ class FileParse:
     Attributes:
         path: The CSV file that was parsed.
         column: The ESID column header that was read.
-        esids: Set of valid ESIDs (000-999) parsed from the column.
+        esids: Set of valid canonical ESID strings (zero-padded 3-digit
+            number plus any suffix) parsed from the column.
         total_rows: Number of data rows read (excludes the header).
         parsed: Number of rows that yielded a valid ESID.
         problems: ``(row, raw, reason)`` tuples for each cell that could
@@ -182,11 +186,11 @@ class FileParse:
 
     path: Path
     column: str = ""
-    esids: Set[int] = field(default_factory=set)
+    esids: Set[str] = field(default_factory=set)
     total_rows: int = 0
     parsed: int = 0
     problems: List[Tuple[int, str, str]] = field(default_factory=list)  # (row, raw, reason)
-    duplicates: Dict[int, int] = field(default_factory=dict)            # esid -> count
+    duplicates: Dict[str, int] = field(default_factory=dict)            # esid -> count
     samples: List[Tuple[str, str]] = field(default_factory=list)        # (raw, display)
     warnings: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
@@ -234,7 +238,7 @@ def read_esids_file(path: Path, override: Optional[str]) -> FileParse:
         list(reader.fieldnames or []), override, path
     )
 
-    counts: Dict[int, int] = {}
+    counts: Dict[str, int] = {}
     for row_num, row in enumerate(reader, start=2):  # row 1 is the header
         result.total_rows += 1
         raw = row.get(result.column, "")
@@ -243,7 +247,7 @@ def read_esids_file(path: Path, override: Optional[str]) -> FileParse:
             result.parsed += 1
             counts[esid] = counts.get(esid, 0) + 1
             if len(result.samples) < 3:
-                result.samples.append((str(raw), f"{esid:03d}"))
+                result.samples.append((str(raw), esid))
         else:
             result.problems.append((row_num, str(raw), status))
 
@@ -282,7 +286,10 @@ def print_file_audit(label: str, fp: FileParse) -> None:
         print(f"    ... and {len(fp.problems) - 20} more (all counted)")
     if fp.duplicates:
         dups = ", ".join(
-            f"{e:03d} x{c}" for e, c in sorted(fp.duplicates.items())
+            f"{e} x{c}" for e, c in sorted(
+                fp.duplicates.items(),
+                key=lambda item: azus_common.esid_sort_key(item[0]),
+            )
         )
         print(f"  Duplicates: {dups}")
     print()
@@ -292,7 +299,8 @@ def main() -> None:
     """Command-line entry point.  See the module docstring for usage."""
     parser = argparse.ArgumentParser(
         description=(
-            "Print the ESID numbers (000-999) that appear in the master "
+            "Print the ESIDs (a 3-digit number 000-999 plus an optional "
+            "suffix, e.g. 120A) that appear in the master "
             "spreadsheet but are missing from a report CSV (e.g. the "
             "output of audit_wav_integrity.py). Every cell that cannot "
             "be parsed is listed — nothing is skipped silently."
@@ -314,19 +322,21 @@ def main() -> None:
     print_file_audit("Master", master)
     print_file_audit("Report", report)
 
-    missing = sorted(master.esids - report.esids)
-    extra = sorted(report.esids - master.esids)
+    missing = sorted(master.esids - report.esids,
+                     key=azus_common.esid_sort_key)
+    extra = sorted(report.esids - master.esids,
+                   key=azus_common.esid_sort_key)
 
     if missing:
         print(f"MISSING from report ({len(missing)}):")
         for esid in missing:
-            print(f"  ESID {esid:03d}")
+            print(f"  ESID {esid}")
     else:
         print("MISSING from report: none — every parsed master ESID is "
               "in the report.")
     if extra:
         print(f"\nNote: {len(extra)} report ESID(s) not in the master: "
-              + ", ".join(f"{e:03d}" for e in extra))
+              + ", ".join(extra))
 
     # --- Data-quality verdict: a false 'nothing missing' cannot hide ---
     problem_count = len(master.problems) + len(report.problems)

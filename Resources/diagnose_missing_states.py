@@ -80,7 +80,13 @@ _DEFAULT_CONFIG = _PROJECT_ROOT / "Resources" / "config.json"
 _STATE_FILENAME = azus_common.STATE_FILENAME
 _TRACKER_FILENAME = "uploaded_files.txt"
 
-_ESID_ZIP_RE = re.compile(r"ESID[_#]?(\d+)\.zip$", re.IGNORECASE)
+# ZIP name carrying an ESID: 3-digit number plus optional suffix
+# (ESID_073.zip, ESID#73.zip, ESID_122_Part_1_of_2.zip).  The digit
+# lookahead keeps 4-digit runs malformed, matching azus_common.
+_ESID_ZIP_RE = re.compile(
+    r"ESID[_#]?(\d{1,3})(?!\d)([A-Za-z_][A-Za-z0-9_]*)?\.zip$",
+    re.IGNORECASE,
+)
 
 # Log lines worth quoting when --log is used: the verbatim strings the
 # pipeline emits on each known pre-draft failure/skip path.
@@ -159,8 +165,8 @@ class Evidence:
 # Evidence gathering
 # ---------------------------------------------------------------------
 
-def _esids_from_results_csv(path: Path) -> Dict[int, str]:
-    """Map numeric ESID -> latest error_message from a results CSV.
+def _esids_from_results_csv(path: Path) -> Dict[str, str]:
+    """Map canonical ESID -> latest error_message from a results CSV.
 
     Returns {} when the file is missing/unreadable (logged).  The CSVs
     are append-only, so the LAST row per ESID is the most recent.
@@ -169,35 +175,38 @@ def _esids_from_results_csv(path: Path) -> Dict[int, str]:
         path: Path to a results CSV (successful or failed).
 
     Returns:
-        A dict mapping numeric ESID to its latest ``error_message``.
+        A dict mapping the canonical ESID string (zero-padded 3-digit
+        number plus any suffix) to its latest ``error_message``.
         Empty when the file is missing or unreadable.
     """
-    results: Dict[int, str] = {}
+    results: Dict[str, str] = {}
     if not path.is_file():
         logger.warning("Results CSV not found (evidence unavailable): %s", path)
         return results
     try:
         with open(path, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
-                digits = re.sub(r"\D", "", str(row.get("esid", "")))
-                if digits:
-                    results[int(digits)] = str(row.get("error_message", "") or "")
+                esid, _reason = azus_common.parse_esid_cell(
+                    row.get("esid", "")
+                )
+                if esid is not None:
+                    results[esid] = str(row.get("error_message", "") or "")
     except (OSError, csv.Error) as exc:
         logger.warning("Could not read %s: %s", path, exc)
     return results
 
 
-def _esids_from_tracker(path: Path) -> Set[int]:
-    """Numeric ESIDs whose ZIPs appear in Records/uploaded_files.txt.
+def _esids_from_tracker(path: Path) -> Set[str]:
+    """Canonical ESIDs whose ZIPs appear in Records/uploaded_files.txt.
 
     Args:
         path: Path to the ``uploaded_files.txt`` tracker file.
 
     Returns:
-        The set of numeric ESIDs mentioned by a ZIP line in the tracker.
-        Empty when the tracker is missing or unreadable.
+        The set of canonical ESID strings mentioned by a ZIP line in
+        the tracker.  Empty when the tracker is missing or unreadable.
     """
-    esids: Set[int] = set()
+    esids: Set[str] = set()
     if not path.is_file():
         logger.warning("Tracker not found (evidence unavailable): %s", path)
         return esids
@@ -205,14 +214,17 @@ def _esids_from_tracker(path: Path) -> Set[int]:
         for line in path.read_text(encoding="utf-8").splitlines():
             m = _ESID_ZIP_RE.search(line.strip())
             if m:
-                esids.add(int(m.group(1)))
+                digits, suffix = m.group(1), m.group(2) or ""
+                if suffix and len(digits) != 3:
+                    continue  # malformed: suffixed ids need 3 digits
+                esids.add(f"{int(digits):03d}{suffix}")
     except OSError as exc:
         logger.warning("Could not read tracker %s: %s", path, exc)
     return esids
 
 
-def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[int]]:
-    """Numeric ESIDs that have a row in ANY configured collectors CSV.
+def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[str]]:
+    """Canonical ESIDs that have a row in ANY configured collectors CSV.
 
     Finds the ESID column by header substring match ("esid", case-
     insensitive) so we don't need the full parse_collectors_csv
@@ -223,10 +235,10 @@ def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[int]]:
         csv_paths: Collectors CSV paths configured in ``config.json``.
 
     Returns:
-        The set of numeric ESIDs found across the readable CSVs, or
-        ``None`` when not a single CSV could be read.
+        The set of canonical ESID strings found across the readable
+        CSVs, or ``None`` when not a single CSV could be read.
     """
-    esids: Set[int] = set()
+    esids: Set[str] = set()
     any_readable = False
     for path in csv_paths:
         if not path.is_file():
@@ -248,9 +260,11 @@ def _esids_from_collectors_csvs(csv_paths: List[Path]) -> Optional[Set[int]]:
                     continue
                 any_readable = True
                 for row in reader:
-                    digits = re.sub(r"\D", "", str(row.get(esid_col, "")))
-                    if digits:
-                        esids.add(int(digits))
+                    esid, _reason = azus_common.parse_esid_cell(
+                        row.get(esid_col, "")
+                    )
+                    if esid is not None:
+                        esids.add(esid)
         except (OSError, csv.Error) as exc:
             logger.warning("Could not read collectors CSV %s: %s", path, exc)
     return esids if any_readable else None
@@ -280,14 +294,21 @@ def _grep_logs(log_paths: List[Path], esid: str) -> Tuple[int, List[str]]:
 
     Args:
         log_paths: Log files to scan for per-ESID mentions.
-        esid: 3-digit ESID number string to search for.
+        esid: Canonical ESID string to search for.
 
     Returns:
         A ``(count, keyword_lines)`` tuple: the total number of matching
         lines and the last five that also contain a known diagnostic
         keyword.
     """
-    needles = (f"ESID {esid}", f"ESID_{esid}", f"ESID {int(esid)}")
+    needles = [f"ESID {esid}", f"ESID_{esid}"]
+    if esid.isdigit():
+        # Unpadded numeric mention ("ESID 73") — meaningless for
+        # suffixed ids, whose numeric part is always written padded.
+        needles.append(f"ESID {int(esid)}")
+    display = azus_common.esid_display(esid)
+    if display != esid:
+        needles.append(f"ESID {display}")
     count = 0
     keyword_lines: List[str] = []
     for log_path in log_paths:
@@ -307,29 +328,29 @@ def _grep_logs(log_paths: List[Path], esid: str) -> Tuple[int, List[str]]:
 def gather_evidence(
     esid: str,
     folder: Path,
-    tracker_esids: Set[int],
-    collector_esids: Optional[Set[int]],
-    success_rows: Dict[int, str],
-    failure_rows: Dict[int, str],
+    tracker_esids: Set[str],
+    collector_esids: Optional[Set[str]],
+    success_rows: Dict[str, str],
+    failure_rows: Dict[str, str],
     log_paths: List[Path],
 ) -> Evidence:
     """Collect every piece of evidence for one no-state folder.
 
     Args:
-        esid: 3-digit ESID number string for the folder.
+        esid: Canonical ESID string for the folder (zero-padded 3-digit
+            number plus any suffix).
         folder: The Staging_Area folder to inspect.
-        tracker_esids: Numeric ESIDs listed in the tracker file.
-        collector_esids: Numeric ESIDs with a collectors-CSV row, or
+        tracker_esids: Canonical ESIDs listed in the tracker file.
+        collector_esids: Canonical ESIDs with a collectors-CSV row, or
             ``None`` when no collectors CSV could be read.
-        success_rows: Numeric ESID -> error_message from the success CSV.
-        failure_rows: Numeric ESID -> error_message from the failure CSV.
+        success_rows: Canonical ESID -> error_message, success CSV.
+        failure_rows: Canonical ESID -> error_message, failure CSV.
         log_paths: Optional log files to grep for per-ESID mentions.
 
     Returns:
         A fully populated ``Evidence`` instance for this folder.
     """
     ev = Evidence(esid=esid, folder=folder)
-    numeric = int(esid)
 
     # One scan; _ESID_ZIP_RE also matches the hash/no-separator and
     # case variants that a literal ESID_*.zip glob would miss.
@@ -337,9 +358,9 @@ def gather_evidence(
         f for f in folder.iterdir()
         if f.is_file() and _ESID_ZIP_RE.search(f.name)
     )
-    ev.in_tracker = numeric in tracker_esids
+    ev.in_tracker = esid in tracker_esids
     ev.collector_row = (
-        None if collector_esids is None else numeric in collector_esids
+        None if collector_esids is None else esid in collector_esids
     )
     ev.metadata_json = any(folder.glob("ESID_*_metadata.json"))
 
@@ -348,8 +369,8 @@ def gather_evidence(
         ev.request_log_path = request_logs[0]
         ev.request_log_record_id = _record_id_from_request_log(request_logs[0])
 
-    ev.prior_success = numeric in success_rows
-    ev.latest_failure = failure_rows.get(numeric, "")
+    ev.prior_success = esid in success_rows
+    ev.latest_failure = failure_rows.get(esid, "")
 
     sentinel = folder / azus_common.PREP_SENTINEL
     if sentinel.is_file():

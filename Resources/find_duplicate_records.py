@@ -89,9 +89,15 @@ logger = logging.getLogger("azus.dup_check")
 _DEFAULT_PROJECT_CONFIG = _PROJECT_ROOT / "Resources" / "project_config.json"
 _DEFAULT_BASE_URL = "https://zenodo.org/api/"
 
-# ESID number as it appears in generated titles, e.g. "... ESID 073" /
-# "ESID_073" / "ESID#73".  Case-insensitive.
-_ESID_IN_TITLE_RE = re.compile(r"ESID[\s_#]*(\d+)", re.IGNORECASE)
+# ESID as it appears in generated titles, e.g. "... ESID 073" /
+# "ESID_073" / "ESID#73" / "ESID#122 Part 1 of 2" (suffixed ESIDs
+# render with spaces in titles).  Case-insensitive.  The digit
+# lookahead keeps 4+-digit numbers malformed; the suffix capture takes
+# everything word-like after the digits, matching the grammar in
+# azus_common.
+_ESID_IN_TITLE_RE = re.compile(
+    r"ESID[\s_#]*(\d{1,3})(?!\d)([A-Za-z0-9_ ]*)", re.IGNORECASE
+)
 
 # Runaway guard: 200 pages x 100 hits = 20,000 records per source, far
 # beyond anything this project will produce.
@@ -163,14 +169,25 @@ class RecordInfo:
 
     @property
     def esid(self) -> Optional[str]:
-        """Zero-padded ESID number extracted from the title, if present.
+        """Canonical ESID extracted from the title, if present.
 
         Returns:
-            The 3-digit ESID string (``"073"``) parsed from the title,
-            or None when the title carries no ESID number.
+            The canonical ESID string parsed from the title — the
+            zero-padded 3-digit number plus any suffix in underscored
+            form (``"073"``, ``"122_Part_1_of_2"`` from the title text
+            ``"ESID#122 Part 1 of 2"``) — or None when the title
+            carries no ESID.
         """
         m = _ESID_IN_TITLE_RE.search(self.title)
-        return f"{int(m.group(1)):03d}" if m else None
+        if m is None:
+            return None
+        raw = f"{m.group(1)}{m.group(2) or ''}".strip()
+        try:
+            return azus_common.normalize_esid(raw)
+        except ValueError:
+            # Defensive: a malformed suffix falls back to the bare
+            # padded number rather than dropping the record.
+            return f"{int(m.group(1)):03d}"
 
 
 def _record_from_hit(hit: Dict, source: str) -> RecordInfo:
