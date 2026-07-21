@@ -448,6 +448,31 @@ class TestRefreshFolder(_DatasetTestCase):
             [],
         )
 
+    def test_large_entry_triggers_zip64_copy(self):
+        """A ZIP entry over the ZIP64 threshold must stream through the
+        rewrite.  Regression: _clone_zipinfo left file_size=0, so zipfile
+        reserved no ZIP64 for the streamed copy and raised 'File size too
+        large, try using force_zip64' once past 2 GiB.  Reproduced cheaply
+        by lowering ZIP64_LIMIT so an ordinary small WAV crosses it."""
+        self.build_dataset("077")  # default WAVs are > 64 bytes
+        make_collector_csv(self.collector_csv, ["077"])
+        folder = self.staging / "ESID_077_Staging"
+        with mock.patch.object(zipfile, "ZIP64_LIMIT", 64):
+            refresh_readme.refresh_folder(
+                "077", folder, self.collector_csv, _TEMPLATE
+            )
+        # Rewrote successfully; still uploadable and README refreshed.
+        self.assertEqual(
+            standalone_tasks.verify_dataset_integrity(
+                str(folder / "ESID_077.zip")
+            ),
+            [],
+        )
+        self.assertIn(
+            _SENTINEL,
+            _zip_member(folder / "ESID_077.zip", "README.md").decode("utf-8"),
+        )
+
 
 # ===================================================================
 #  Safety guards

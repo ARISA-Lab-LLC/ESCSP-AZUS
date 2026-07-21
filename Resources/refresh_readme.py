@@ -306,20 +306,27 @@ def _clone_zipinfo(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
 
     A fresh :class:`zipfile.ZipInfo` avoids carrying the source archive's
     CRC / compressed-size / header-offset fields, which the writer
-    recomputes.
+    recomputes.  ``file_size`` IS carried over: when the entry is streamed
+    back in via ``ZipFile.open(clone, "w")``, zipfile reserves a ZIP64
+    header only when ``file_size * 1.05 > ZIP64_LIMIT`` (~2 GiB), so a
+    clone left at ``file_size = 0`` would reserve none and then fail with
+    "File size too large" on a >2 GiB entry.  Setting it mirrors the
+    normal ``ZipFile.write(path)`` path (which stats the file first) and
+    is overwritten by ``writestr`` for the small metadata entries.
 
     Args:
         info: The source entry's ZipInfo.
 
     Returns:
-        A new ZipInfo with the same name, timestamp, compression, and
-        attributes.
+        A new ZipInfo with the same name, timestamp, compression,
+        attributes, and uncompressed size.
     """
     clone = zipfile.ZipInfo(info.filename, date_time=info.date_time)
     clone.compress_type = info.compress_type
     clone.external_attr = info.external_attr
     clone.internal_attr = info.internal_attr
     clone.create_system = info.create_system
+    clone.file_size = info.file_size
     return clone
 
 
