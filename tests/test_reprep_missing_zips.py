@@ -142,9 +142,11 @@ class TestMainRunsSelectedSites(_RawTreeTestCase):
     def test_reprocesses_each_selected_site_once(self):
         f1 = self.make_site("001", [("20240408_130000.WAV", 0, False)])
         self.make_site("003", [("20240408_120000.WAV", 4000, False)])
-        code, run = self._run_main(["--eclipse-type", "partial"])
+        code, run = self._run_main([])
         self.assertEqual(code, 0)
-        run.assert_called_once_with(f1, "Resources/config.json", "partial")
+        # No eclipse type is forwarded — prepare_dataset.py reads it
+        # from the collector CSV per ESID.
+        run.assert_called_once_with(f1, "Resources/config.json")
 
     def test_list_only_runs_nothing(self):
         self.make_site("001", [("20240408_130000.WAV", 0, False)])

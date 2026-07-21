@@ -47,9 +47,10 @@ For each ESID, in increasing numeric order:
     2. Check the two "already prepared" folders above.  If either
        exists, log it and skip.
     3. Otherwise, run ``prepare_dataset.py <esid_folder>
-       --config <config> --eclipse-type <type>`` as a subprocess.
-       Output streams to the terminal so the user sees the
-       prep details in real time.
+       --config <config>`` as a subprocess.  Output streams to the
+       terminal so the user sees the prep details in real time.  The
+       eclipse type is not passed — prepare_dataset.py reads it from
+       each ESID's "Local Eclipse Type" cell in the collector CSV.
     4. If prepare_dataset.py exits 0, count as PREPARED.
     5. If it exits non-zero (or this script can't even spawn it),
        log the failure and continue to the next ESID.  One bad
@@ -76,8 +77,7 @@ Default — run from the project root:
 With explicit options:
 
     python Resources/prep_all_datasets.py /path/to/Raw_Data/ \\
-        --config Resources/config.json \\
-        --eclipse-type total
+        --config Resources/config.json
 
 Exit code is 0 if every ESID was either prepared successfully or
 already-prepared (skipped).  Exit code 1 if any ESID failed.
@@ -256,7 +256,6 @@ def already_prepared(esid_padded: str) -> Optional[Path]:
 def run_prepare_dataset(
     esid_folder: Path,
     config_path: str,
-    eclipse_type: str,
 ) -> int:
     """Invoke ``prepare_dataset.py`` as a subprocess and return its exit code.
 
@@ -282,7 +281,9 @@ def run_prepare_dataset(
     Args:
         esid_folder: Absolute path to the raw ESID directory.
         config_path: Path to AZUS config.json, passed through unchanged.
-        eclipse_type: One of ``total | annular | partial``.
+            The eclipse type is not passed — prepare_dataset.py reads it
+            from each ESID's "Local Eclipse Type" cell in the collector
+            CSV named by the config.
 
     Returns:
         The subprocess exit code.  0 = success.  Anything else =
@@ -293,7 +294,6 @@ def run_prepare_dataset(
         str(_PROJECT_ROOT / "Resources" / "prepare_dataset.py"),
         str(esid_folder),                                 # positional: the raw ESID dir
         "--config", config_path,
-        "--eclipse-type", eclipse_type,
     ]
     logger.info("Running: %s", " ".join(cmd))
     # subprocess.run blocks until the child process exits.  No timeout —
@@ -332,14 +332,6 @@ def main() -> None:
             "Passed through unchanged to prepare_dataset.py for every ESID."
         ),
     )
-    parser.add_argument(
-        "--eclipse-type", choices=["total", "annular", "partial"],
-        default="total",
-        help=(
-            "Eclipse type for ALL ESIDs in this batch (default: total). "
-            "Passed through unchanged to prepare_dataset.py."
-        ),
-    )
     args = parser.parse_args()
 
     # --- Configure logging once, here, so submodule loggers inherit it ---
@@ -361,7 +353,7 @@ def main() -> None:
     logger.info("=" * 70)
     logger.info("Top-level folder: %s", top_level.resolve())
     logger.info("Config:           %s", args.config)
-    logger.info("Eclipse type:     %s", args.eclipse_type)
+    logger.info("Eclipse type:     per-ESID, from each collector-CSV row")
     logger.info("Skip-check dirs:")
     logger.info("  %s/ESID_NNN_Staging/", _STAGING_AREA)
     logger.info("  %s/ESID_NNN_Uploaded/", _UPLOADED_DATA)
@@ -411,7 +403,6 @@ def main() -> None:
             rc = run_prepare_dataset(
                 esid_folder=folder,
                 config_path=args.config,
-                eclipse_type=args.eclipse_type,
             )
         except Exception as exc:
             logger.error("  FAILED — could not spawn subprocess: %s", exc)

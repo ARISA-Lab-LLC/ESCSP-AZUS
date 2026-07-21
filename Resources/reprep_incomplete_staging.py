@@ -38,7 +38,7 @@ USAGE
     # 2. Re-prep everything that report found broken in staging:
     python Resources/reprep_incomplete_staging.py \\
         prep_completeness_report.csv /path/to/Raw_Data \\
-        --config Resources/config.json --eclipse-type total
+        --config Resources/config.json
 
     # Preview without changing anything:
     python Resources/reprep_incomplete_staging.py \\
@@ -99,7 +99,7 @@ def read_report(report_path: Path) -> List[Dict[str, str]]:
 
 
 def run_prepare_dataset(
-    esid_folder: Path, config_path: str, eclipse_type: str
+    esid_folder: Path, config_path: str
 ) -> int:
     """Invoke prepare_dataset.py as a subprocess; return its exit code.
 
@@ -112,9 +112,9 @@ def run_prepare_dataset(
         esid_folder: Raw ESID folder passed as prepare_dataset.py's
             positional ``folder`` argument.
         config_path: Path to config.json, forwarded via ``--config``
-            (relative to the project root by default).
-        eclipse_type: Forwarded via ``--eclipse-type`` (``total``,
-            ``annular``, or ``partial``).
+            (relative to the project root by default).  The eclipse type
+            is not forwarded — prepare_dataset.py reads it from each
+            ESID's "Local Eclipse Type" cell in the collector CSV.
 
     Returns:
         The subprocess exit code (0 on success).
@@ -124,7 +124,6 @@ def run_prepare_dataset(
         str(_PROJECT_ROOT / "Resources" / "prepare_dataset.py"),
         str(esid_folder),
         "--config", config_path,
-        "--eclipse-type", eclipse_type,
     ]
     logger.info("Running: %s", " ".join(cmd))
     result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT))
@@ -154,11 +153,6 @@ def main() -> None:
     parser.add_argument(
         "--config", default="Resources/config.json",
         help="Path to config.json, forwarded to prepare_dataset.py.",
-    )
-    parser.add_argument(
-        "--eclipse-type", choices=["total", "annular", "partial"],
-        default="total",
-        help="Forwarded to prepare_dataset.py (default: total).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -250,7 +244,7 @@ def main() -> None:
         logger.info("=" * 70)
         logger.info("RE-PREPPING ESID %s (%s)", esid, raw_folder)
         logger.info("=" * 70)
-        returncode = run_prepare_dataset(raw_folder, args.config, args.eclipse_type)
+        returncode = run_prepare_dataset(raw_folder, args.config)
         if returncode == 0:
             succeeded.append(esid)
             logger.info("[ESID %s] Re-prep succeeded.", esid)

@@ -10,14 +10,18 @@ Output: Staging directory with ZIP, README, file_list, metadata CSVs, etc.
 The README.html is generated from a template file (Resources/README_template.html)
 using Python string.Template substitution.  No HTML is hardcoded in this script.
 
+The eclipse type is NOT a command-line switch — it is read from each
+ESID's "Local Eclipse Type" cell in the collector CSV, so every site
+carries its own type (the record title/label and README follow it).
+
 Usage:
     # Read collectors_csv from config.json (recommended — single source of truth):
     python prepare_dataset.py ESID#005 --config Resources/config.json \\
-        --eclipse-type total [--resources-dir Resources] [--output-dir ...]
+        [--resources-dir Resources] [--output-dir ...]
 
     # Or supply the path directly (overrides config.json if both given):
     python prepare_dataset.py ESID#005 --collector-csv /path/to/collectors.csv \\
-        --eclipse-type total [--resources-dir Resources] [--output-dir ...]
+        [--resources-dir Resources] [--output-dir ...]
 """
 
 import argparse
@@ -1320,9 +1324,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--eclipse-type", choices=["total", "annular", "partial"],
-        default="total", help="Eclipse/dataset type (default: total)")
-    parser.add_argument(
         "--resources-dir", default="Resources",
         help="Directory with resource files (default: Resources)")
     parser.add_argument(
@@ -1444,7 +1445,6 @@ def main() -> None:
     logger.info("Collector CSV:  %s", collector_csv)
     if args.config and not args.collector_csv:
         logger.info("  (path read from config.json)")
-    logger.info("Eclipse type:   %s", args.eclipse_type)
     logger.info("README template:%s", readme_template_path)
 
     # Step 1: Extract collector data
@@ -1453,6 +1453,15 @@ def main() -> None:
         logger.error("Cannot proceed without collector data")
         logger.info("Make sure ESID %s exists in %s", esid, collector_csv)
         sys.exit(1)
+
+    # Eclipse type comes from this ESID's own "Local Eclipse Type" cell,
+    # not a run-level switch — it drives the record title/label and the
+    # README (see create_readme_html).  Logged after the CSV row loads
+    # so the banner reflects the real per-site value.
+    logger.info(
+        "Eclipse type:   %s (from the collector CSV)",
+        collector_data.get("Local Eclipse Type", "") or "(not specified)",
+    )
 
     # Step 2: Create ZIP file (WAVs + CONFIG.TXT in ESID_XXX/ subfolder).
     # Returns content_hashes so WAV/CONFIG hashes are not re-computed later.
