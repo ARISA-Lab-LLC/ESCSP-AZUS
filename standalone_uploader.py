@@ -65,6 +65,19 @@ _POST_RETRY_BACKOFF_S = (30, 90)
 # is deleted and the run fails closed or adopts, never keeps both.
 _POST_SUCCESS_SWEEP_DELAY_S = 15
 
+# Small settle before the first draft-creation POST (belt-and-suspenders,
+# operator-requested).  Not the cause of the observed 500s — see the note
+# at the POST call site — just a brief pause after the duplicate-guard
+# search.
+_PRE_CREATE_PAUSE_S = 2
+
+# DOI reservation on the dedicated create-then-reserve endpoint is
+# best-effort: retry a transient 5xx a few times, then warn and continue
+# (Zenodo mints the DOI at publish if it could not be reserved early), so
+# a DataCite outage never fails the record or its upload.
+_DOI_RESERVE_ATTEMPTS = 3
+_DOI_RESERVE_BACKOFF_S = (5, 15)  # before attempts 2 and 3
+
 # Read-buffer size for local file hashing.  Mirrors
 # Resources/azus_common.py HASH_BUFFER_SIZE — kept local (not imported)
 # so this lowest-level module stays importable without the Resources/
@@ -1112,17 +1125,32 @@ def ensure_doi_reserved(
         draft_response: The draft metadata dict if the caller already has
             it (saves one GET).  Pass None to force a fresh fetch.
 
+    Reservation is BEST-EFFORT: a transient 5xx (e.g. DataCite degraded)
+    is retried a few times, and a persistent failure is logged as a
+    WARNING and swallowed — the function returns None rather than
+    raising.  Reserving a DOI early is a convenience; Zenodo mints one
+    automatically at publish, so a DataCite outage must not fail the
+    record or block its upload.
+
+    Args:
+        credentials: Zenodo API credentials.
+        record_id: The draft record ID.
+        draft_response: The draft metadata dict if the caller already has
+            it (saves one GET).  Pass None to force a fresh fetch.
+
     Returns:
-        The DOI string (existing or newly reserved), or None if the DOI
-        state could not be confirmed but the reserve call reported
-        "already exists" (HTTP 400) — in that case a DOI is present on
-        the record even though we couldn't read it back.
+        The DOI string (existing or newly reserved), or None when no DOI
+        could be confirmed — either because the reserve call reported
+        "already exists" (HTTP 400, a DOI is present but not read back)
+        or because reservation could not be completed (persistent error;
+        the draft keeps going and gets its DOI at publish).
 
     Raises:
-        HTTPError / RequestException: if the reservation fails for any
-            reason other than "a DOI already exists".  Callers should let
-            this propagate so the dataset is marked failed and retried
-            later — never proceed to community review without a DOI.
+        Nothing for reservation failures — this is best-effort.  The
+        ``RequestException`` raised internally on a 5xx is caught by the
+        retry loop; a persistent 5xx or a non-400 client error is logged
+        and swallowed (returns None), so a DataCite outage never fails
+        the record or its upload.
     """
     doi = _draft_doi(draft_response)
     if doi is None:
@@ -1147,25 +1175,63 @@ def ensure_doi_reserved(
 
     logger.info("  No DOI on draft %s — reserving one...", record_id)
     url = f"{credentials.base_url}records/{record_id}/draft/pids/doi"
-    response = requests.post(
-        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _DOI_RESERVE_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                url, headers=_auth_headers(credentials),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if response.status_code == 400:
+                # InvenioRDM answers 400 when a DOI is already present —
+                # treat as success (the goal state is "draft has a DOI").
+                # Log Zenodo's message so a genuinely different 400 shows.
+                logger.info(
+                    "  Reserve endpoint returned 400 for draft %s — a DOI "
+                    "most likely already exists. Zenodo said: %s",
+                    record_id, response.text[:300],
+                )
+                return None
+            if 500 <= response.status_code < 600:
+                # Transient server-side failure (DataCite degraded, etc.).
+                raise RequestException(
+                    f"Server error HTTP {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+            response.raise_for_status()
+            reserved = _draft_doi(response.json())
+            logger.info(
+                "  DOI reserved: %s",
+                reserved or "(reserved, id not returned)",
+            )
+            return reserved
+        except HTTPError:
+            # 4xx other than the 400 handled above — a real client error
+            # that a retry cannot fix.  Still best-effort: warn, no raise.
+            logger.warning(
+                "  DOI reservation for draft %s failed with a client "
+                "error — continuing without an early DOI (Zenodo will "
+                "mint one at publish).", record_id, exc_info=True,
+            )
+            return None
+        except RequestException as exc:
+            last_exc = exc
+            if attempt < _DOI_RESERVE_ATTEMPTS:
+                backoff = _DOI_RESERVE_BACKOFF_S[attempt - 1]
+                logger.warning(
+                    "  DOI reservation for draft %s failed (attempt "
+                    "%d/%d): %s. Retrying in %ds...",
+                    record_id, attempt, _DOI_RESERVE_ATTEMPTS, exc, backoff,
+                )
+                time.sleep(backoff)
+    logger.warning(
+        "  DOI reservation for draft %s did not complete after %d "
+        "attempt(s) (last error: %s) — continuing WITHOUT an early DOI. "
+        "The record and its upload are unaffected; Zenodo mints a DOI at "
+        "publish. (A DataCite outage is the usual cause.)",
+        record_id, _DOI_RESERVE_ATTEMPTS, last_exc,
     )
-
-    if response.status_code == 400:
-        # InvenioRDM answers 400 when a DOI is already present — treat as
-        # success (the goal state is "draft has a DOI").  Log Zenodo's
-        # message so a genuinely different 400 is visible in the log.
-        logger.info(
-            "  Reserve endpoint returned 400 for draft %s — a DOI most "
-            "likely already exists. Zenodo said: %s",
-            record_id, response.text[:300],
-        )
-        return None
-
-    response.raise_for_status()
-    reserved = _draft_doi(response.json())
-    logger.info("  DOI reserved: %s", reserved or "(reserved, id not returned)")
-    return reserved
+    return None
 
 
 def _create_community_review_request(
@@ -1534,13 +1600,19 @@ def upload_to_zenodo(
                 }
             if config.custom_fields:
                 draft_metadata["custom_fields"] = config.custom_fields
-            # Ask for DOI reservation as part of draft creation when
-            # requested (reserve_doi in config.json).  The dedicated
-            # reserve endpoint is also called below as a belt-and-
-            # suspenders guarantee — this block alone was historically
-            # dropped, which is how DOI-less drafts happened.
-            if getattr(config, "pids", None):
-                draft_metadata["pids"] = config.pids
+            # NOTE: DOI reservation (pids) is deliberately NOT sent in the
+            # creation body.  Asking Zenodo to reserve a DataCite DOI
+            # inside POST /records makes record creation depend on the
+            # external DataCite service — when DataCite is degraded, the
+            # whole creation returns HTTP 500 and no draft is created.
+            # (An earlier "always send pids at creation" change caused
+            # exactly that: repeatable, all-day 500s.)  Reservation now
+            # happens only on the dedicated create-then-reserve endpoint
+            # via ensure_doi_reserved() below, which is best-effort — a
+            # DataCite outage no longer blocks the draft or its upload;
+            # Zenodo mints the DOI at publish if it was not reserved
+            # early.  config.pids stays the "reserve requested" signal
+            # that gates that dedicated call.
 
             # Guarded retry: transient 5xx/transport failures are retried,
             # but never blindly — each retry first checks whether the
@@ -1551,6 +1623,13 @@ def upload_to_zenodo(
                 (config.metadata or {}).get("title", "") if title_guard
                 else ""
             )
+            # Small pause before the first creation POST (belt-and-
+            # suspenders, requested by the operator).  The evidence shows
+            # timing between the duplicate-guard search and this POST is
+            # NOT the cause of the 500s — the guarded retry's 30/90s
+            # backoffs space out later attempts — but a brief settle here
+            # is harmless.
+            time.sleep(_PRE_CREATE_PAUSE_S)
             draft_response, adopted_draft = _create_draft_with_guarded_retry(
                 credentials, draft_metadata, intended_title
             )
@@ -1786,13 +1865,14 @@ def upload_to_zenodo(
             draft_response and draft_response.get("parent", {}).get("review")
         )
         if config.community_id and not already_in_review and submit_review:
-            # HARD GUARANTEE: no record enters the community review queue
-            # without a DOI.  Acceptance from the queue publishes the
-            # record, so this is the last reliable moment to reserve one.
-            # Unconditional (not gated on reserve_doi) and idempotent —
-            # a no-op when the DOI already exists.  If reservation fails,
-            # this raises and the dataset is marked failed (retryable)
-            # rather than entering review DOI-less.
+            # Best-effort DOI reservation before the review queue — this
+            # is the last moment to reserve one early (acceptance from the
+            # queue publishes the record).  Unconditional (not gated on
+            # reserve_doi) and idempotent — a no-op when the DOI already
+            # exists.  If reservation cannot complete (e.g. DataCite is
+            # down) it warns and returns None rather than raising: the
+            # record still enters review and Zenodo mints the DOI at
+            # publish, so a DOI-service outage never blocks the dataset.
             ensure_doi_reserved(credentials, record_id, draft_response)
 
             logger.info("Submitting draft to community review queue...")

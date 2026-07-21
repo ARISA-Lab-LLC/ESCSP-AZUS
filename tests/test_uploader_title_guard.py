@@ -213,6 +213,8 @@ class TestUploadTitleGuard(_PatchingTestCase):
         self.list_files.return_value = []
         self.put_file = self._patch("upload_file_to_draft")
         self._patch("logger")  # keep test output clean
+        # Skip the real pre-create settle pause (and any retry backoff).
+        self.time = self._patch("time")
 
         # Hermetic tripwire: nothing in these paths may touch requests.
         tripwire = mock.MagicMock()
@@ -327,6 +329,42 @@ class TestUploadTitleGuard(_PatchingTestCase):
         self.search.assert_not_called()
         self.create.assert_not_called()
 
+    def test_create_body_omits_pids_even_when_reserve_requested(self):
+        """DOI reservation must NOT ride in the creation POST — that forces
+        a synchronous DataCite call and 500s creation during an outage.
+        With config.pids set, the body still omits it and reservation is
+        delegated to the dedicated endpoint."""
+        self._search_returns([])  # no existing record -> fresh create
+        self.create.return_value = {"id": "new-9", "parent": {}}
+        self.get_draft.return_value = {"id": "new-9", "parent": {}}
+        config = make_config()
+        config.pids = {"doi": {"provider": "datacite", "identifier": ""}}
+        with mock.patch.object(uploader, "ensure_doi_reserved") as reserve:
+            result = uploader.upload_to_zenodo(
+                files=[str(self.data_file)], config=config,
+            )
+        self.assertTrue(result["successful"])
+        body = self.create.call_args.args[1]
+        self.assertNotIn("pids", body)          # the fix
+        self.assertIn("metadata", body)
+        self.assertIn("access", body)
+        reserve.assert_called()                 # reservation delegated
+
+    def test_fresh_create_pauses_before_post(self):
+        self._search_returns([])
+        self.create.return_value = {"id": "new-1", "parent": {}}
+        self.get_draft.return_value = {"id": "new-1", "parent": {}}
+        self._run()
+        self.time.sleep.assert_any_call(uploader._PRE_CREATE_PAUSE_S)
+
+    def test_resume_does_not_pre_create_pause(self):
+        self.get_draft.return_value = {
+            "id": "d-5", "is_published": False, "parent": {},
+        }
+        self._run(existing_draft_id="d-5")
+        slept = [c.args[0] for c in self.time.sleep.call_args_list if c.args]
+        self.assertNotIn(uploader._PRE_CREATE_PAUSE_S, slept)
+
 
 # --- ensure_doi_reserved ------------------------------------------------------
 
@@ -336,6 +374,8 @@ class TestEnsureDoiReserved(_PatchingTestCase):
         self.requests = self._patch("requests")
         self.get_draft = self._patch("get_draft_record")
         self._patch("logger")
+        # Neutralize the retry backoff sleeps so 5xx cases run instantly.
+        self._patch("time")
 
     def test_doi_in_supplied_metadata_no_post(self):
         doi = uploader.ensure_doi_reserved(
@@ -380,13 +420,44 @@ class TestEnsureDoiReserved(_PatchingTestCase):
         doi = uploader.ensure_doi_reserved(self.creds, "55", None)
         self.assertIsNone(doi)
 
-    def test_real_http_failure_raises(self):
+    def test_client_error_is_best_effort_not_fatal(self):
+        """A non-400 4xx (e.g. 403) no longer raises — DOI reservation is
+        best-effort, so it warns and returns None; the dataset proceeds
+        and Zenodo mints a DOI at publish."""
         self.get_draft.return_value = {"pids": {}}
         self.requests.post.return_value = FakeResponse(
             status_code=403, text="forbidden"
         )
-        with self.assertRaises(HTTPError):
-            uploader.ensure_doi_reserved(self.creds, "55", None)
+        doi = uploader.ensure_doi_reserved(self.creds, "55", None)
+        self.assertIsNone(doi)
+        self.requests.post.assert_called_once()  # 4xx not retried
+
+    def test_transient_5xx_then_success(self):
+        """A 500 (DataCite blip) is retried; the next attempt's DOI wins."""
+        self.get_draft.return_value = {"pids": {}}
+        self.requests.post.side_effect = [
+            FakeResponse(status_code=500, text="datacite down"),
+            FakeResponse(
+                {"pids": {"doi": {"identifier": "10.5281/zenodo.500"}}},
+                status_code=201,
+            ),
+        ]
+        doi = uploader.ensure_doi_reserved(self.creds, "55", None)
+        self.assertEqual(doi, "10.5281/zenodo.500")
+        self.assertEqual(self.requests.post.call_count, 2)
+
+    def test_persistent_5xx_is_best_effort_not_fatal(self):
+        """A sustained DataCite outage (500 every attempt) must NOT fail
+        the dataset — it exhausts the retries, warns, and returns None."""
+        self.get_draft.return_value = {"pids": {}}
+        self.requests.post.return_value = FakeResponse(
+            status_code=500, text="datacite down"
+        )
+        doi = uploader.ensure_doi_reserved(self.creds, "55", None)
+        self.assertIsNone(doi)
+        self.assertEqual(
+            self.requests.post.call_count, uploader._DOI_RESERVE_ATTEMPTS
+        )
 
     def test_broken_draft_endpoint_still_reserves(self):
         """A broken GET /draft must not block reservation: the reserve
@@ -449,6 +520,7 @@ class TestNumberOfTriesCounter(_PatchingTestCase):
 
         self.creds = uploader.Credentials(token="fake", base_url=_BASE_URL)
         self._patch("get_credentials_from_env", return_value=self.creds)
+        self._patch("time")  # skip the pre-create settle pause
         self.search = self._patch("_api_get_with_retry")
         self.search.return_value = FakeResponse({"hits": {"hits": []}})
         self.create = self._patch("create_draft_record")
