@@ -195,6 +195,38 @@ def discover_esid_folders(
     return found
 
 
+def filter_and_order_discovered(
+    discovered: List[Tuple[Tuple[int, str], str, Path]],
+    requested: List[str],
+) -> Tuple[List[Tuple[Tuple[int, str], str, Path]], List[str]]:
+    """Restrict discovered ESID folders to ``requested``, in that order.
+
+    Args:
+        discovered: ``(sort_key, canonical_esid, folder)`` tuples from
+            :func:`discover_esid_folders` (numerical order).
+        requested: Canonical ESIDs from ``--esid``, in the user's given
+            order (first occurrence wins; already deduplicated by
+            :func:`azus_common.load_esid_args`).
+
+    Returns:
+        A ``(selected, missing)`` tuple.  ``selected`` holds the
+        discovered entries whose ESID appears in ``requested``, reordered
+        to match ``requested`` (compared case-insensitively so a suffix
+        like ``120A`` cannot slip past); ``missing`` lists requested
+        ESIDs with no matching raw folder, so the caller can surface them.
+    """
+    by_esid = {entry[1].casefold(): entry for entry in discovered}
+    selected: List[Tuple[Tuple[int, str], str, Path]] = []
+    missing: List[str] = []
+    for esid in requested:
+        entry = by_esid.get(esid.casefold())
+        if entry is None:
+            missing.append(esid)
+        else:
+            selected.append(entry)
+    return selected, missing
+
+
 # =====================================================================
 #  Skip check
 # =====================================================================
@@ -332,6 +364,28 @@ def main() -> None:
             "Passed through unchanged to prepare_dataset.py for every ESID."
         ),
     )
+    parser.add_argument(
+        "--esid", nargs="+", metavar="ESID_OR_CSV",
+        help=(
+            "Prepare only the specified ESID(s), IN THE GIVEN ORDER. Each "
+            "value is either a literal ESID (1-3 digits, or a suffixed id "
+            "like 120A) or the path to a CSV whose first column lists ESIDs "
+            "(header row optional); numbers and CSV paths may be mixed. "
+            "Without this flag, every ESID folder is prepared in numerical "
+            "order."
+        ),
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help=(
+            "Prepare each selected ESID even if it already has a folder in "
+            "Staging_Area/ or Uploaded_Data/ (the checks that normally skip "
+            "already-prepared ESIDs). prepare_dataset.py replaces an "
+            "existing Staging_Area folder, preserving its Zenodo draft link. "
+            "Re-preparing an ESID that was already UPLOADED is warned about "
+            "loudly — the duplicate-record guard only runs at upload time."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Configure logging once, here, so submodule loggers inherit it ---
@@ -347,6 +401,15 @@ def main() -> None:
         logger.error("Top-level folder not found or not a directory: %s", top_level)
         sys.exit(1)
 
+    # --- Expand --esid values (literal ESIDs and/or spreadsheet paths) ---
+    requested_esids: Optional[List[str]] = None
+    if args.esid:
+        try:
+            requested_esids = azus_common.load_esid_args(args.esid)
+        except ValueError as exc:
+            logger.error("Invalid --esid value: %s", exc)
+            sys.exit(1)
+
     # --- Banner: tell the user exactly what we're about to do ---
     logger.info("=" * 70)
     logger.info("AZUS BATCH PREPARATION")
@@ -354,6 +417,20 @@ def main() -> None:
     logger.info("Top-level folder: %s", top_level.resolve())
     logger.info("Config:           %s", args.config)
     logger.info("Eclipse type:     per-ESID, from each collector-CSV row")
+    if requested_esids:
+        logger.info(
+            "ESID filter:      %s (in this order; all others skipped)",
+            ", ".join(requested_esids),
+        )
+    else:
+        logger.info(
+            "ESID filter:      none (all discovered ESIDs, numerical order)"
+        )
+    logger.info(
+        "Force:            %s",
+        "ON — re-prepare even already-prepared/uploaded ESIDs"
+        if args.force else "off (skip already-prepared ESIDs)",
+    )
     logger.info("Skip-check dirs:")
     logger.info("  %s/ESID_NNN_Staging/", _STAGING_AREA)
     logger.info("  %s/ESID_NNN_Uploaded/", _UPLOADED_DATA)
@@ -368,9 +445,29 @@ def main() -> None:
         )
         sys.exit(0)
 
+    # --- Apply the optional --esid filter (restrict + enforce order) ---
+    if requested_esids is not None:
+        discovered, missing = filter_and_order_discovered(
+            discovered, requested_esids
+        )
+        if missing:
+            logger.warning(
+                "%d requested ESID(s) have no raw folder under %s and will "
+                "be skipped: %s",
+                len(missing), top_level, ", ".join(missing),
+            )
+        if not discovered:
+            logger.error(
+                "None of the requested --esid value(s) match a raw folder "
+                "under %s — nothing to do.", top_level,
+            )
+            sys.exit(1)
+        order_desc = "in --esid order"
+    else:
+        order_desc = "in numerical order"
+
     logger.info(
-        "Discovered %d ESID folder(s); processing in numerical order:",
-        len(discovered),
+        "Processing %d ESID folder(s) %s:", len(discovered), order_desc,
     )
     for _, padded, folder in discovered:
         logger.info("  ESID %s  ←  %s", padded, folder.name)
@@ -388,13 +485,31 @@ def main() -> None:
             i, len(discovered), padded, folder.name,
         )
 
-        # ---- Skip check ----
-        # This is the whole point of the tool — do not redo work.
+        # ---- Skip check (bypassed by --force) ----
+        # Normally the whole point of the tool — do not redo finished work.
         prior = already_prepared(padded)
         if prior is not None:
-            logger.info("  SKIP — already prepared at: %s", prior)
-            skipped.append((padded, prior))
-            continue
+            if args.force:
+                # --force: re-prepare anyway.  prepare_dataset.py replaces an
+                # existing Staging_Area folder (preserving the Zenodo draft
+                # link).  An Uploaded_Data twin means this ESID is already on
+                # Zenodo — warn loudly; the duplicate-record guard runs at
+                # upload time, not here.
+                if prior.name.endswith("_Uploaded"):
+                    logger.warning(
+                        "  --force: ESID %s was ALREADY UPLOADED (%s) — "
+                        "re-preparing into Staging_Area/. Re-uploading may "
+                        "create a DUPLICATE record unless the upload title-"
+                        "guard resumes the existing one.", padded, prior,
+                    )
+                else:
+                    logger.warning(
+                        "  --force: re-preparing despite existing %s", prior,
+                    )
+            else:
+                logger.info("  SKIP — already prepared at: %s", prior)
+                skipped.append((padded, prior))
+                continue
 
         # ---- Run prepare_dataset.py ----
         # Wrapped in try/except so a subprocess spawn failure (e.g.
