@@ -1981,6 +1981,7 @@ def upload_dataset(
     references_csv: Optional[str] = None,
     project_config: Optional[Dict[str, Any]] = None,
     defer_zip: bool = False,
+    draft_only: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     zip_md5: Optional[str] = None,
@@ -2009,6 +2010,12 @@ def upload_dataset(
             left in the staging folder — exactly the state a "stuck" upload
             leaves behind — so Resources/finish_stuck_uploads.py can upload
             the ZIP and submit the record for review later.
+        draft_only: If True, upload everything INCLUDING the data ZIP but
+            leave the record as a plain, editable draft — skip BOTH the
+            community-review submission and publishing (auto_publish is
+            forced off).  For reviewing a fully uploaded record on Zenodo
+            before submitting or publishing it yourself.  Mutually
+            exclusive with ``defer_zip``.
         upload_attempts: Total number of PUT attempts for the data
             ZIP (companion files always keep the default).  Defaults
             to the historical value (3).  Forwarded to
@@ -2189,13 +2196,17 @@ def upload_dataset(
             files=files_to_upload,
             config=config,
             delete_on_failure=delete_failures,
-            auto_publish=auto_publish,
+            # --draft-only forces publishing off even if config enables it.
+            auto_publish=auto_publish and not draft_only,
             request_log_path=str(
                 esid_dir / f"ESID_{data.esid}_request_log.json"
             ),
             existing_draft_id=existing_draft_id,
             state_file_path=str(state_file),
-            submit_review=not defer_zip,
+            # Skip the community-review submission when deferring the ZIP
+            # (review must wait for the ZIP) OR when --draft-only keeps the
+            # record a plain editable draft.
+            submit_review=not defer_zip and not draft_only,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
             abort_event=_ABORT_EVENT,
@@ -2430,6 +2441,7 @@ def _process_one_dataset_inner(
     stats: Dict[str, int],
     stats_lock: threading.Lock,
     defer_zip: bool = False,
+    draft_only: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     verify_zip_hash: bool = True,
@@ -2507,6 +2519,10 @@ def _process_one_dataset_inner(
             so ``Resources/finish_stuck_uploads.py`` can upload the ZIP and
             finish the record later.  Nothing is written to the success CSV
             or the upload tracker, because the record is not complete yet.
+        draft_only: If True (the ``--draft-only`` flag), upload everything
+            INCLUDING the ZIP but leave the record a plain editable draft —
+            skip the community-review submission and publishing.  Forwarded
+            to :func:`upload_dataset`.
         upload_attempts: Total number of PUT attempts for the data
             ZIP (``--upload-attempts`` CLI flag; companion files always
             keep the default).  Forwarded to :func:`upload_dataset`.
@@ -2593,6 +2609,7 @@ def _process_one_dataset_inner(
             references_csv=references_csv,
             project_config=project_config,
             defer_zip=defer_zip,
+            draft_only=draft_only,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
             # md5 from the integrity gate's combined digest pass — saves
@@ -2750,6 +2767,7 @@ def upload_datasets(
     esid_filter: Optional[List[str]] = None,
     workers: int = 1,
     defer_zip: bool = False,
+    draft_only: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
     verify_zip_hash: bool = True,
@@ -2804,6 +2822,10 @@ def upload_datasets(
             stay in ``Staging_Area/`` and are counted under the
             ``'deferred'`` stat.  Finish them later with
             ``Resources/finish_stuck_uploads.py``.
+        draft_only: If True (the ``--draft-only`` flag), upload everything
+            INCLUDING each ZIP but leave every record a plain editable
+            draft — skip community-review submission and publishing.
+            Mutually exclusive with ``defer_zip``.
         upload_attempts: Total number of PUT attempts for the data
             ZIP (``--upload-attempts`` CLI flag; companion files always
             keep the default).  Defaults to ``_DEFAULT_UPLOAD_ATTEMPTS``
@@ -2927,6 +2949,7 @@ def upload_datasets(
             stats=stats,
             stats_lock=stats_lock,
             defer_zip=defer_zip,
+            draft_only=draft_only,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
             verify_zip_hash=verify_zip_hash,
@@ -3167,7 +3190,26 @@ def main() -> None:
             "could no longer accept files."
         ),
     )
+    parser.add_argument(
+        "--draft-only", action="store_true",
+        help=(
+            "Upload everything INCLUDING the data ZIP, but leave each record "
+            "a plain, editable Zenodo draft: do NOT submit it to the "
+            "community review queue and do NOT publish it (this overrides "
+            "auto_publish in the config). Use it to review a fully uploaded "
+            "record on Zenodo, then submit or publish it yourself. Cannot be "
+            "combined with --defer-zip."
+        ),
+    )
     args = parser.parse_args()
+
+    # --- --draft-only and --defer-zip are contradictory (ZIP in vs out) ---
+    if args.draft_only and args.defer_zip:
+        parser.error(
+            "--draft-only and --defer-zip cannot be combined: --defer-zip "
+            "skips the ZIP for a two-phase upload, while --draft-only uploads "
+            "the ZIP and stops at a draft. Pick one."
+        )
 
     # --- Validate --workers BEFORE any other work so errors come early ---
     if args.workers < 1:
@@ -3275,7 +3317,10 @@ def main() -> None:
     logger.info("Datasets configured: %d", len(datasets))
     for ds in datasets:
         logger.info("  • %s → %s", ds.get("name", "?"), ds.get("dataset_dir", "?"))
-    logger.info("Auto-publish: %s", uploads_config.get("auto_publish", False))
+    logger.info(
+        "Auto-publish: %s",
+        uploads_config.get("auto_publish", False) and not args.draft_only,
+    )
     logger.info("Delete failures: %s", uploads_config.get("delete_failures", False))
     logger.info("Reserve DOI: %s", uploads_config.get("reserve_doi", False))
     if esid_filter:
@@ -3297,6 +3342,12 @@ def main() -> None:
             "Defer ZIP:    ON — data ZIPs will NOT be uploaded and records "
             "will NOT be submitted for review this run. Finish later with "
             "Resources/finish_stuck_uploads.py."
+        )
+    if args.draft_only:
+        logger.info(
+            "Draft only:   ON — records are uploaded in full (ZIP included) "
+            "but left as plain drafts: NO community-review submission and NO "
+            "publish. Submit or publish them yourself when ready."
         )
     if args.upload_attempts != _DEFAULT_UPLOAD_ATTEMPTS:
         logger.info(
@@ -3394,6 +3445,7 @@ def main() -> None:
             esid_filter=esid_filter,
             workers=args.workers,
             defer_zip=args.defer_zip,
+            draft_only=args.draft_only,
             upload_attempts=args.upload_attempts,
             title_guard=not args.skip_title_guard,
             verify_zip_hash=not args.skip_integrity_hash,

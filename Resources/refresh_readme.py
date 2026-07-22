@@ -170,6 +170,42 @@ def scan_staging(
     return stale, skipped
 
 
+def write_readme_state_report(
+    csv_path: Path,
+    stale: List[Tuple[str, Path]],
+    skipped: List[Tuple[str, Path, str]],
+) -> int:
+    """Write a two-column CSV of every ESID folder's README state.
+
+    Columns are ``ESID`` and ``README State``: the state is ``Current``
+    only when the folder's README.md carries the template sentinel, and
+    ``Stale`` otherwise (a missing README or an absent ZIP counts as Stale
+    — the folder is not up to date).  Built from a completed
+    :func:`scan_staging` so no folder is read twice; rows are in ESID
+    order (canonical ESIDs are zero-padded, so a lexical sort matches).
+
+    Args:
+        csv_path: Destination CSV path.
+        stale: The scan's stale ``(esid, folder)`` pairs.
+        skipped: The scan's ``(esid, folder, reason)`` entries.
+
+    Returns:
+        The number of ESID folders written.
+    """
+    rows = [(esid, "Stale") for esid, _ in stale]
+    rows += [
+        (esid, "Current" if readme_is_current(folder / "README.md")
+         else "Stale")
+        for esid, folder, _ in skipped
+    ]
+    rows.sort()
+    with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["ESID", "README State"])
+        writer.writerows(rows)
+    return len(rows)
+
+
 # ===================================================================
 #  file_list.csv row helpers
 # ===================================================================
@@ -657,6 +693,15 @@ def main() -> None:
         "--list-only", action="store_true",
         help="List stale folders without modifying anything.",
     )
+    parser.add_argument(
+        "--report", metavar="CSV",
+        help=(
+            "Also write a CSV of every ESID folder's README state "
+            "(columns: ESID, README State = Stale|Current) to this path, "
+            "reflecting the state found at scan time. Combine with "
+            "--list-only for a report-only run."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -698,6 +743,19 @@ def main() -> None:
     logger.info("%d folder(s) already current.", len(current))
     for esid, folder, reason in anomalies:
         logger.warning("  ESID %s SKIPPED (%s): %s", esid, reason, folder)
+
+    # Snapshot the state found at scan time (before any refresh).
+    if args.report:
+        try:
+            count = write_readme_state_report(
+                Path(args.report), stale, skipped
+            )
+        except OSError as exc:
+            logger.error("Could not write report %s: %s", args.report, exc)
+            sys.exit(2)
+        logger.info(
+            "Wrote README state report: %s (%d folder(s))", args.report, count,
+        )
 
     if not stale:
         logger.info("No stale README.md files — nothing to do.")

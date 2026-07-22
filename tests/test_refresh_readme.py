@@ -567,5 +567,67 @@ class TestMain(_DatasetTestCase):
         self.assertEqual(ctx.exception.code, 2)
 
 
+# ===================================================================
+#  README state report (--report CSV)
+# ===================================================================
+
+class TestStateReport(_DatasetTestCase):
+    def _run(self, argv):
+        with mock.patch.object(sys, "argv",
+                               ["refresh_readme.py", str(self.staging), *argv]):
+            with self.assertRaises(SystemExit) as ctx:
+                refresh_readme.main()
+        return ctx.exception.code
+
+    def _read_report(self, path):
+        with open(path, encoding="utf-8", newline="") as fh:
+            return list(csv.reader(fh))
+
+    def test_report_states_header_and_esid_order(self):
+        self.build_dataset("003")                    # stale (README no sentinel, has ZIP)
+        self.build_dataset("001", current=True)      # current
+        self.build_dataset("120A", with_zip=False)   # stale README, no ZIP -> Stale
+        (self.staging / "ESID_002_Staging").mkdir()  # no README at all -> Stale
+        stale, skipped = refresh_readme.scan_staging(self.staging)
+
+        out = self.root / "states.csv"
+        count = refresh_readme.write_readme_state_report(out, stale, skipped)
+        self.assertEqual(count, 4)
+
+        rows = self._read_report(out)
+        self.assertEqual(rows[0], ["ESID", "README State"])
+        self.assertEqual(rows[1:], [
+            ["001", "Current"],
+            ["002", "Stale"],
+            ["003", "Stale"],
+            ["120A", "Stale"],
+        ])
+
+    def test_cli_report_with_list_only_writes_and_modifies_nothing(self):
+        folder, _, _ = self.build_dataset("007")     # stale
+        self.build_dataset("008", current=True)      # current
+        zip_before = (folder / "ESID_007.zip").read_bytes()
+        out = self.root / "states.csv"
+
+        code = self._run(["--report", str(out), "--list-only"])
+        self.assertEqual(code, 0)
+
+        # Report written; no dataset touched.
+        self.assertEqual((folder / "ESID_007.zip").read_bytes(), zip_before)
+        rows = self._read_report(out)
+        self.assertEqual(rows[0], ["ESID", "README State"])
+        self.assertEqual(sorted(rows[1:]),
+                         [["007", "Stale"], ["008", "Current"]])
+
+    def test_report_written_even_when_nothing_stale(self):
+        # The report must be emitted before the "nothing to do" early exit,
+        # and needs no collector CSV in that case.
+        self.build_dataset("007", current=True)
+        out = self.root / "states.csv"
+        code = self._run(["--report", str(out)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self._read_report(out)[1:], [["007", "Current"]])
+
+
 if __name__ == "__main__":
     unittest.main()
