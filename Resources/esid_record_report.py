@@ -122,7 +122,7 @@ USAGE
         [--scope both|account|community]   # default: both
         [--community-id ID]
         [--project-config Resources/project_config.json]
-        [--output PATH]     # default: esid_record_report_YYYYMMDD_HHMMSS.csv
+        [--output PATH]     # default: Records/YYYYMMDD_HHMMSS_esid_record_report.csv
         [--verbose]
 
 ENVIRONMENT VARIABLES
@@ -151,6 +151,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -193,7 +194,10 @@ _MAX_PAGES_PER_SOURCE = 200
 _PAGE_SIZE_AUTHENTICATED = 100
 _PAGE_SIZE_ANONYMOUS = 25
 
-_CSV_COLUMNS = ["ESID#", "Title", "Zenodo URL", "Draft (y/n)", "DOI", "ERROR?"]
+_CSV_COLUMNS = [
+    "ESID#", "Title", "Zenodo URL", "Draft (y/n)", "DOI", "Upload Date",
+    "Last Updated", "ERROR?",
+]
 
 
 class ReportError(Exception):
@@ -218,6 +222,13 @@ class EsidRecord:
         error: ``""`` for a clean record; otherwise the anomaly
             message(s) that go into the CSV's ``ERROR?`` column (and
             would previously have aborted the whole report).
+        upload_date: The record's Zenodo ``created`` date (``YYYY-MM-DD``,
+            when the draft/record was first created on Zenodo — i.e. when
+            it was uploaded), or ``""`` when the API hit carries no
+            ``created`` field.
+        last_updated: The record's Zenodo ``updated`` date (``YYYY-MM-DD``,
+            last modification), or ``""`` when the hit carries no
+            ``updated`` field.
     """
 
     record_id: str
@@ -228,6 +239,8 @@ class EsidRecord:
     url: str
     source: str
     error: str = ""
+    upload_date: str = ""
+    last_updated: str = ""
 
     def add_error(self, message: str) -> None:
         """Append an anomaly message to this record's ``error`` field.
@@ -485,6 +498,13 @@ def record_from_hit(
         or ""
     )
     record.doi = str(doi)
+    # Upload date = the record's Zenodo "created" timestamp (draft/record
+    # creation ≈ when it was uploaded), reduced to its date portion.
+    # Present on both the account and community serializations; absent →
+    # left blank rather than guessed.
+    record.upload_date = str(hit.get("created") or "").split("T", 1)[0]
+    # Last updated = the record's "updated" timestamp (date portion).
+    record.last_updated = str(hit.get("updated") or "").split("T", 1)[0]
     links = hit.get("links") or {}
     record.url = str(links.get("self_html") or links.get("html") or "")
     if not record.url and record.record_id:
@@ -780,6 +800,8 @@ def build_rows(records: List[EsidRecord]) -> List[Dict[str, str]]:
             "Zenodo URL": rec.url,
             "Draft (y/n)": draft_cell[rec.is_draft],
             "DOI": rec.doi,
+            "Upload Date": rec.upload_date,
+            "Last Updated": rec.last_updated,
             "ERROR?": rec.error,
         }
         for rec in sorted(records, key=sort_key)
@@ -807,8 +829,11 @@ def write_report(rows: List[Dict[str, str]], output_path: Path) -> None:
 
     Args:
         rows: Self-checked row dicts from :func:`build_rows`.
-        output_path: Destination CSV path (overwritten if present).
+        output_path: Destination CSV path (overwritten if present).  Its
+            parent directory is created if missing (e.g. the default
+            ``Records/`` folder on a fresh checkout).
     """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_CSV_COLUMNS)
         writer.writeheader()
@@ -904,8 +929,8 @@ def main() -> None:
         "--output", default=None, metavar="PATH",
         help=(
             "Where to write the CSV report (default: "
-            "esid_record_report_YYYYMMDD_HHMMSS.csv in the current "
-            "directory)."
+            "Records/YYYYMMDD_HHMMSS_esid_record_report.csv under the "
+            "project root)."
         ),
     )
     parser.add_argument(
@@ -966,11 +991,16 @@ def main() -> None:
     # https://zenodo.org/api/ -> https://zenodo.org/
     web_base = base_url[:-4] if base_url.endswith("api/") else "https://zenodo.org/"
 
-    output_path = (
-        Path(args.output)
-        if args.output
-        else azus_common.timestamped_output_path("esid_record_report")
-    )
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Default: Records/<timestamp>_esid_record_report.csv (timestamp
+        # first so runs sort chronologically in a file listing).
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = (
+            azus_common.PROJECT_ROOT / "Records"
+            / f"{stamp}_esid_record_report.csv"
+        )
 
     logger.info("=" * 70)
     logger.info("AZUS ESID RECORD REPORT (read-only)")

@@ -34,9 +34,10 @@ _DEFAULT_RES = [m.compile_title_pattern(p) for p in m._DEFAULT_TITLE_PATTERNS]
 
 # --- fabricated API payloads ----------------------------------------------
 
-def invenio_hit(record_id, title, is_published, doi=None, self_html=None):
+def invenio_hit(record_id, title, is_published, doi=None, self_html=None,
+                created=None, updated=None):
     """A hit in the InvenioRDM shape (/api/user/records)."""
-    return {
+    hit = {
         "id": record_id,
         "is_published": is_published,
         "status": "published" if is_published else "draft",
@@ -44,6 +45,11 @@ def invenio_hit(record_id, title, is_published, doi=None, self_html=None):
         "pids": {"doi": {"identifier": doi}} if doi else {},
         "links": {"self_html": self_html} if self_html else {},
     }
+    if created is not None:
+        hit["created"] = created
+    if updated is not None:
+        hit["updated"] = updated
+    return hit
 
 
 def legacy_hit(record_id, title, doi=None, html=None):
@@ -328,6 +334,28 @@ class TestRecordFromHit(unittest.TestCase):
         )
         self.assertEqual(rec.error, "")
 
+    def test_upload_date_from_created(self):
+        rec = m.record_from_hit(
+            invenio_hit("109", f"{_T}015", True,
+                        created="2026-07-21T16:47:48.123456+00:00"),
+            "account", _WEB, "015",
+        )
+        self.assertEqual(rec.upload_date, "2026-07-21")
+
+    def test_upload_date_absent_is_blank(self):
+        rec = m.record_from_hit(
+            invenio_hit("110", f"{_T}016", True), "account", _WEB, "016"
+        )
+        self.assertEqual(rec.upload_date, "")  # not guessed
+
+    def test_last_updated_from_updated(self):
+        rec = m.record_from_hit(
+            invenio_hit("111", f"{_T}017", True,
+                        updated="2026-07-22T09:00:00+00:00"),
+            "account", _WEB, "017",
+        )
+        self.assertEqual(rec.last_updated, "2026-07-22")
+
     def test_missing_both_status_fields_gets_error(self):
         rec = m.record_from_hit(
             {"id": "106", "metadata": {"title": f"{_T}011"}},
@@ -517,11 +545,14 @@ class TestBuildRowsAndCsv(unittest.TestCase):
     def _records(self):
         return [
             m.EsidRecord("300", f"{_T}010", "010", "", True,
-                         "https://zenodo.org/uploads/300", "account"),
+                         "https://zenodo.org/uploads/300", "account",
+                         upload_date="2026-07-20", last_updated="2026-07-21"),
             m.EsidRecord("100", f"{_T}002", "002", "10.5281/zenodo.100", False,
-                         "https://zenodo.org/records/100", "community+account"),
+                         "https://zenodo.org/records/100", "community+account",
+                         upload_date="2026-07-18", last_updated="2026-07-19"),
             m.EsidRecord("200", f"{_T}002", "002", "", True,
-                         "https://zenodo.org/uploads/200", "account"),
+                         "https://zenodo.org/uploads/200", "account",
+                         upload_date="2026-07-19", last_updated="2026-07-20"),
         ]
 
     def test_rows_sorted_and_flagged(self):
@@ -529,16 +560,16 @@ class TestBuildRowsAndCsv(unittest.TestCase):
         self.assertEqual(
             [
                 (r["ESID#"], r["Title"], r["Zenodo URL"], r["Draft (y/n)"],
-                 r["DOI"], r["ERROR?"])
+                 r["DOI"], r["Upload Date"], r["Last Updated"], r["ERROR?"])
                 for r in rows
             ],
             [
                 ("002", f"{_T}002", "https://zenodo.org/records/100", "n",
-                 "10.5281/zenodo.100", ""),
+                 "10.5281/zenodo.100", "2026-07-18", "2026-07-19", ""),
                 ("002", f"{_T}002", "https://zenodo.org/uploads/200", "y",
-                 "", ""),
+                 "", "2026-07-19", "2026-07-20", ""),
                 ("010", f"{_T}010", "https://zenodo.org/uploads/300", "y",
-                 "", ""),
+                 "", "2026-07-20", "2026-07-21", ""),
             ],
         )
 
@@ -551,7 +582,8 @@ class TestBuildRowsAndCsv(unittest.TestCase):
                 content = list(csv.reader(fh))
         self.assertEqual(
             content[0],
-            ["ESID#", "Title", "Zenodo URL", "Draft (y/n)", "DOI", "ERROR?"],
+            ["ESID#", "Title", "Zenodo URL", "Draft (y/n)", "DOI",
+             "Upload Date", "Last Updated", "ERROR?"],
         )
         self.assertEqual(len(content), 1 + 3)
 
