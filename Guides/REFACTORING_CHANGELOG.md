@@ -1,5 +1,17 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — esid_record_report: Upload Date + Last Updated columns
+
+`Resources/esid_record_report.py` (the Zenodo-side "ground truth" inventory)
+gains two date columns before `ERROR?`: **Upload Date** (the record's Zenodo
+`created`, date portion) and **Last Updated** (its `updated`, date portion).
+A "date published on Zenodo" column was considered and dropped — the API
+listings expose no clean publish timestamp (only `created`, `updated`, and the
+user-set `metadata.publication_date`, which for these datasets is the eclipse
+date, not the publish moment). The default output is now
+`Records/YYYYMMDD_HHMMSS_esid_record_report.csv` (timestamp-first, folder
+auto-created). 3 new tests.
+
 ## July 2026 — File-by-file upload fallback for ZIPs that keep timing out
 
 Large data ZIPs sometimes time out mid-transfer, losing hours per attempt.
