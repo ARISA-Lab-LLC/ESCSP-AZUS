@@ -60,6 +60,23 @@ Python code.
   at a time — each gets the full upload bandwidth and the shortest
   possible transfer window, so the fewest connection-drop failures — and
   submits each completed record for review.
+- **File-by-file fallback for ZIPs that keep timing out** — when a large ZIP
+  repeatedly fails with ONLY the ZIP left to upload and `number_of_tries` has
+  reached a threshold, `finish_stuck_uploads.py --enable-file-by-file
+  --raw-data-dir <root>` switches that ESID to uploading the individual WAVs
+  (straight from `Raw_Data/`) + `CONFIG.TXT` in place of the ZIP — small files
+  rarely time out and a single failure is cheap to retry. The switch is
+  recorded as `mode: file_by_file` in `upload_state.json`, so the ZIP pipeline
+  (`standalone_tasks.py`) skips that ESID and the two never touch the same
+  record; each raw file is SHA-512-checked against the prep manifest before
+  upload; and the record is submitted/published only after every WAV +
+  `CONFIG.TXT` + companion file is committed on Zenodo. A ZIP that already
+  uploaded successfully (committed) is **never deleted** — the switch aborts
+  and leaves the good ZIP untouched; only a failed/incomplete ZIP slot is
+  cleared. Opt-in and conservative (default `--tries-threshold 3`;
+  set it high to keep retrying the ZIP). Covered by
+  `tests/test_file_by_file_upload.py`, `tests/test_req9_skip.py`, and
+  `tests/test_finish_stuck_file_by_file.py`.
 - **Interrupted-prep detection** — `prepare_dataset.py` moves into
   `Staging_Area/` via a two-phase atomic pattern and writes a `.prep_complete`
   sentinel file as its very last action. `prep_all_datasets.py`'s skip check

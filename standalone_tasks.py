@@ -2349,6 +2349,20 @@ def get_upload_data(
                     )
                     continue
 
+            # Requirement 9: never let the ZIP pipeline touch an ESID that
+            # has been switched to file-by-file mode — only the file-by-file
+            # tool (finish_stuck_uploads.py --enable-file-by-file) finishes
+            # it, so the two never fight over the same Zenodo record. Skip
+            # CLEANLY here (before the no-ZIP failure-row path below), so a
+            # file-by-file folder is not logged as a failure every run.
+            if azus_common.read_upload_mode(subdir) == azus_common.FILE_BY_FILE_MODE:
+                logger.info(
+                    "  Skipping %s — upload_state.json marks it file-by-file "
+                    "mode (finish with finish_stuck_uploads.py "
+                    "--enable-file-by-file).", subdir.name,
+                )
+                continue
+
             # A staging folder with no ZIP cannot be uploaded.  This used
             # to be skipped with NO logging at all — a mis-staged dataset
             # simply vanished from the run.  Now it is loud and recorded.
@@ -2420,6 +2434,44 @@ def get_upload_data(
 
     logger.info("Prepared %d dataset(s) for upload", len(upload_data))
     return upload_data
+
+
+def archive_staging_to_uploaded(
+    staging_folder: Path, esid: str, tag: str = ""
+) -> Optional[Path]:
+    """Move a completed staging folder into ``Uploaded_Data/ESID_XXX_Uploaded/``.
+
+    Per-ESID file I/O on a unique path (no two workers ever touch the same
+    folder), so no lock is needed.  An existing destination is replaced.
+    Any failure is logged and swallowed (returns ``None``) so a local move
+    problem never undoes an already-successful Zenodo upload.
+
+    Args:
+        staging_folder: The ESID's staging folder to archive.
+        esid: Canonical ESID string (names the destination folder).
+        tag: Optional log prefix (e.g. ``"[ESID 073]"``).
+
+    Returns:
+        The destination path on a successful move, or ``None`` if the move
+        was skipped (folder absent) or failed.
+    """
+    try:
+        if not staging_folder.is_dir():
+            return None
+        uploaded_dir = azus_common.UPLOADED_DATA
+        destination = uploaded_dir / f"ESID_{esid}_Uploaded"
+        uploaded_dir.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            logger.warning(
+                "%s Replacing existing uploaded folder: %s", tag, destination,
+            )
+            shutil.rmtree(destination)
+        shutil.move(str(staging_folder), str(destination))
+        logger.info("%s Archived staging folder to: %s", tag, destination)
+        return destination
+    except Exception as exc:
+        logger.warning("%s Could not move staging folder: %s", tag, exc)
+        return None
 
 
 def _process_one_dataset_inner(
@@ -2555,6 +2607,22 @@ def _process_one_dataset_inner(
             stats["aborted"] = stats.get("aborted", 0) + 1
         return
 
+    # Requirement 9 (second guard): never run the ZIP pipeline on an ESID in
+    # file-by-file mode. get_upload_data already skips these at discovery,
+    # but a switch that flipped the mode AFTER discovery (TOCTOU) or any
+    # direct caller of this function could still arrive here — and this must
+    # precede the ZIP integrity gate below, which would otherwise open a
+    # stale or absent ZIP.
+    staging_folder = Path(data.zip_file).resolve().parent
+    if azus_common.read_upload_mode(staging_folder) == azus_common.FILE_BY_FILE_MODE:
+        logger.info(
+            "%s Skipped — file-by-file mode (finish with "
+            "finish_stuck_uploads.py --enable-file-by-file).", tag,
+        )
+        with stats_lock:
+            stats["skipped"] = stats.get("skipped", 0) + 1
+        return
+
     logger.info("%s Starting (dataset %d of %d)", tag, index, total)
 
     # --- Step 0: integrity gate — nothing uploads past a problem ---
@@ -2663,28 +2731,12 @@ def _process_one_dataset_inner(
             tracker.mark_uploaded(data.zip_file)
 
         # Archive the staging folder into Uploaded_Data/ESID_XXX_Uploaded/.
-        # This is per-ESID file I/O on a unique path (no two threads ever
-        # touch the same staging folder), so no lock is needed here.
-        # We catch any error and log it as a warning so that a local move
-        # failure does NOT undo the (already successful) Zenodo upload.
-        try:
-            staging_folder = Path(data.zip_file).resolve().parent
-            if staging_folder.is_dir():
-                uploaded_dir = Path(__file__).resolve().parent / "Uploaded_Data"
-                destination = uploaded_dir / f"ESID_{data.esid}_Uploaded"
-                uploaded_dir.mkdir(parents=True, exist_ok=True)
-                if destination.exists():
-                    logger.warning(
-                        "%s Replacing existing uploaded folder: %s",
-                        tag, destination,
-                    )
-                    shutil.rmtree(destination)
-                shutil.move(str(staging_folder), str(destination))
-                logger.info("%s Archived staging folder to: %s", tag, destination)
-        except Exception as exc:
-            logger.warning(
-                "%s Could not move staging folder: %s", tag, exc,
-            )
+        # Per-ESID file I/O on a unique path (no two threads touch the same
+        # folder), so no lock is needed. Failures are logged, not fatal —
+        # a local move problem must not undo the successful Zenodo upload.
+        archive_staging_to_uploaded(
+            Path(data.zip_file).resolve().parent, data.esid, tag,
+        )
 
         # Append the success row to successful_results.csv (lock-guarded).
         with results_lock:

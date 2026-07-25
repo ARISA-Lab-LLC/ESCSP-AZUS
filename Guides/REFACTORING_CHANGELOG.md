@@ -1,5 +1,41 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — File-by-file upload fallback for ZIPs that keep timing out
+
+Large data ZIPs sometimes time out mid-transfer, losing hours per attempt.
+A new OPT-IN fallback uploads a stuck ESID's individual WAVs (straight from
+`Raw_Data/`) + `CONFIG.TXT` + the standalone companions to the SAME existing
+Zenodo draft, in place of the ZIP.
+
+- **New `Resources/file_by_file_upload.py`** — reuses
+  `standalone_uploader.upload_to_zenodo` (resume + per-file md5 verify) with
+  a swapped file list. Safety gates: the required set is derived from the prep
+  `file_list.csv` + manifest (a missing/under-collected file aborts before any
+  upload); each raw WAV/CONFIG is SHA-512-checked against the manifest; a 404
+  draft aborts (never mints a duplicate); a COMMITTED (successful) ZIP aborts
+  the switch and is left untouched (only a failed/incomplete ZIP slot is
+  cleared — file-by-file engages only when the ZIP keeps failing); and the
+  record is submitted/published ONLY after a completeness gate confirms every
+  required file is committed and the ZIP is gone.
+- **`finish_stuck_uploads.py`** gains `--enable-file-by-file`,
+  `--tries-threshold N` (default 3), `--raw-data-dir PATH`. It continues
+  already-file-by-file ESIDs and auto-switches a ZIP-mode ESID only when the
+  ZIP is the SOLE missing file AND `number_of_tries >= threshold`. Default
+  behavior (no flag) is unchanged.
+- **Requirement 9** — `standalone_tasks.py` SKIPS any staging folder marked
+  `mode: file_by_file` in `upload_state.json`, at TWO guard points
+  (`get_upload_data` discovery, and the top of `_process_one_dataset_inner`
+  before the ZIP integrity gate), so the ZIP and file-by-file paths never
+  touch the same record.
+- **State-writer hardening** — `upload_state.json` is now written by
+  read-MERGE (`_write_upload_state`), preserving the `mode` marker across
+  resume writes; `azus_common.read_upload_mode` is the shared reader.
+- 26 new tests (`test_file_by_file_upload.py`, `test_req9_skip.py`,
+  `test_state_merge.py`, `test_finish_stuck_file_by_file.py`); suite at 476.
+  Reverting file-by-file → ZIP is intentionally NOT automated (it would
+  require deleting committed files); set `--tries-threshold` high to suppress
+  auto-switching, and reset manually if a revert is ever needed.
+
 ## July 2026 — `number_of_tries` attempt counter in `upload_state.json`
 
 Every upload attempt against an ESID record (fresh create, resume,

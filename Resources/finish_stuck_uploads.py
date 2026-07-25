@@ -269,6 +269,190 @@ def run_recovery(
 
 
 # =====================================================================
+#  File-by-file fallback (opt-in: --enable-file-by-file)
+# =====================================================================
+
+def _load_publish_config(config_path: str) -> Tuple[Optional[str], bool, bool]:
+    """Read the publish-gate settings the file-by-file path needs.
+
+    ``community_id`` comes from ``project_config.json`` (referenced by
+    config.json's ``project_config`` key); ``reserve_doi`` and
+    ``auto_publish`` come from config.json's ``uploads`` section — the same
+    sources standalone_tasks.py uses.  Any read problem is logged and
+    tolerated (falling back to no community, no DOI, no auto-publish) so a
+    config quirk never crashes recovery.
+
+    Args:
+        config_path: Path to AZUS config.json (relative paths resolve
+            against the project root).
+
+    Returns:
+        A ``(community_id, reserve_doi, auto_publish)`` tuple.
+    """
+    community_id: Optional[str] = None
+    reserve_doi = False
+    auto_publish = False
+    try:
+        cfg_file = Path(config_path)
+        if not cfg_file.is_absolute():
+            cfg_file = _PROJECT_ROOT / config_path
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+        uploads = cfg.get("uploads", {}) or {}
+        reserve_doi = bool(uploads.get("reserve_doi", False))
+        auto_publish = bool(uploads.get("auto_publish", False))
+        pc_path = cfg.get("project_config")
+        if pc_path:
+            pc_file = Path(pc_path)
+            if not pc_file.is_absolute():
+                pc_file = _PROJECT_ROOT / pc_path
+            pc = json.loads(pc_file.read_text(encoding="utf-8"))
+            community_id = (pc.get("community_id") or "") or None
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not fully read publish config from %s (%s) — proceeding "
+            "with community_id=%s, reserve_doi=%s, auto_publish=%s.",
+            config_path, exc, community_id, reserve_doi, auto_publish,
+        )
+    return community_id, reserve_doi, auto_publish
+
+
+def _run_with_file_by_file(
+    stuck: List[Tuple[int, str, Path, str]], args: argparse.Namespace
+) -> int:
+    """Finish stuck ESIDs with the file-by-file fallback enabled.
+
+    ZIP-mode ESIDs are first attempted via the normal ZIP shell-out
+    (Phase A). Then (Phase B) every ESID already in file-by-file mode is
+    continued, and every ZIP-mode ESID still stuck AND meeting the switch
+    condition (``number_of_tries >= --tries-threshold`` AND only the ZIP is
+    missing) is switched to file-by-file — all in this one run.
+
+    Args:
+        stuck: The discovered ``(sort_key, esid, folder, record_id)`` list
+            (already ``--esid``-filtered).
+        args: Parsed CLI arguments.
+
+    Returns:
+        Process exit code: 0 if every ESID is now finished, 1 if any still
+        failed, 2 on a usage/environment error (missing raw dir or creds).
+    """
+    import file_by_file_upload as fbf
+    from standalone_uploader import (
+        get_credentials_from_env, _read_number_of_tries,
+    )
+
+    raw_root = Path(args.raw_data_dir)
+    if not raw_root.is_dir():
+        logger.error("Raw data folder not found: %s", raw_root)
+        return 2
+    try:
+        credentials = get_credentials_from_env()
+    except ValueError as exc:
+        logger.error("%s", exc)
+        logger.error("Run: source Resources/set_env.sh")
+        return 2
+
+    community_id, reserve_doi, auto_publish = _load_publish_config(args.config)
+    raw_by_esid = {
+        padded: folder
+        for _, padded, folder in azus_common.find_esid_folders(raw_root)
+    }
+
+    zip_stuck = [
+        t for t in stuck
+        if azus_common.read_upload_mode(t[2]) != azus_common.FILE_BY_FILE_MODE
+    ]
+    fbf_stuck = [t for t in stuck if t not in zip_stuck]
+
+    def _do_fbf(padded: str, folder: Path, record_id: str) -> bool:
+        """Run the file-by-file helper for one ESID; False if raw is missing.
+
+        Args:
+            padded: Canonical ESID string.
+            folder: The staging folder.
+            record_id: The Zenodo draft/record id.
+
+        Returns:
+            True on a fully successful file-by-file finish, else False.
+        """
+        raw_folder = raw_by_esid.get(padded)
+        if raw_folder is None:
+            logger.error(
+                "[ESID %s] No matching Raw_Data folder under %s — cannot "
+                "upload file-by-file.", padded, raw_root,
+            )
+            return False
+        return fbf.run_file_by_file(
+            esid=padded, staging_dir=folder, raw_dir=raw_folder,
+            record_id=record_id, credentials=credentials,
+            community_id=community_id, reserve_doi=reserve_doi,
+            auto_publish=auto_publish,
+        )
+
+    failures: List[str] = []
+    switched: List[str] = []
+
+    # Phase A: attempt the ZIP finish for ZIP-mode ESIDs (unchanged path).
+    if zip_stuck:
+        logger.info(
+            "Phase A: ZIP finish for %d ESID(s) via standalone_tasks...",
+            len(zip_stuck),
+        )
+        run_recovery(
+            stuck_esids=[p for _, p, _, _ in zip_stuck],
+            config_path=args.config, workers=args.workers,
+            upload_attempts=args.upload_attempts,
+            skip_date_check=args.skip_date_check,
+        )
+
+    # Phase B1: continue ESIDs already in file-by-file mode.
+    for _, padded, folder, record_id in fbf_stuck:
+        logger.info("[ESID %s] Continuing file-by-file upload...", padded)
+        (switched if _do_fbf(padded, folder, record_id)
+         else failures).append(padded)
+
+    # Phase B2: evaluate the switch for ZIP-mode ESIDs still stuck.
+    for _, padded, folder, record_id in zip_stuck:
+        if not (folder.is_dir() and (folder / _STATE_FILENAME).is_file()):
+            continue  # finished by Phase A (moved to Uploaded_Data)
+        tries = _read_number_of_tries(folder / _STATE_FILENAME)
+        if tries < args.tries_threshold:
+            logger.info(
+                "[ESID %s] Not switching — number_of_tries=%d < threshold=%d "
+                "(the ZIP will be retried on the next run).",
+                padded, tries, args.tries_threshold,
+            )
+            failures.append(padded)
+            continue
+        if not fbf.only_zip_missing(credentials, record_id, folder, padded):
+            logger.info(
+                "[ESID %s] Not switching — the ZIP is not the sole missing "
+                "file (a companion also failed) or the ZIP is already "
+                "complete.", padded,
+            )
+            failures.append(padded)
+            continue
+        logger.warning(
+            "[ESID %s] SWITCHING to file-by-file (tries=%d >= %d, only the "
+            "ZIP is missing)...", padded, tries, args.tries_threshold,
+        )
+        (switched if _do_fbf(padded, folder, record_id)
+         else failures).append(padded)
+
+    logger.info("=" * 70)
+    logger.info(
+        "File-by-file recovery: %d finished via file-by-file, %d still failing.",
+        len(switched), len(failures),
+    )
+    if switched:
+        logger.info("Finished file-by-file: %s", ", ".join(switched))
+    if failures:
+        logger.error("Still failing (re-run to retry): %s", ", ".join(failures))
+        return 1
+    return 0
+
+
+# =====================================================================
 #  Main
 # =====================================================================
 
@@ -338,6 +522,35 @@ def main() -> None:
             "before committing to a multi-hour batch."
         ),
     )
+    parser.add_argument(
+        "--enable-file-by-file", action="store_true",
+        help=(
+            "Enable the file-by-file FALLBACK. For an ESID whose ZIP finish "
+            "still fails with ONLY the ZIP missing after --tries-threshold "
+            "attempts, switch it to uploading the individual WAVs (from "
+            "Raw_Data) + CONFIG.TXT instead of the ZIP; and CONTINUE any ESID "
+            "already in file-by-file mode. Requires --raw-data-dir. Without "
+            "this flag, file-by-file ESIDs are skipped by the ZIP pipeline and "
+            "reported."
+        ),
+    )
+    parser.add_argument(
+        "--tries-threshold", type=int, default=3, metavar="N",
+        help=(
+            "With --enable-file-by-file: the number_of_tries (from "
+            "upload_state.json) at or above which a ZIP-only-missing ESID is "
+            "switched to file-by-file (default: 3). Set high to keep retrying "
+            "the ZIP and suppress auto-switching."
+        ),
+    )
+    parser.add_argument(
+        "--raw-data-dir", metavar="PATH",
+        help=(
+            "Root folder holding the raw ESID#NNN subfolders (the WAVs + "
+            "CONFIG.TXT). Required with --enable-file-by-file — file-by-file "
+            "uploads the individual audio files straight from here."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Validate --workers up front (mirror standalone_tasks.py) ---
@@ -351,6 +564,17 @@ def main() -> None:
         parser.error(
             f"--upload-attempts must be between 1 and 3 (got "
             f"{args.upload_attempts})."
+        )
+
+    # --- File-by-file requires a raw-data root (WAVs live only there) ---
+    if args.enable_file_by_file and not args.raw_data_dir:
+        parser.error(
+            "--enable-file-by-file requires --raw-data-dir <Raw_Data root> "
+            "(the individual WAVs + CONFIG.TXT are uploaded from there)."
+        )
+    if args.tries_threshold < 1:
+        parser.error(
+            f"--tries-threshold must be at least 1 (got {args.tries_threshold})."
         )
 
     # --- Configure logging ---
@@ -447,6 +671,29 @@ def main() -> None:
             len(stuck),
         )
         sys.exit(0)
+
+    # --- File-by-file fallback path (opt-in) ---
+    if args.enable_file_by_file:
+        logger.info("")
+        logger.info(
+            "File-by-file fallback ENABLED (threshold=%d, raw=%s).",
+            args.tries_threshold, args.raw_data_dir,
+        )
+        sys.exit(_run_with_file_by_file(stuck, args))
+
+    # Warn about any file-by-file ESIDs the ZIP pipeline will SKIP so they
+    # are never silently un-finishable.
+    fbf_present = [
+        padded for _, padded, folder, _ in stuck
+        if azus_common.read_upload_mode(folder) == azus_common.FILE_BY_FILE_MODE
+    ]
+    if fbf_present:
+        logger.warning(
+            "%d ESID(s) are in file-by-file mode and will be SKIPPED by the "
+            "ZIP pipeline: %s. Re-run with --enable-file-by-file --raw-data-dir "
+            "<Raw_Data root> to finish them.",
+            len(fbf_present), ", ".join(fbf_present),
+        )
 
     # --- Delegate to standalone_tasks.py ---
     # standalone_tasks.py prints its own "Proceed? (yes/no)" prompt before

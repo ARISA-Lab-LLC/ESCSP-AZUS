@@ -38,6 +38,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import logging
 import re
 import sys
@@ -66,6 +67,14 @@ PREP_SENTINEL = ".prep_complete"
 # staging folder to its Zenodo draft so re-runs RESUME instead of
 # creating a duplicate record.
 STATE_FILENAME = "upload_state.json"
+
+# Value of upload_state.json's optional "mode" key when an ESID has been
+# switched from ZIP-archive upload to per-file upload (individual WAVs +
+# CONFIG.TXT instead of the ZIP). The ZIP-based pipeline
+# (standalone_tasks.py) SKIPS any staging folder marked this way — only
+# the file-by-file tool (finish_stuck_uploads.py --enable-file-by-file)
+# finishes it — so the two never fight over the same Zenodo record.
+FILE_BY_FILE_MODE = "file_by_file"
 
 # Read-buffer size for streaming file hashes (64 KB).
 HASH_BUFFER_SIZE = 65_536
@@ -499,6 +508,38 @@ def calculate_sha512(filepath: str) -> str:
         Hex-encoded SHA-512 digest string.
     """
     return calculate_digests(filepath, ("sha512",))["sha512"]
+
+
+def read_upload_mode(staging_folder: Path) -> Optional[str]:
+    """Read the optional ``"mode"`` from a staging folder's upload_state.json.
+
+    The single source of truth for "is this ESID in file-by-file mode?",
+    used by the ZIP pipeline's skip guards and by the file-by-file tool.
+    Absent state file, missing key, or any read/parse error all yield
+    ``None`` (treated as ordinary ZIP mode) — never raises.
+
+    Args:
+        staging_folder: The ``ESID_NNN_Staging`` folder to inspect.
+
+    Returns:
+        The ``"mode"`` string (e.g. :data:`FILE_BY_FILE_MODE`), or ``None``
+        when no mode is recorded.
+    """
+    state_file = staging_folder / STATE_FILENAME
+    if not state_file.is_file():
+        return None
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not read upload mode from %s (%s) — assuming ZIP mode.",
+            state_file, exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("mode")
+    return mode if isinstance(mode, str) else None
 
 
 def configure_logging(verbose: bool = False) -> None:

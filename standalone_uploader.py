@@ -126,6 +126,35 @@ def _calculate_md5(file_path: str) -> str:
     return md5.hexdigest()
 
 
+def _read_state(state_file: Path) -> Dict[str, Any]:
+    """Read an existing ``upload_state.json`` into a dict.
+
+    Returns an empty dict when the file is absent, unreadable, malformed,
+    or does not decode to a JSON object.  Used both to read the attempt
+    counter and to read-merge the state on write so keys this module does
+    not manage (e.g. ``"mode": "file_by_file"`` written by the
+    file-by-file fallback) are preserved rather than clobbered.
+
+    Args:
+        state_file: Path to the ESID's ``upload_state.json``.
+
+    Returns:
+        The parsed state dict, or ``{}`` on any problem.
+    """
+    if not state_file.is_file():
+        return {}
+    try:
+        import json as _json
+        data = _json.loads(state_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not read upload state from %s (%s) — treating as empty.",
+            state_file, exc,
+        )
+        return {}
+
+
 def _read_number_of_tries(state_file: Path) -> int:
     """Read the attempt counter from an existing ``upload_state.json``.
 
@@ -140,18 +169,54 @@ def _read_number_of_tries(state_file: Path) -> int:
     Returns:
         The prior attempt count (never negative).
     """
-    if not state_file.is_file():
+    try:
+        return max(0, int(_read_state(state_file).get("number_of_tries", 0)))
+    except (ValueError, TypeError):
         return 0
+
+
+def _write_upload_state(
+    state_file_path: str, record_id: str, is_resume: bool
+) -> None:
+    """Write/refresh ``upload_state.json``, preserving unmanaged keys.
+
+    Read-MERGE, not rebuild: any keys this module does not manage — notably
+    ``"mode": "file_by_file"`` written by the file-by-file fallback — are
+    preserved.  Only ``record_id``/``created_at``/``zenodo_url``/``resumed``
+    are (re)set, and ``number_of_tries`` advances from the prior value (0
+    if absent/legacy).  Best-effort: any failure is logged, not raised.
+
+    Args:
+        state_file_path: Path to the ESID's ``upload_state.json``.
+        record_id: The Zenodo record id to record.
+        is_resume: Whether this run resumed an existing draft.
+    """
     try:
         import json as _json
-        state = _json.loads(state_file.read_text(encoding="utf-8"))
-        return max(0, int(state.get("number_of_tries", 0)))
-    except (OSError, ValueError, TypeError) as exc:
-        logger.warning(
-            "Could not read number_of_tries from %s (%s) — counting "
-            "from 0.", state_file, exc,
+        from datetime import datetime as _dt
+        state_path = Path(state_file_path)
+        state = _read_state(state_path)
+        try:
+            prior_tries = max(0, int(state.get("number_of_tries", 0)))
+        except (ValueError, TypeError):
+            prior_tries = 0
+        state.update({
+            "record_id": str(record_id),
+            "created_at": _dt.now().isoformat(timespec="seconds"),
+            "zenodo_url": f"https://zenodo.org/uploads/{record_id}",
+            "resumed": is_resume,
+            "number_of_tries": prior_tries + 1,
+        })
+        state_path.write_text(_json.dumps(state, indent=2), encoding="utf-8")
+        logger.info(
+            "  Wrote upload state file (attempt #%d): %s",
+            state["number_of_tries"], state_file_path,
         )
-        return 0
+    except Exception as state_exc:
+        logger.warning(
+            "Could not write upload state file %s: %s",
+            state_file_path, state_exc,
+        )
 
 
 def _remote_entry_mismatch(
@@ -1672,37 +1737,7 @@ def upload_to_zenodo(
 
         # --- Write resume-state file (idempotent — safe to overwrite) ---
         if state_file_path and record_id:
-            try:
-                import json as _json
-                from datetime import datetime as _dt
-                state = {
-                    "record_id": str(record_id),
-                    "created_at": _dt.now().isoformat(timespec="seconds"),
-                    "zenodo_url": f"https://zenodo.org/uploads/{record_id}",
-                    "resumed": is_resume,
-                    # Attempt counter: starts at 0 conceptually; every run
-                    # that gets far enough to upload against this record
-                    # (fresh create, resume, defer-zip phase 1, recovery
-                    # via finish_stuck_uploads) counts as one attempt.
-                    # A pre-existing state file WITHOUT the field (written
-                    # by an older AZUS) is treated as 0 and advanced —
-                    # the field is created on the next attempt.
-                    "number_of_tries": _read_number_of_tries(
-                        Path(state_file_path)
-                    ) + 1,
-                }
-                Path(state_file_path).write_text(
-                    _json.dumps(state, indent=2), encoding="utf-8"
-                )
-                logger.info(
-                    "  Wrote upload state file (attempt #%d): %s",
-                    state["number_of_tries"], state_file_path,
-                )
-            except Exception as state_exc:
-                logger.warning(
-                    "Could not write upload state file %s: %s",
-                    state_file_path, state_exc,
-                )
+            _write_upload_state(state_file_path, str(record_id), is_resume)
 
         # --- Reserve the DOI early when requested (reserve_doi config) ---
         # Runs for fresh drafts AND resumes, so a --defer-zip phase-1 run
