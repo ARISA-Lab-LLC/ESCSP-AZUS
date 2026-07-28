@@ -1138,8 +1138,14 @@ def create_upload_manifest(output_dir: Path, esid: str) -> Path:
     manifest_name = f"ESID_{esid}_to_upload.csv"
     manifest_path = output_dir / manifest_name
 
-    # Exclude the manifest itself plus any internal-only files
-    excludes = _MANIFEST_EXCLUDES | {manifest_name}
+    # Exclude the manifest itself, any internal-only files, and the
+    # file-by-file fallback's manifest archives — those are local
+    # provenance of what each upload strategy tried, not dataset content.
+    excludes = _MANIFEST_EXCLUDES | {
+        manifest_name,
+        azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(esid=esid),
+        azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=esid),
+    }
 
     rows: List[Dict[str, str]] = []
 
@@ -1194,13 +1200,21 @@ def create_upload_manifest(output_dir: Path, esid: str) -> Path:
 #  CLI entry point
 # ===================================================================
 
-# Upload-pipeline artifacts that must SURVIVE a re-prep.  They are the
-# only link between a staging folder and its Zenodo draft:
+# Upload-pipeline artifacts that must SURVIVE a re-prep.  The first two
+# are the only link between a staging folder and its Zenodo draft:
 #   * upload_state.json           — the draft's record_id (resume marker)
 #   * ESID_XXX_request_log.json   — draft-creation log; also holds the id
 # Destroying them (as the re-prep rmtree used to) orphans the existing
 # draft on Zenodo, and the next upload run creates a DUPLICATE record.
-_UPLOAD_ARTIFACT_PATTERNS = ("upload_state.json", "ESID_*_request_log.json")
+# The last two are the file-by-file fallback's manifest archives: the
+# record of what each upload strategy tried.  A re-prep is exactly when
+# that history matters most, so it must not be rmtree'd away either.
+_UPLOAD_ARTIFACT_PATTERNS = (
+    "upload_state.json",
+    "ESID_*_request_log.json",
+    "ESID_*_zip_attempt_upload.csv",
+    "ESID_*_file_by_file_upload.csv",
+)
 
 
 def _stash_upload_artifacts(folder: Path, stash_dir: Path) -> List[str]:

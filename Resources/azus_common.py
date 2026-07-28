@@ -76,6 +76,17 @@ STATE_FILENAME = "upload_state.json"
 # finishes it — so the two never fight over the same Zenodo record.
 FILE_BY_FILE_MODE = "file_by_file"
 
+# Provenance archives of the upload manifest, written by the file-by-file
+# fallback when it rewrites ESID_NNN_to_upload.csv.  The zip_attempt copy
+# is the manifest AS IT WAS for the ZIP upload (written ONCE, never
+# overwritten); the file_by_file copy mirrors the rewritten manifest.  Kept
+# so anyone can later examine exactly what each strategy tried to upload.
+# They live HERE because prepare_dataset.py must know them too — to keep
+# them out of the upload manifest it builds, and to carry them across a
+# re-prep (see its _UPLOAD_ARTIFACT_PATTERNS).
+MANIFEST_ARCHIVE_ZIP_ATTEMPT = "ESID_{esid}_zip_attempt_upload.csv"
+MANIFEST_ARCHIVE_FILE_BY_FILE = "ESID_{esid}_file_by_file_upload.csv"
+
 # Read-buffer size for streaming file hashes (64 KB).
 HASH_BUFFER_SIZE = 65_536
 

@@ -248,20 +248,55 @@ def rewrite_manifest_file_by_file(
     WAVs + CONFIG.TXT + companions, not the ZIP.  (The manifest is not
     re-consumed for the upload; the file-by-file tool builds its own list.)
 
+    Two provenance copies are kept beside it so the history of what each
+    strategy tried survives the rewrite:
+
+    * ``ESID_NNN_zip_attempt_upload.csv`` — the manifest AS IT WAS for the
+      ZIP attempt.  Written ONCE: on a re-run the live manifest is already
+      the file-by-file version, and copying it again would overwrite the
+      original ZIP-attempt history with a duplicate of the new set.
+    * ``ESID_NNN_file_by_file_upload.csv`` — a mirror of the new manifest.
+
+    Neither copy is uploaded: they are not in the upload list this module
+    builds, and prepare_dataset.py excludes them from the manifest it
+    generates on a re-prep.
+
     Args:
         staging_dir: The staging folder.
         esid: Canonical ESID string.
         entries: ``(file_name, note)`` pairs to list, in upload order.
     """
     path = staging_dir / _MANIFEST_TEMPLATE.format(esid=esid)
+
+    # Snapshot the ZIP-attempt manifest BEFORE the rewrite destroys it.
+    # Fail-closed by design: this runs ahead of the overwrite, so an I/O
+    # error here aborts the ESID (run_file_by_file's handler) with the
+    # original manifest still intact.
+    zip_attempt = staging_dir / azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(
+        esid=esid
+    )
+    if path.is_file() and not zip_attempt.is_file():
+        _atomic_write_bytes(zip_attempt, path.read_bytes())
+        logger.info("  Archived the ZIP-attempt manifest as %s.",
+                    zip_attempt.name)
+
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=["File Name", "Notes"])
     writer.writeheader()
     for name, note in entries:
         writer.writerow({"File Name": name, "Notes": note})
-    _atomic_write_bytes(path, buf.getvalue().encode("utf-8"))
+    data = buf.getvalue().encode("utf-8")
+    _atomic_write_bytes(path, data)
     logger.info("  Rewrote %s to the file-by-file set (%d files).",
                 path.name, len(entries))
+
+    # Mirror the new manifest, so the file-by-file set stays legible even
+    # if a later run rewrites the live manifest again.
+    fbf_copy = staging_dir / azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(
+        esid=esid
+    )
+    _atomic_write_bytes(fbf_copy, data)
+    logger.info("  Archived the file-by-file manifest as %s.", fbf_copy.name)
 
 
 # ===================================================================

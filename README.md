@@ -95,6 +95,21 @@ Python code.
   unreliable ZIP size fields). macOS `._*` sidecar files are excluded.
   Exit 1 on any problem or cross-check discrepancy. Covered by
   `tests/test_audit_wav_integrity.py`.
+- **Oversized-site split** — `Resources/split_oversized_raw_folders.py` fills an
+  `ESID#NNN_Part_2_of_2` raw folder from its `ESID#NNN_Part_1_of_2` twin, for
+  sites too large for Zenodo's 50 GB per-record cap: it copies the non-WAV
+  companions (SHA-512 verified), orders the WAVs by filename timestamp, and
+  moves the later half so the two halves are close to equal in bytes. **Dry-run
+  by default** — nothing moves without `--perform-split`. The plan is derived
+  from the *union* of both folders, so it is invariant as files move: an
+  interrupted run re-plans to the same cut and `--resume` finishes it, and a
+  completed pair re-runs as a no-op. Same-filesystem moves are atomic renames
+  (no bytes copied); a genuine cross-device move copies via `.partial`, verifies
+  SHA-512, and only then unlinks the source. `upload_state.json` is never copied
+  (it would point two records at one Zenodo draft), nor are dotfiles, ZIPs,
+  subdirectories, or symlinks. Reports whether the collectors spreadsheet has
+  the two per-part rows that `prepare_dataset.py` requires — but never edits it.
+  Covered by `tests/test_split_oversized_raw_folders.py`.
 - **Duplicate-record check** — `Resources/find_duplicate_records.py` fetches
   every record title from the project community and/or your Zenodo account
   (drafts included) and reports duplicate-title groups to a CSV — with a

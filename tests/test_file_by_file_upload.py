@@ -27,8 +27,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "Resources"))
 
+import azus_common  # noqa: E402
 import file_by_file_upload as fbf  # noqa: E402
-from prepare_dataset import _FILE_LIST_HEADERS  # noqa: E402
+from prepare_dataset import (  # noqa: E402
+    _FILE_LIST_HEADERS,
+    _stash_upload_artifacts,
+    create_upload_manifest,
+)
 
 _ESID = "007"
 _ZIP = f"ESID_{_ESID}.zip"
@@ -240,6 +245,107 @@ class TestZipRemoval(_FixtureCase):
         # Mode was NOT marked — the ESID stays recoverable as ZIP.
         state = json.loads((self.staging / "upload_state.json").read_text())
         self.assertNotIn("mode", state)
+
+
+class TestManifestArchives(_FixtureCase):
+    """The manifest rewrite must leave a legible history of both attempts."""
+
+    def _archives(self):
+        return (
+            self.staging
+            / azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(esid=_ESID),
+            self.staging
+            / azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=_ESID),
+        )
+
+    def test_run_archives_both_manifests(self):
+        self._all_names = list(self.build())
+        manifest = self.staging / f"ESID_{_ESID}_to_upload.csv"
+        original = manifest.read_text()
+        self._patch_api()
+        self.assertTrue(self._run())
+
+        zip_attempt, fbf_copy = self._archives()
+        # The ZIP-attempt snapshot is the manifest exactly as it was.
+        self.assertEqual(zip_attempt.read_text(), original)
+        self.assertIn(_ZIP, zip_attempt.read_text())
+        # The mirror matches the rewritten live manifest, which drops the
+        # ZIP and gains the individual raw files.
+        live = manifest.read_text()
+        self.assertEqual(fbf_copy.read_text(), live)
+        self.assertNotIn(_ZIP, live)
+        names = {r["File Name"] for r in csv.DictReader(io.StringIO(live))}
+        self.assertTrue(set(_WAVS).issubset(names))
+
+    def test_archives_are_never_uploaded(self):
+        self._all_names = list(self.build())
+        api = self._patch_api()
+        self.assertTrue(self._run())
+        sent = {Path(p).name
+                for p in api["upload_to_zenodo"].call_args.kwargs["files"]}
+        for archive in self._archives():
+            self.assertNotIn(archive.name, sent)
+
+    def test_zip_attempt_snapshot_is_write_once(self):
+        """A re-run must not replace the ZIP-attempt history with a copy of
+        the already-rewritten (file-by-file) manifest."""
+        self.build()
+        zip_attempt, _mirror = self._archives()
+        fbf.rewrite_manifest_file_by_file(
+            self.staging, _ESID, [("README.md", "companion")])
+        first = zip_attempt.read_text()
+        self.assertIn(_ZIP, first)   # captured the real ZIP-attempt manifest
+        # Second rewrite: the live manifest no longer carries a ZIP row.
+        fbf.rewrite_manifest_file_by_file(
+            self.staging, _ESID, [("CONFIG.TXT", "raw (Raw_Data)")])
+        self.assertEqual(zip_attempt.read_text(), first)
+
+    def test_no_snapshot_when_manifest_absent(self):
+        """Nothing to snapshot → no stray empty archive; mirror still written."""
+        fbf.rewrite_manifest_file_by_file(
+            self.staging, _ESID, [("README.md", "companion")])
+        zip_attempt, mirror = self._archives()
+        self.assertFalse(zip_attempt.exists())
+        self.assertTrue(mirror.exists())
+
+
+class TestArchivesExcludedFromPrep(_FixtureCase):
+    """A re-prep must neither upload the archives nor delete them."""
+
+    def test_create_upload_manifest_excludes_the_archives(self):
+        self.build()
+        zip_attempt = (self.staging
+                       / azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(esid=_ESID))
+        mirror = (self.staging
+                  / azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=_ESID))
+        zip_attempt.write_text("File Name,Notes\n")
+        mirror.write_text("File Name,Notes\n")
+
+        manifest_path = create_upload_manifest(self.staging, _ESID)
+        listed = {
+            r["File Name"]
+            for r in csv.DictReader(io.StringIO(manifest_path.read_text()))
+        }
+        self.assertNotIn(zip_attempt.name, listed)
+        self.assertNotIn(mirror.name, listed)
+        # Real dataset content is still listed.
+        self.assertIn("README.md", listed)
+
+    def test_archives_survive_a_reprep(self):
+        """They match _UPLOAD_ARTIFACT_PATTERNS, so the re-prep stash keeps
+        them instead of rmtree-ing the history away."""
+        self.build()
+        for name in (
+            azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(esid=_ESID),
+            azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=_ESID),
+        ):
+            (self.staging / name).write_text("File Name,Notes\n")
+        stash = self.root / ".stash"
+        stashed = _stash_upload_artifacts(self.staging, stash)
+        self.assertIn(
+            azus_common.MANIFEST_ARCHIVE_ZIP_ATTEMPT.format(esid=_ESID), stashed)
+        self.assertIn(
+            azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=_ESID), stashed)
 
 
 class TestSafetyGates(_FixtureCase):

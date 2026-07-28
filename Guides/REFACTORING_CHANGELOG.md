@@ -1,5 +1,109 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — splitting sites too large for one Zenodo record
+
+**Why sites get split at all** — nothing in this repo previously recorded it,
+including for the seven sites already split (012, 122, 243, 692, 929, 930, 963).
+Zenodo caps a record at **50 GB**. A site whose raw data exceeds that cannot be
+one record, so it becomes two: the raw folder is renamed
+`ESID#NNN_Part_1_of_2` and a sibling `ESID#NNN_Part_2_of_2` takes the later half
+of the recordings. The suffixed-ESID grammar in `azus_common` (canonical
+`NNN_Part_1_of_2`, display form `NNN Part 1 of 2`) exists precisely to carry
+these through prep, upload, titles, and the report tools.
+
+**One thing that is easy to get wrong:** `prepare_dataset.extract_collector_data`
+matches the ESID with a raw `==` against the collectors spreadsheet and exits 1
+on a miss — there is no suffix stripping and no fallback to the base 3-digit
+ESID. A split site therefore needs its own `NNN_Part_1_of_2` /
+`NNN_Part_2_of_2` rows, and the established convention (visible in all seven
+existing splits) is to *replace* the bare `NNN` row with two rows identical
+except the `ESID` cell.
+
+**New `Resources/split_oversized_raw_folders.py`** performs the mechanical fill
+of Part 2: copy the non-WAV companions (SHA-512 verified), order the WAVs by
+filename timestamp, and move the later half so the halves are close to equal in
+bytes. Dry-run by default; `--perform-split` is the only thing that mutates.
+
+- **The plan is derived from the UNION of both folders**, never Part 1 alone.
+  The union does not change as files move, so a fresh run and a half-finished
+  run compute the identical cut: an interrupted run re-plans to the same
+  boundary and `--resume` moves only what is left, a completed pair re-runs as
+  `ALREADY_SPLIT`, and no journal or resume state is needed — the filesystem is
+  the record.
+- **The move copies no bytes in the normal case.** Part 1 and Part 2 are
+  siblings, so `os.rename` moves each WAV atomically; verification is by size
+  and source-disappearance, because `rename(2)` within a filesystem has no
+  partial state for a hash to detect and reading back tens of GB per pair would
+  add hours for nothing. That post-check does catch the one real failure — a
+  filesystem reporting one `st_dev` while copying anyway (firmlinks, overlay
+  mounts) — and aborts the whole pair if it fires. A genuine cross-device move
+  copies via `.partial`, compares SHA-512 both sides, and unlinks the source
+  only after agreement, so a failure leaves a duplicate rather than a gap.
+- **`upload_state.json` is never copied** — it binds a folder to ONE Zenodo
+  draft, so duplicating it would point two records at the same draft. Nor are
+  dotfiles (`.DS_Store`, `._*` sidecars, `.prep_complete`), ZIPs,
+  subdirectories (interrupted preps leave `ESID_*_Staging/` in `Raw_Data/`), or
+  symlinks. Every skip is reported.
+- **Sizes must be trustworthy before the cut is believed.** A cloud placeholder
+  that `stat`s as 0 bytes while being readable, or a WAV whose size cannot be
+  read at all, refuses the pair — the latter matters because
+  `scan_disk_wavs` omits an unstattable file from its `sizes` map entirely, so
+  it would otherwise be invisible to the plan and silently stranded in Part 1.
+  A *truncated* WAV is only warned about: its size is real, so the split
+  arithmetic is still correct, and refusing would block data that genuinely
+  exists in that state.
+- Names carrying no parseable timestamp (8-hex old-firmware names like
+  `5D8F3A2B.WAV`) sort last deterministically and get their own report column
+  plus a warning — for those the cut is a *name* boundary, not a time boundary,
+  and the report must not imply otherwise. `19700101_*` reset-clock names parse
+  and sort naturally to the front. Filesystem mtimes are deliberately never
+  consulted: `prepare_dataset.py` rewrites pre-1980 mtimes via `os.utime`, so
+  mtime is a mutated field here, not evidence of recording time.
+- Also reported, never blocking: a half that would **still** exceed the limit
+  (a 120 GB site halves to 60/60 and both fail — that site needs more than two
+  parts), a missing or stale collectors row, and a surviving pre-split
+  `Staging_Area/ESID_NNN_Staging` whose ZIP and `file_list.csv` are now stale
+  and which may hold a live draft for the un-split site.
+
+Reuses `audit_wav_integrity`'s `scan_disk_wavs` / `_is_wav_name` / `human_size` /
+`compare_file_maps` and `clean_raw_staging_leftovers`' safety model (dry-run
+default, classify/mutate separation with the mutating path re-deriving every
+gate, `REFUSING to …` refusals, inode-based identity, per-row CSV flush).
+62 new tests (suite 486 → 548), audit 0 gaps.
+
+## July 2026 — file-by-file fallback: keep a history of both upload manifests
+
+The file-by-file fallback overwrites `ESID_NNN_to_upload.csv` in place, so the
+manifest that the ZIP attempt actually used was lost the moment the fallback
+engaged — leaving no way to see afterwards what each strategy tried. The
+rewrite in `Resources/file_by_file_upload.py` now brackets itself with two
+provenance copies:
+
+- **`ESID_NNN_zip_attempt_upload.csv`** — the manifest AS IT WAS for the ZIP
+  attempt, copied *before* the overwrite. Written **once**: on a re-run the
+  live manifest is already the file-by-file version, so copying again would
+  replace the original history with a duplicate of the new set. The snapshot
+  precedes the destructive write, so an I/O failure there aborts the ESID with
+  the original manifest still intact.
+- **`ESID_NNN_file_by_file_upload.csv`** — a mirror of the rewritten manifest,
+  refreshed each run.
+
+Both names live in `azus_common` (`MANIFEST_ARCHIVE_ZIP_ATTEMPT`,
+`MANIFEST_ARCHIVE_FILE_BY_FILE`) because `prepare_dataset.py` has to agree on
+them in two places — exactly the cross-tool drift that module exists to
+prevent:
+
+- `create_upload_manifest` **excludes** them, so a re-prep never publishes
+  local provenance files as dataset content.
+- `_UPLOAD_ARTIFACT_PATTERNS` now **preserves** them across a re-prep. That
+  constant previously covered only the draft-link artifacts
+  (`upload_state.json`, `ESID_*_request_log.json`); a re-prep is precisely when
+  the record of prior attempts matters most, so the rmtree must not take it.
+
+Neither copy is ever uploaded — they are absent from the upload list the module
+builds and excluded from the manifest prep generates. 6 new tests (including
+first-ever coverage of `create_upload_manifest`); suite 480 → 486, audit 0 gaps.
+
 ## July 2026 — esid_record_report: Upload Date + Last Updated columns
 
 `Resources/esid_record_report.py` (the Zenodo-side "ground truth" inventory)
