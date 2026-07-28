@@ -325,6 +325,44 @@ class TestExcludedFilesNeverCopied(_SplitTestCase):
         self.assertIn("ESID_445_Staging", rows[0]["Non-WAV Skipped"])
         self.assertEqual(code, 0)
 
+    def test_hidden_wav_predicate_is_stricter_than_the_audit_one(self):
+        """A dot-prefixed .wav must not count as content, even though
+        audit_wav_integrity's predicate (which only excludes AppleDouble
+        sidecars) accepts it."""
+        self.assertTrue(tool.is_split_wav_name("20240408_120000.WAV"))
+        for hidden in (".hidden.wav", ".20240408_120000.WAV",
+                       "._20240408_120000.WAV"):
+            self.assertFalse(tool.is_split_wav_name(hidden), hidden)
+        self.assertFalse(tool.is_split_wav_name(".DS_Store"))
+
+    def test_hidden_wav_is_neither_planned_nor_moved(self):
+        part1, part2 = self.make_pair()
+        write_wav(part1 / ".hidden.wav", 4096)
+        write_wav(part1 / "._20240408_120000.WAV", 4096)
+        code, rows = self.run_main("--perform-split")
+        self.assertEqual(rows[0]["Verdict"], tool.SPLIT_DONE)
+        # Counted as the five real recordings only.
+        self.assertEqual(rows[0]["WAV Count"], str(len(_FIVE)))
+        self.assertIn("hidden", rows[0]["Notes"])
+        # Left where it was, in both cases.
+        self.assertTrue((part1 / ".hidden.wav").is_file())
+        self.assertFalse((part2 / ".hidden.wav").exists())
+        self.assertTrue((part1 / "._20240408_120000.WAV").is_file())
+        self.assertFalse((part2 / "._20240408_120000.WAV").exists())
+        self.assertEqual(code, 1)
+
+    def test_hidden_wav_does_not_shift_the_cut(self):
+        """Excluding it must not change where the real recordings split."""
+        part1, _part2 = self.make_pair()
+        before, _u, _w = tool.wav_sizes(part1)
+        write_wav(part1 / ".hidden.wav", 999_999)
+        after, _u, warnings = tool.wav_sizes(part1)
+        self.assertEqual(set(after), set(before))
+        self.assertEqual(
+            tool.plan_split(after).cut_index, tool.plan_split(before).cut_index
+        )
+        self.assertTrue(any("hidden" in w for w in warnings))
+
     def test_symlinked_companion_is_skipped(self):
         part1, part2 = self.make_pair()
         target = self.root / "outside.txt"

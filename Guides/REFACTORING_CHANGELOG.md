@@ -44,6 +44,14 @@ bytes. Dry-run by default; `--perform-split` is the only thing that mutates.
   dotfiles (`.DS_Store`, `._*` sidecars, `.prep_complete`), ZIPs,
   subdirectories (interrupted preps leave `ESID_*_Staging/` in `Raw_Data/`), or
   symlinks. Every skip is reported.
+- **Hidden files are skipped on BOTH sides**, including one with a `.wav`
+  extension. `is_split_wav_name` is deliberately stricter than
+  `audit_wav_integrity._is_wav_name`, which excludes only AppleDouble sidecars
+  (`._foo.WAV`) and would therefore accept `.hidden.wav` as a recording. Had
+  the two predicates been allowed to disagree, a dot-prefixed file would have
+  been excluded from the companion copy while still being moved into a record
+  as though it were audio. A hidden WAV is now left in place, excluded from the
+  plan (so it cannot shift the cut), and reported.
 - **Sizes must be trustworthy before the cut is believed.** A cloud placeholder
   that `stat`s as 0 bytes while being readable, or a WAV whose size cannot be
   read at all, refuses the pair — the latter matters because

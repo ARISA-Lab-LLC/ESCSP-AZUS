@@ -63,6 +63,15 @@ Moved: the Part-2-bound WAVs.  Never copied:
   * ``*.zip``, every subdirectory (interrupted preps leave
     ``ESID_*_Staging/`` build folders in ``Raw_Data/``), every symlink.
 
+HIDDEN FILES ARE SKIPPED ON BOTH SIDES.  That includes a hidden file with
+a ``.wav`` extension: ``.hidden.wav`` is neither counted in the plan nor
+moved, it is left in place and reported.  The WAV test used here is
+therefore stricter than ``audit_wav_integrity._is_wav_name``, which
+excludes only AppleDouble sidecars — see :func:`is_split_wav_name`.  The
+two halves of this tool must not disagree about what "hidden" means, or a
+dot-prefixed file would be excluded from the companion copy while being
+moved into a record as if it were a recording.
+
 Nothing is ever recursed into.  Every skip is logged.
 
 SAFETY MODEL (execution is opt-in and re-gated)
@@ -333,6 +342,27 @@ def parse_wav_timestamp(name: str) -> Optional[str]:
     except ValueError:
         return None
     return date_token + time_token
+
+
+def is_split_wav_name(name: str) -> bool:
+    """Report whether a name is a WAV this tool will plan and move.
+
+    Stricter than ``audit_wav_integrity._is_wav_name``, which excludes only
+    macOS AppleDouble sidecars (``._foo.WAV``): here EVERY dot-prefixed
+    name is excluded, so this agrees with :func:`should_copy_non_wav`'s
+    treatment of companions.  A hidden file is not dataset content, and
+    moving ``.hidden.wav`` into a published record as though it were a
+    recording would be wrong — the two halves of this tool must not
+    disagree about what "hidden" means.
+
+    Args:
+        name: A file (base)name.
+
+    Returns:
+        True for a visible WAV file; False for a non-WAV or any hidden
+        (dot-prefixed) name.
+    """
+    return _is_wav_name(name) and not name.startswith(".")
 
 
 def wav_sort_key(name: str) -> Tuple[int, str, str, str]:
@@ -783,22 +813,35 @@ def wav_sizes(folder: Path) -> Tuple[Dict[str, int], List[str], List[str]]:
     untrusted: List[str] = list(stats.verify())
     warnings: List[str] = []
 
+    # scan_disk_wavs applies the laxer WAV test (it excludes only
+    # AppleDouble sidecars), so drop any remaining hidden name here: a
+    # dot-prefixed file is not content and must not be planned or moved.
+    sizes = {
+        name: size for name, size in stats.sizes.items()
+        if is_split_wav_name(name)
+    }
+    for name in sorted(set(stats.sizes) - set(sizes)):
+        warnings.append(f"{name}: hidden — excluded from the split")
+
     on_disk = {
         entry.name for entry in folder.iterdir()
-        if entry.is_file() and _is_wav_name(entry.name)
+        if entry.is_file() and is_split_wav_name(entry.name)
     }
-    for name in sorted(on_disk - set(stats.sizes)):
+    for name in sorted(on_disk - set(sizes)):
         untrusted.append(f"{name}: size could not be read at all")
 
     for name, reason in stats.discrepancies:
+        if not is_split_wav_name(name):
+            continue  # hidden: not content, so not this tool's concern
         if "stat reports 0 bytes" in reason or "stat failed" in reason:
             untrusted.append(f"{name}: {reason}")
         else:
             warnings.append(f"{name}: {reason}")
 
     for name in stats.zero_names:
-        warnings.append(f"{name}: zero bytes")
-    return dict(stats.sizes), untrusted, warnings
+        if is_split_wav_name(name):
+            warnings.append(f"{name}: zero bytes")
+    return sizes, untrusted, warnings
 
 
 def collectors_row_status(

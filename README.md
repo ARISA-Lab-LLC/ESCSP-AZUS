@@ -106,8 +106,11 @@ Python code.
   completed pair re-runs as a no-op. Same-filesystem moves are atomic renames
   (no bytes copied); a genuine cross-device move copies via `.partial`, verifies
   SHA-512, and only then unlinks the source. `upload_state.json` is never copied
-  (it would point two records at one Zenodo draft), nor are dotfiles, ZIPs,
-  subdirectories, or symlinks. Reports whether the collectors spreadsheet has
+  (it would point two records at one Zenodo draft), nor are ZIPs,
+  subdirectories, or symlinks. Hidden files are skipped on both sides —
+  including one with a `.wav` extension, which is left in place, kept out of
+  the plan, and reported rather than moved into a record as audio. Reports
+  whether the collectors spreadsheet has
   the two per-part rows that `prepare_dataset.py` requires — but never edits it.
   Covered by `tests/test_split_oversized_raw_folders.py`.
 - **Duplicate-record check** — `Resources/find_duplicate_records.py` fetches
