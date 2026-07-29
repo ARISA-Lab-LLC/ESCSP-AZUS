@@ -52,6 +52,7 @@ for _p in (str(_PROJECT_ROOT), str(_RESOURCES_DIR)):
         sys.path.insert(0, _p)
 
 import azus_common  # noqa: E402
+import hash_raw_wavs  # noqa: E402
 from prepare_dataset import _FILE_LIST_HEADERS  # noqa: E402
 from models.audiomoth import DraftConfig  # noqa: E402
 from standalone_tasks import archive_staging_to_uploaded  # noqa: E402
@@ -408,13 +409,36 @@ def run_file_by_file(
         # 3. Pre-verify the raw WAV/CONFIG bytes against prep's SHA-512, so
         #    the uploaded audio is provably the content prep verified (a raw
         #    file modified since prep would otherwise pass md5-vs-Zenodo).
+        #
+        #    Hashes come from the raw folder's wav_hashes.csv whenever the
+        #    file's size AND mtime still match what was recorded, so a run
+        #    that dies mid-upload does not re-read the whole dataset next
+        #    time.  Anything new, changed or uncached is hashed here and the
+        #    cache updated.  This cannot weaken the check — a stale entry is
+        #    detected by the stat and re-hashed — it only stops the work
+        #    being thrown away.  Pre-warm with Resources/hash_raw_wavs.py.
+        logger.info(
+            "%s Verifying SHA-512 of %d raw file(s) against file_list.csv "
+            "(cached hashes reused where still valid)...", tag, len(raw_files),
+        )
+        resolved_hashes = hash_raw_wavs.ensure_hashes(
+            raw_dir, [name for name, _ in raw_files], tag=tag,
+        )
+        logger.info(
+            "%s %d hash(es) reused from %s, %d computed now.",
+            tag, resolved_hashes.reused, hash_raw_wavs.CACHE_FILENAME,
+            resolved_hashes.hashed,
+        )
+
         hash_problems: List[str] = []
         for name, expected in raw_files:
             if not expected:
                 hash_problems.append(f"{name} (no hash recorded in file_list.csv)")
                 continue
-            actual = azus_common.calculate_sha512(str(raw_dir / name))
-            if actual != expected:
+            actual = resolved_hashes.hashes.get(name)
+            if actual is None:
+                hash_problems.append(f"{name} (could not be read to hash it)")
+            elif actual != expected:
                 hash_problems.append(f"{name} (SHA-512 mismatch vs file_list.csv)")
         if hash_problems:
             logger.error(

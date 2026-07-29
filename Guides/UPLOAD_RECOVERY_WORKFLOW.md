@@ -104,6 +104,18 @@ A multi-GB ZIP that times out repeatedly can be replaced, on the **same**
 draft, by the individual WAVs from `Raw_Data/` plus `CONFIG.TXT` and the
 standalone companions. This is **opt-in** and it is a **one-way door**.
 
+Before a big one, pre-compute the hashes. The switch verifies every raw WAV
+against `file_list.csv` before uploading anything, which is a full read of the
+dataset; doing it ahead of time means the upload run does not wait on it, and a
+restart does not repeat it:
+
+```bash
+python Resources/hash_raw_wavs.py /absolute/path/to/Raw_Data --esid 445
+```
+
+That is an optimisation, not a prerequisite — an un-cached folder is hashed on
+first use either way.
+
 ```bash
 # Always look first — read-only, no network calls, writes nothing.
 python Resources/finish_stuck_uploads.py --list-only
@@ -112,6 +124,11 @@ python Resources/finish_stuck_uploads.py --list-only
 python Resources/finish_stuck_uploads.py \
     --esid 445 --workers 1 --upload-attempts 1 \
     --enable-file-by-file --raw-data-dir /absolute/path/to/Raw_Data
+
+# Switch NOW — no waiting for attempts to accumulate, no ZIP retry:
+python Resources/finish_stuck_uploads.py \
+    --esid 445 --workers 1 --force \
+    --enable-file-by-file --raw-data-dir /absolute/path/to/Raw_Data
 ```
 
 An ESID is switched only when **both** hold: the ZIP is the *sole* missing
@@ -119,14 +136,38 @@ file (every companion is already committed on the record), and its
 `number_of_tries` has reached `--tries-threshold` (default 3). Anything
 else is reported and left alone.
 
+**`--force` drops the second condition** — see below. The first one always
+applies.
+
 Four things to know before you run it:
 
-- **The ZIP is attempted again first.** `--enable-file-by-file` does not
-  skip the normal ZIP pass — a ZIP-mode ESID goes through it before the
-  switch is even evaluated, which on a 40 GB file is hours. Pass
-  `--upload-attempts 1` to keep that short. Note this also *increments*
-  `number_of_tries`, so an ESID sitting at 2 tries passes a threshold of 3
-  after the pass.
+- **The ZIP is attempted again first, by default.** `--enable-file-by-file`
+  does not skip the normal ZIP pass — a ZIP-mode ESID goes through it before
+  the switch is even evaluated, which on a 40 GB file is hours, *including a
+  full SHA-512 re-hash of the archive in the pre-upload integrity gate*. Note
+  the pass also *increments* `number_of_tries`, so an ESID sitting at 2 tries
+  passes a threshold of 3 afterwards.
+
+  Three levers, in increasing order of how much they give up:
+
+  - `--upload-attempts 1` — one PUT instead of three. Still hashes.
+  - `--skip-integrity-hash` — drops only the ZIP re-hash from the integrity
+    gate; the structural checks (sentinel, readable archive, ZIP contents vs
+    `file_list.csv`) still run. Useful on every recovery run, not just this
+    path, since that hash otherwise repeats each time.
+  - `--force` — switch **now**, ignoring `--tries-threshold`, and skip the
+    ZIP retry entirely. An ESID can be switched on its very first failure.
+    This is the flag for "I have already decided this ZIP is never going to
+    upload; stop making me prove it three times." Requires
+    `--enable-file-by-file`.
+
+    Two things `--force` does **not** do. It does not bypass the
+    sole-missing-file check: file-by-file *replaces* the ZIP, so if a
+    companion also failed the problem is not ZIP size and the switch is the
+    wrong remedy — those ESIDs are reported and left to the normal pass. And
+    it does not make the switch reversible; it is still a **one-way door**,
+    because going back would mean deleting files already committed to the
+    record. The log says so explicitly before it acts.
 - **Reverting is not automated**, because going back to a ZIP would mean
   deleting files already committed to the record. To suppress switching
   entirely while still continuing ESIDs already in this mode, set

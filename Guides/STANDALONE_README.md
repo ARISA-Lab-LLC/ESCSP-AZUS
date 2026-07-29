@@ -82,7 +82,18 @@ These are convenience wrappers around the main code path:
   the only missing file and whose `number_of_tries` has reached
   `--tries-threshold` (default 3) switches to uploading the individual
   WAVs instead of the ZIP. Use `--list-only` first: it is read-only and
-  makes no network calls.
+  makes no network calls. `--skip-integrity-hash` is forwarded to
+  `standalone_tasks.py` and drops only the full ZIP re-hash (a complete read
+  of the archive, repeated on every recovery run). `--force` switches an ESID
+  immediately, ignoring `--tries-threshold` and skipping the ZIP retry, so it
+  can switch on the first failure; the ZIP must still be the sole missing
+  file, and switching remains a one-way door.
+- **Resources/hash_raw_wavs.py** — pre-compute the SHA-512 hashes that the
+  file-by-file upload verifies, caching them in a `wav_hashes.csv` inside each
+  raw ESID folder. Run it whenever convenient (overnight, before a batch) so
+  the upload run never pays for hashing, and so a restarted upload does not
+  re-read the dataset. Reuses a cached hash only when size and mtime still
+  match, so it cannot weaken the check.
 - **Resources/new_version_upload.py** — publish a re-prepped staging package
   as a NEW VERSION of an already-published record, for the case where the
   published metadata is wrong AND its ZIP is broken. Requires `--esid` and

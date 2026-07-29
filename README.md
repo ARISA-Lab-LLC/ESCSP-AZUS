@@ -113,6 +113,18 @@ Python code.
   whether the collectors spreadsheet has
   the two per-part rows that `prepare_dataset.py` requires — but never edits it.
   Covered by `tests/test_split_oversized_raw_folders.py`.
+- **Raw WAV hash cache** — `Resources/hash_raw_wavs.py` walks every ESID
+  subfolder of a raw-data folder, SHA-512-hashes each WAV + `CONFIG.TXT`, and
+  records the results in a `wav_hashes.csv` inside that folder. The
+  file-by-file upload's pre-verification pass reads the whole dataset before
+  uploading a byte; this makes that work **durable**, so an upload that dies
+  after two hours no longer re-hashes everything on the next run. A cached
+  hash is reused only when the file's size **and** mtime still match, so the
+  cache can never make verification weaker than doing it from scratch — a file
+  altered afterwards is detected by the `stat` and re-hashed. Safe to re-run
+  (only new or changed files are read) and safe to skip entirely: an un-warmed
+  folder is hashed and cached on first use. `--recheck` ignores the caches for
+  a genuine re-verification. Covered by `tests/test_hash_raw_wavs.py`.
 - **New version of a published record** — `Resources/new_version_upload.py`
   publishes a re-prepped staging package as a **new Zenodo version** of an
   already-published record, for the case where the published metadata is wrong

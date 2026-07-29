@@ -1,5 +1,109 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — make the raw-file hash pass durable instead of optional
+
+The file-by-file fallback verifies every raw WAV and `CONFIG.TXT` against the
+SHA-512 in `file_list.csv` before uploading anything. That check is not
+negotiable: `file_list.csv` is itself uploaded as the record's manifest, so
+skipping it would let a record publish whose files disagree with the manifest
+shipped beside them — and the uploader's md5 verification cannot detect that,
+since it only proves Zenodo received what was sent.
+
+But the pass read the entire dataset every time and threw the result away. An
+upload that died after two hours re-hashed 40 GB from scratch on the next run,
+with no log output while it did so — the reported symptom was a silent wall
+after `SWITCHING to file-by-file`.
+
+**New `Resources/hash_raw_wavs.py`** makes that work durable. Each raw ESID
+folder gets a `wav_hashes.csv` recording every audio file's name, size, mtime
+and SHA-512. `file_by_file_upload.py`'s step 3 now loads that cache, reuses
+what is still valid, hashes only what is new or changed, and writes it back.
+Same abort-on-mismatch semantics; a restart re-reads nothing. Run as a CLI it
+pre-warms a whole `Raw_Data` tree so the upload run never waits on hashing —
+an optimisation, never a prerequisite, since an un-cached folder is simply
+hashed on first use.
+
+**The cache cannot make verification weaker.** An entry is trusted only when
+the file's size AND mtime both still match what was recorded — one `stat` per
+file, microseconds — so a WAV altered after the cache was written is detected
+and re-hashed rather than waved through. A cache keyed on filename alone would
+have turned the integrity gate into a rubber stamp, which is the whole trap
+this design exists to avoid. Verified by a test that rewrites a file to its
+*identical length* and confirms it is still re-hashed. A missing, unreadable or
+malformed cache reads as empty, so a bad cache costs time and never
+correctness.
+
+Two properties worth recording. `prepare_dataset.py` clamps pre-1980
+modification times (an unset AudioMoth clock stamps 1970) to 1980-01-01, so a
+re-prep invalidates the entries for exactly those files — correct, and it fails
+toward doing more work rather than less. And because
+`split_oversized_raw_folders.py` moves WAVs by same-filesystem rename, size and
+mtime survive the split, so cached hashes stay valid in whichever half a file
+lands in.
+
+The cache file cannot reach Zenodo: the upload set comes from `file_list.csv`,
+and `prepare_dataset.py` only ever takes `*.WAV`/`*.wav` and `CONFIG.TXT` out of
+a raw folder.
+
+Also considered and rejected in the same session: a `--skip-raw-hash` flag to
+bypass the pass outright. It was implemented and reverted — going faster is not
+worth being unable to prove a published record matches its own manifest. The
+cache achieves the same wall-clock saving without giving anything up.
+
+26 new tests (suite 636 → 662), audit 0 gaps.
+
+## July 2026 — stop paying for a ZIP attempt that cannot change the outcome
+
+`finish_stuck_uploads.py --enable-file-by-file` runs Phase A first — a full
+shell-out to `standalone_tasks.py` — before the switch decision is evaluated in
+Phase B2. For an ESID that is *about to be switched*, that pass re-hashes the
+entire archive in `verify_dataset_integrity` and then attempts an upload of a
+ZIP the run is about to abandon. On a 40 GB ZIP on an external volume that is a
+long time spent on a foregone conclusion.
+
+It happens because the `mode: file_by_file` marker is not written until the
+point of no return *inside* `run_file_by_file`, so on the switching run the ESID
+still looks like an ordinary ZIP-mode dataset to Phase A. Subsequent runs are
+already fine — `standalone_tasks.py` skips the folder at its two
+`read_upload_mode` guards.
+
+Two additions, neither of which changes default behaviour:
+
+- **`--skip-integrity-hash` is now forwarded.** `standalone_tasks.py` has always
+  supported it, but `run_recovery` built its command line without it, so there
+  was no way to reach it through this tool. It drops only the full ZIP SHA-512
+  re-hash; the structural checks (sentinel, readable archive, ZIP contents vs
+  `file_list.csv`) still run. Useful on the ordinary ZIP path too, where that
+  hash otherwise repeats on every recovery run.
+- **`--force`** switches an ESID immediately: the
+  `number_of_tries >= --tries-threshold` condition is **not applied**, and the
+  ESID is removed from Phase A so the ZIP is not retried. An ESID can therefore
+  be switched on its very first failure. The threshold exists so one bad night
+  does not abandon a ZIP that would have succeeded; `--force` is the operator
+  saying they have already made that call.
+
+`--force` deliberately does NOT bypass `only_zip_missing`. File-by-file
+*replaces* the ZIP, so when a companion is also missing the problem is not ZIP
+size and the switch is the wrong remedy — those ESIDs are reported by name and
+left to the normal pass. Nor does it make the switch reversible: it is still a
+one-way door, because reverting would mean deleting files already committed to
+the record, and the log states that before acting. It requires
+`--enable-file-by-file`, since the switch it modifies only exists there — the
+error message points at `--skip-integrity-hash` for anyone who just wanted the
+ZIP path to stop re-hashing.
+
+This also resolves a circularity in the old design: reaching
+`--tries-threshold` required Phase A runs, and each Phase A run was exactly the
+multi-hour ZIP attempt the operator was trying to stop paying for. Worse,
+because `verify_dataset_integrity` runs *before* `upload_to_zenodo` and
+`number_of_tries` is incremented *inside* the uploader, a ZIP that fails the
+integrity gate never increments its counter at all — so a genuinely corrupt ZIP
+could never accumulate tries toward the threshold on its own, even though
+file-by-file (which ignores the ZIP entirely) is precisely its remedy.
+`--force` is the way out of both.
+
+10 new tests (suite 626 → 636), audit 0 gaps.
+
 ## July 2026 — new versions of published records (the last manual dead-end)
 
 Published Zenodo files are immutable, so a record with wrong metadata AND a

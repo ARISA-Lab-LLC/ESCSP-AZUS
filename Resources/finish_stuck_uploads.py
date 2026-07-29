@@ -218,6 +218,7 @@ def run_recovery(
     workers: int,
     upload_attempts: int = 3,
     skip_date_check: bool = False,
+    skip_integrity_hash: bool = False,
 ) -> int:
     """Re-run standalone_tasks.py against just the stuck ESIDs.
 
@@ -246,6 +247,11 @@ def run_recovery(
             when resuming a dataset that was originally uploaded with
             the dates-not-available fallback (its WAV names still carry
             no valid recording dates).
+        skip_integrity_hash: Forwarded as ``--skip-integrity-hash``, which
+            drops only the full ZIP re-hash from the pre-upload integrity
+            gate (the structural checks still run).  That re-hash is a
+            complete read of the archive — minutes on a 40 GB ZIP, and it
+            repeats on every recovery run.
 
     Returns:
         The exit code of standalone_tasks.py.  0 if all finished
@@ -261,6 +267,8 @@ def run_recovery(
     ]
     if skip_date_check:
         cmd.append("--skip-date-check")
+    if skip_integrity_hash:
+        cmd.append("--skip-integrity-hash")
     logger.info("Running: %s", " ".join(cmd))
     # cwd = project root so relative paths in config.json resolve correctly.
     # No timeout — multi-GB ZIPs can legitimately take hours.
@@ -327,6 +335,15 @@ def _run_with_file_by_file(
     condition (``number_of_tries >= --tries-threshold`` AND only the ZIP is
     missing) is switched to file-by-file — all in this one run.
 
+    ``--force`` switches immediately instead: the
+    ``number_of_tries >= --tries-threshold`` condition is NOT applied, and
+    the ESID is taken out of Phase A so the ZIP is not retried (which would
+    only re-hash the whole archive and burn an upload window).  An ESID can
+    therefore be switched on its very first failure.  ``only_zip_missing``
+    still applies — file-by-file replaces the ZIP, so a run where a
+    COMPANION is also missing is not a ZIP-size problem and is left to the
+    normal path.  Being a one-way door, this is opt-in.
+
     Args:
         stuck: The discovered ``(sort_key, esid, folder, record_id)`` list
             (already ``--esid``-filtered).
@@ -392,6 +409,43 @@ def _run_with_file_by_file(
     failures: List[str] = []
     switched: List[str] = []
 
+    # --force: switch NOW, without waiting for number_of_tries to reach
+    # --tries-threshold and without giving the ZIP another attempt.  The
+    # threshold exists so one bad night does not abandon a ZIP that would
+    # have succeeded; --force is the operator saying they have already made
+    # that judgement.  Phase A is skipped for these ESIDs because a ZIP
+    # retry can no longer change what happens to them — it would only
+    # re-hash the whole archive and burn an upload window.
+    #
+    # only_zip_missing() is still required: file-by-file replaces the ZIP,
+    # so if a COMPANION is also missing the problem is not ZIP size and the
+    # switch is the wrong remedy.  --force does not override that.
+    # Without --force this list stays empty and the phase order is
+    # exactly as before.
+    forced: List[Tuple[int, str, Path, str]] = []
+    if args.force:
+        for entry in zip_stuck:
+            _sort, padded, folder, record_id = entry
+            if not fbf.only_zip_missing(credentials, record_id, folder, padded):
+                logger.warning(
+                    "[ESID %s] --force NOT applied — the ZIP is not the sole "
+                    "missing file (a companion also failed) or the ZIP is "
+                    "already complete. File-by-file replaces the ZIP, so it "
+                    "is not the fix here. Falling back to the normal ZIP "
+                    "pass.", padded,
+                )
+                continue
+            forced.append(entry)
+        if forced:
+            zip_stuck = [t for t in zip_stuck if t not in forced]
+            logger.warning(
+                "--force: switching %d ESID(s) to file-by-file WITHOUT the "
+                "number_of_tries check and WITHOUT retrying the ZIP (%s). "
+                "This is a ONE-WAY DOOR — reverting would mean deleting "
+                "files already committed to the record.",
+                len(forced), ", ".join(p for _s, p, _f, _r in forced),
+            )
+
     # Phase A: attempt the ZIP finish for ZIP-mode ESIDs (unchanged path).
     if zip_stuck:
         logger.info(
@@ -403,7 +457,17 @@ def _run_with_file_by_file(
             config_path=args.config, workers=args.workers,
             upload_attempts=args.upload_attempts,
             skip_date_check=args.skip_date_check,
+            skip_integrity_hash=args.skip_integrity_hash,
         )
+
+    # Phase A2 (--force only): switch the selected ESIDs directly.
+    for _sort, padded, folder, record_id in forced:
+        logger.warning(
+            "[ESID %s] SWITCHING to file-by-file (--force: tries check "
+            "bypassed, ZIP not retried)...", padded,
+        )
+        (switched if _do_fbf(padded, folder, record_id)
+         else failures).append(padded)
 
     # Phase B1: continue ESIDs already in file-by-file mode.
     for _, padded, folder, record_id in fbf_stuck:
@@ -551,6 +615,30 @@ def main() -> None:
             "uploads the individual audio files straight from here."
         ),
     )
+    parser.add_argument(
+        "--skip-integrity-hash", action="store_true",
+        help=(
+            "Forwarded to standalone_tasks.py: skip only the full ZIP "
+            "SHA-512 re-hash in the pre-upload integrity gate (the "
+            "structural checks — sentinel, readable archive, ZIP contents "
+            "vs file_list.csv — still run). That re-hash is a complete read "
+            "of the archive, so it costs minutes on a 40 GB ZIP and repeats "
+            "on every recovery run."
+        ),
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help=(
+            "With --enable-file-by-file: switch to file-by-file NOW, "
+            "IGNORING --tries-threshold, and skip the ZIP retry entirely. "
+            "An ESID can be switched on its first failure. The ZIP must "
+            "still be the sole missing file — file-by-file replaces the ZIP, "
+            "so it is not the fix when a companion also failed; those ESIDs "
+            "are reported and left to the normal path. Switching is a "
+            "ONE-WAY DOOR: reverting would mean deleting files already "
+            "committed to the record."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Validate --workers up front (mirror standalone_tasks.py) ---
@@ -571,6 +659,14 @@ def main() -> None:
         parser.error(
             "--enable-file-by-file requires --raw-data-dir <Raw_Data root> "
             "(the individual WAVs + CONFIG.TXT are uploaded from there)."
+        )
+    # --force only has meaning for the switch decision, which only exists
+    # on the file-by-file path.
+    if args.force and not args.enable_file_by_file:
+        parser.error(
+            "--force only applies to the file-by-file switch, so it requires "
+            "--enable-file-by-file. To skip just the ZIP re-hash on the "
+            "ordinary ZIP path, use --skip-integrity-hash."
         )
     if args.tries_threshold < 1:
         parser.error(
@@ -713,6 +809,7 @@ def main() -> None:
         workers=args.workers,
         upload_attempts=args.upload_attempts,
         skip_date_check=args.skip_date_check,
+        skip_integrity_hash=args.skip_integrity_hash,
     )
 
     # --- Final status ---
