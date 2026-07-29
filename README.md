@@ -77,6 +77,22 @@ Python code.
   set it high to keep retrying the ZIP). Covered by
   `tests/test_file_by_file_upload.py`, `tests/test_req9_skip.py`, and
   `tests/test_finish_stuck_file_by_file.py`.
+- **Zenodo-driven discovery of ZIP-only drafts** —
+  `Resources/finish_zip_only_drafts.py` inverts the search: instead of scanning
+  `Staging_Area/` for `upload_state.json`, it asks **Zenodo** which drafts
+  exist, matches each back to a local ESID, and classifies it. That finds the
+  ESIDs the state-file scan cannot see at all — a production run found 138
+  staging folders with no state file, whose drafts were therefore invisible to
+  every recovery tool. The `record_id` is recovered from the listing and
+  written back, re-arming the whole pipeline. **Read-only by default**, writing
+  a per-draft summary CSV and a per-file detail CSV; `--execute` converts and
+  `--publish` is still off even then, so the normal outcome is a complete,
+  inspectable draft. `--limit N` makes the first run a canary and
+  `--max-consecutive-failures` stops a batch on a systemic fault rather than
+  dragging hundreds of records through a one-way door. There is no batch
+  progress file: every run re-derives state from Zenodo and disk, so an
+  interrupted conversion re-classifies as `RESUMABLE` and continues. Covered by
+  `tests/test_finish_zip_only_drafts.py`.
 - **Interrupted-prep detection** — `prepare_dataset.py` moves into
   `Staging_Area/` via a two-phase atomic pattern and writes a `.prep_complete`
   sentinel file as its very last action. `prep_all_datasets.py`'s skip check

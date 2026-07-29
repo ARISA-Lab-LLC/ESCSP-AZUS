@@ -178,6 +178,62 @@ class TestRequiredFiles(_FixtureCase):
         self.assertNotIn(_ZIP, companions)
 
 
+class TestRequiredFilesIsIdempotent(_FixtureCase):
+    """Re-deriving the set from an ALREADY-REWRITTEN manifest must match.
+
+    Step 6 rewrites ESID_NNN_to_upload.csv to list the whole file-by-file
+    set — companions AND raw files.  Until July 2026 required_files read
+    every name in that manifest back as a COMPANION, so a second run looked
+    for the WAVs in the staging folder and aborted with "required file(s)
+    not found locally".  That made every resume impossible: a conversion
+    interrupted part-way could never be finished, and the RESUMABLE case is
+    the whole point of a restartable batch.
+    """
+
+    def test_second_derivation_matches_the_first(self):
+        self.build()
+        first = fbf.required_files(self.staging, _ESID)
+
+        # Exactly what step 6 writes.
+        raw_files, companions = first
+        fbf.rewrite_manifest_file_by_file(
+            self.staging, _ESID,
+            [(n, "companion") for n in companions]
+            + [(n, "raw (Raw_Data)") for n, _ in raw_files],
+        )
+        second = fbf.required_files(self.staging, _ESID)
+        self.assertEqual(second, first)
+
+    def test_raw_names_never_become_companions(self):
+        self.build()
+        fbf.rewrite_manifest_file_by_file(
+            self.staging, _ESID,
+            [("README.md", "companion"),
+             ("20240408_120000.WAV", "raw (Raw_Data)"),
+             ("CONFIG.TXT", "raw (Raw_Data)")],
+        )
+        _raw, companions = fbf.required_files(self.staging, _ESID)
+        self.assertEqual(companions, ["README.md"])
+
+    def test_a_second_full_run_succeeds(self):
+        """End to end: convert, then convert again on the same folder."""
+        self._all_names = list(self.build())
+        api = self._patch_api(list_side_effect=[
+            [], _committed(self._all_names),          # run 1
+            _committed(self._all_names),              # run 2 (ZIP gone)
+            _committed(self._all_names),
+        ])
+        self.assertTrue(self._run())
+        self.assertTrue(self._run())
+        self.assertEqual(api["upload_to_zenodo"].call_count, 2)
+        # The second run offered the same file set, not a shrunken one.
+        first, second = api["upload_to_zenodo"].call_args_list
+        self.assertEqual(
+            {Path(p).name for p in second.kwargs["files"]},
+            {Path(p).name for p in first.kwargs["files"]},
+        )
+
+
 class TestHappyPath(_FixtureCase):
     def test_uploads_the_full_set_and_leaves_a_draft(self):
         """auto_publish=False must mean DRAFT, even with a community_id.

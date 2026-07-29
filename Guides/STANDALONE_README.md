@@ -88,6 +88,21 @@ These are convenience wrappers around the main code path:
   immediately, ignoring `--tries-threshold` and skipping the ZIP retry, so it
   can switch on the first failure; the ZIP must still be the sole missing
   file, and switching remains a one-way door.
+- **Resources/finish_zip_only_drafts.py** — the same repair, but discovered
+  from **Zenodo** instead of from `Staging_Area/`. It lists your account's
+  drafts, matches each back to a local ESID, and classifies it: a draft whose
+  companions are all committed and whose ZIP is not is `CONVERTIBLE`. This
+  finds the ESIDs `finish_stuck_uploads.py` cannot see at all — a production
+  scan found 138 staging folders with **no `upload_state.json`**, so their
+  drafts were invisible to every recovery tool; this recovers the `record_id`
+  from the listing and writes it back. **Read-only by default**: it writes two
+  CSV reports (one row per draft, one row per file) and changes nothing.
+  `--execute` converts; `--publish` is still OFF even then, so the normal
+  outcome is a complete, inspectable DRAFT. `--limit 1` makes the first run a
+  canary and `--max-consecutive-failures` stops a batch on a systemic fault
+  rather than dragging hundreds of records through a one-way door. Built to be
+  re-run: every run re-derives state from Zenodo and disk, so an interrupted
+  conversion re-classifies as `RESUMABLE` and continues.
 - **Resources/hash_raw_wavs.py** — pre-compute the SHA-512 hashes that the
   file-by-file upload verifies, caching them in a `wav_hashes.csv` inside each
   raw ESID folder. Run it whenever convenient (overnight, before a batch) so

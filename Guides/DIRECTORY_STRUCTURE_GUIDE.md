@@ -183,7 +183,7 @@ Staging_Area/
 |------|--------------------|---------|
 | `ESID_XXX.zip` | Yes | All WAV recordings + CONFIG.TXT |
 | `ESID_XXX_to_upload.csv` | No | Tells AZUS which files to upload |
-| `ESID_XXX_zip_attempt_upload.csv` | No | Provenance. Present only once the file-by-file fallback has run for this ESID: a snapshot of `ESID_XXX_to_upload.csv` **as it was for the ZIP attempt**, taken before the fallback rewrote it. Written once and never replaced, so a re-run cannot overwrite the original history. Restore it over the live manifest if a failed fallback run needs retrying. |
+| `ESID_XXX_zip_attempt_upload.csv` | No | Provenance. Present only once the file-by-file fallback has run for this ESID: a snapshot of `ESID_XXX_to_upload.csv` **as it was for the ZIP attempt**, taken before the fallback rewrote it. Written once and never replaced, so a re-run cannot overwrite the original history. Provenance only — as of July 2026 a failed fallback run is retried by simply re-running it; `required_files` no longer mistakes the rewritten manifest's raw rows for companions, so restoring this by hand is not needed. |
 | `ESID_XXX_file_by_file_upload.csv` | No | Provenance. Present only once the fallback has run: a mirror of the rewritten manifest, i.e. the individual WAVs + CONFIG.TXT + companions that replaced the ZIP. Refreshed on each fallback run. |
 | `README.html` | No | Content becomes the Zenodo description field |
 | `README.md` | Yes | Human-readable documentation |

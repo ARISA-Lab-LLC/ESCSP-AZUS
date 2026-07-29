@@ -150,6 +150,11 @@ def required_files(
     their hashes); companions come from the prep upload manifest (the
     authoritative list of what prep chose to upload standalone).
 
+    Idempotent across a conversion: raw-upload names are excluded from
+    ``companion_names`` even when the manifest lists them, so re-deriving
+    the set from an ALREADY-REWRITTEN manifest yields the same answer as the
+    first time.  See the comment on the manifest read.
+
     Args:
         staging_dir: The ``ESID_NNN_Staging`` folder.
         esid: Canonical ESID string.
@@ -157,7 +162,8 @@ def required_files(
     Returns:
         A ``(raw_files, companion_names)`` tuple.  ``raw_files`` is a list
         of ``(name, sha512)`` for each WAV + CONFIG.TXT; ``companion_names``
-        is the list of standalone companion file names (the ZIP excluded).
+        is the list of standalone companion file names, excluding the ZIP
+        and excluding anything that is really a raw file.
     """
     zip_name = _zip_name(esid)
 
@@ -168,15 +174,23 @@ def required_files(
         if name and name != zip_name and is_raw_upload_name(name):
             raw_files.append((name, (row.get("SHA-512 Hash") or "").strip()))
 
+    # A companion is by definition NOT a WAV or CONFIG.TXT: those live in
+    # Raw_Data and are uploaded from there, never out of the staging folder.
+    # Filtering them out is what makes this IDEMPOTENT — step 6 of
+    # run_file_by_file rewrites this manifest to list the whole file-by-file
+    # set (companions AND raw files), so without the filter a SECOND run
+    # would read those raw names back as companions, look for them in the
+    # staging folder, and abort with "required file(s) not found locally".
+    # That broke every resume: a conversion interrupted part-way could never
+    # be finished. (Found July 2026 by re-running a completed conversion.)
     manifest_rows = _load_csv_rows(
         staging_dir / _MANIFEST_TEMPLATE.format(esid=esid)
     )
-    companion_names = [
-        (row.get("File Name") or "").strip()
-        for row in manifest_rows
-        if (row.get("File Name") or "").strip()
-        and (row.get("File Name") or "").strip() != zip_name
-    ]
+    companion_names = []
+    for row in manifest_rows:
+        name = (row.get("File Name") or "").strip()
+        if name and name != zip_name and not is_raw_upload_name(name):
+            companion_names.append(name)
     return raw_files, companion_names
 
 

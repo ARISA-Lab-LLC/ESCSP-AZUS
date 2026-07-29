@@ -223,18 +223,25 @@ Once switched, the ESID is marked `mode: file_by_file` in its
 also means Phase 4a/4b will appear to ignore the ESID from then on; that is
 correct, not a bug.
 
-**If a file-by-file run fails partway through**, restore the manifest
-before retrying. The run rewrites `ESID_NNN_to_upload.csv` to list the
-WAVs, and a retry reads that back and looks for them in the *staging*
-folder, aborting with "N required file(s) not found locally":
+**If a file-by-file run fails partway through, just re-run it.** No manual
+repair is needed.
 
-```bash
-cd Staging_Area/ESID_445_Staging
-cp ESID_445_zip_attempt_upload.csv ESID_445_to_upload.csv
-```
+Until July 2026 it was: the run rewrites `ESID_NNN_to_upload.csv` to list the
+WAVs as well as the companions, and `required_files` read every name in that
+manifest back as a *companion* — so a retry looked for the WAVs in the
+**staging** folder and aborted with "N required file(s) not found locally".
+Recovering meant restoring the manifest by hand from
+`ESID_NNN_zip_attempt_upload.csv` before every retry, which made a resume
+impossible to automate. `required_files` now excludes raw-upload names
+(`*.wav`, `CONFIG.TXT`) from the companion list whichever manifest generation
+it is reading, because a companion is by definition not a file that lives in
+`Raw_Data/`. Re-deriving the set from an already-rewritten manifest gives the
+same answer as the first time.
 
-That snapshot is written once, before the first rewrite, and never
-replaced — see the file-roles table in `DIRECTORY_STRUCTURE_GUIDE.md`.
+The `ESID_NNN_zip_attempt_upload.csv` snapshot is still written once, before
+the first rewrite, and never replaced — it is provenance now rather than a
+recovery mechanism. See the file-roles table in
+`DIRECTORY_STRUCTURE_GUIDE.md`.
 
 > ⚠️ **As of 2026-07-28 this fallback is fully unit-tested but has not yet
 > been exercised against the live Zenodo API.** Use `--list-only` first,
@@ -249,6 +256,74 @@ EXCLUDED N folder(s) with no upload_state.json ...
 Tracker skip (already uploaded): ESID_NNN.zip
 ESID folder has no ZIP — skipping: ...
 Deferred: N (ZIP not uploaded yet)
+```
+
+### 4d — when the ESID has no `upload_state.json` at all
+
+Everything above is discovered by scanning `Staging_Area/` for
+`upload_state.json`. A folder without one is **invisible** to those tools —
+`finish_stuck_uploads.py` reports it under `EXCLUDED N folder(s) with no
+upload_state.json` and cannot resume it. A production scan found **138** such
+folders, and their drafts were sitting on Zenodo the whole time, complete but
+for the ZIP.
+
+`Resources/finish_zip_only_drafts.py` searches the other way round: it lists
+the drafts on your Zenodo account, matches each back to a local ESID by title,
+and recovers the `record_id` from the listing.
+
+```bash
+# Read-only. One paginated listing + one GET per candidate. Writes two CSVs.
+python Resources/finish_zip_only_drafts.py /absolute/path/to/Raw_Data
+
+# Canary: convert exactly one, then inspect that draft in the Zenodo UI.
+python Resources/finish_zip_only_drafts.py /absolute/path/to/Raw_Data \
+    --execute --limit 1 --yes
+
+# Then widen — or feed a previous run's summary CSV straight back in.
+python Resources/finish_zip_only_drafts.py /absolute/path/to/Raw_Data \
+    --esid Records/20260729_120000_finish_zip_only_drafts.csv --execute --yes
+```
+
+Read the summary CSV before using `--execute`. The verdict column tells you
+which drafts are `CONVERTIBLE` (ready), `RESUMABLE` (a conversion a restart
+interrupted — continue it), `ZIP_ALREADY_COMMITTED` (nothing to do), and why
+each of the rest was skipped. Every verdict has a recommended action in the
+module docstring.
+
+What it does that the state-file path cannot:
+
+- **Recovers the draft pointer.** For a `CONVERTIBLE` ESID with no state file,
+  `--execute` writes `upload_state.json` with the `record_id` from Zenodo and
+  `number_of_tries: 0`. That re-arms every other recovery tool — including
+  `standalone_tasks.py`, which will adopt that draft on the ZIP path. A state
+  file naming a *different* record is **never overwritten**: one of the two
+  drafts would be orphaned and neither choice is automatable.
+- **Refuses ambiguity instead of picking.** Two drafts sharing one ESID are
+  reported as `DUPLICATE_DRAFTS_FOR_ESID` and neither is touched.
+- **Fails closed on an unprepped folder.** A record missing *everything* reads
+  as "only the ZIP is missing" to the underlying predicate, which would
+  authorise the one-way door. This tool refuses unless both manifests parse to
+  at least one row.
+- **Stops a bad batch early.** `--max-consecutive-failures` (default 3) catches
+  an expired token, an unmounted volume or a Zenodo outage after a few ESIDs
+  instead of after hundreds.
+
+Re-running is always safe and always cheap. There is no batch progress file:
+every run re-derives state from Zenodo and from disk, so a completed draft
+falls out benign and an interrupted one re-classifies as `RESUMABLE`. The first
+Ctrl+C finishes the current ESID and exits with both reports flushed; a second
+aborts immediately. For a long batch, `nohup … --execute --yes &` and re-run on
+a cadence.
+
+**Log lines to watch for:**
+
+```
+[ESID NNN] CONVERTING to file-by-file (CONVERTIBLE) — this is a ONE-WAY DOOR.
+[ESID NNN] Recovered the draft pointer: wrote upload_state.json -> record NNN.
+[ESID NNN] REFUSING to overwrite upload_state.json — it names record X, not Y.
+N draft(s) share an ESID with another draft — ... NONE will be touched.
+STOPPING — N conversion(s) failed in a row.
+READ-ONLY run — 0 writes performed.
 ```
 
 From a `--enable-file-by-file` run (Phase 4c):

@@ -1,5 +1,112 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — discover ZIP-only drafts from Zenodo, not from local state files
+
+`finish_stuck_uploads.py` finds work by scanning `Staging_Area/` for
+`upload_state.json`. A production run showed why that is the wrong index: **138
+staging folders had no state file**, so their drafts were invisible to every
+recovery tool — while sitting on Zenodo, complete except for the ZIP, which is
+exactly the state the file-by-file fallback repairs.
+
+New tool: **`Resources/finish_zip_only_drafts.py`**. It lists the account's
+drafts, matches each back to a local ESID by title, classifies it, and — with
+`--execute` — hands the repairable ones to the existing
+`file_by_file_upload.run_file_by_file`. The `record_id` is recovered from the
+listing and written back into `upload_state.json`, which re-arms the rest of the
+pipeline. Read-only by default; two CSV reports (one row per draft, one row per
+file); `--publish` off even under `--execute`, so the normal outcome is a
+complete, inspectable draft.
+
+Reuse over reinvention: `esid_record_report.fetch_all_hits_verified` for the
+paginated listing (deterministic short-page termination plus a `hits.total`
+cross-check), `title_in_scope` / `_draft_flag_from_hit` for scoping,
+`azus_common.load_esid_args` for `--esid`, `finish_stuck_uploads._load_publish_config`
+for `community_id`/`reserve_doi`, `fbf.required_files` / `committed_keys` /
+`is_raw_upload_name` for the file sets, and `hash_raw_wavs.load_cache` for the
+report's hash columns. The genuinely new code is the classifier, the two
+reports, and the batch controls.
+
+Decisions worth recording:
+
+- **The fail-open hole is closed structurally.**
+  `only_zip_missing_from_entries` returns True for a record missing
+  EVERYTHING when the companion list is empty — the companion test is
+  vacuously satisfied — and that answer authorises a one-way door. The new
+  `classify_from_entries` refuses an empty required set outright rather than
+  relying on its caller to have checked first.
+- **`RESUMABLE` is a verdict, not a skip.** A draft already marked
+  `file_by_file` is continued, whatever fraction of its WAVs are committed.
+  An early draft of this treated "some WAVs already on the record" as a
+  skip, which would have stranded every ESID a restart interrupted — the
+  common case in a weeks-long batch.
+- **Duplicate drafts per ESID are refused with zero network calls.** This is
+  why `prep_all_datasets.filter_and_order_discovered` is not reused for
+  grouping: its `by_esid` dict is last-wins and would silently collapse the
+  pair. `--esid` still goes through `load_esid_args`, so value acceptance and
+  ordering match every other tool.
+- **The ESID is re-validated through `azus_common.normalize_esid`.**
+  `match_title` deliberately falls back to `capture[:3]` rather than aborting
+  a report; lenient is wrong for a tool that deletes files. With the default
+  patterns the two grammars agree so the re-check cannot currently fire — it
+  is kept, and documented as such, because it makes the link between "a title
+  matched" and "we will delete from this record" hold by construction.
+- **Hash columns are cache-only.** `--with-hashes` fills SHA-512 from
+  `file_list.csv` and md5 from `wav_hashes.csv`. Nothing in this tool ever
+  reads a file's bytes to hash it; doing so during a scan would turn a
+  read-only pass into a multi-day walk over terabytes.
+- **`--limit` and `--max-consecutive-failures`** are the two controls that
+  make a first production run survivable: a canary, and a stop after a few
+  failures instead of dragging hundreds of records through a one-way door on
+  one expired token.
+- **`restore_upload_state` was NOT extracted into `azus_common`** as the plan
+  proposed. `diagnose_missing_states.restore_state` refuses when any state
+  file exists; this tool must refuse only on a record MISMATCH and be a no-op
+  when the file already names the same record — that is what makes a restart
+  safe. Sharing one function would have meant a behaviour flag, so the ~15
+  lines live locally instead.
+
+Tests: `tests/test_finish_zip_only_drafts.py`, 79 tests, no network.
+
+### The bug this found: `run_file_by_file` was not idempotent
+
+Running the new tool twice against the same folder surfaced a live defect in
+the **existing** fallback, which its docstring claimed was "idempotent and
+re-runnable" and which `Guides/UPLOAD_RECOVERY_WORKFLOW.md` documented a manual
+workaround for.
+
+Step 6 rewrites `ESID_NNN_to_upload.csv` to list the whole file-by-file set —
+companions **and** raw files. `required_files` derived `companion_names` from
+every row of that manifest, so on the **second** run it read the WAVs back as
+companions, looked for them in the *staging* folder, and aborted with
+"N required file(s) not found locally". Consequences:
+
+- every resume was broken — a conversion interrupted part-way could never be
+  finished, which is precisely the `RESUMABLE` case;
+- `finish_stuck_uploads.py --enable-file-by-file` Phase B1 ("continue ESIDs
+  already in file-by-file mode") hit the same abort;
+- `only_zip_missing` inherited it too: with WAVs counted as companions, a
+  partially-uploaded record read as "a companion is also missing", so
+  `--force` refused to switch.
+
+Fix: `required_files` excludes raw-upload names (`*.wav`, `CONFIG.TXT`) from
+`companion_names` whichever manifest generation it is reading. A companion is
+by definition not a file that lives in `Raw_Data/`, so this is correct
+independent of the rewrite, and it makes the derivation idempotent by
+construction rather than by convention. The no-op case (a ZIP-mode manifest,
+which lists no WAVs) is unchanged.
+
+The recovery guide's "restore the manifest before retrying" instructions are
+replaced with "just re-run it", and
+`ESID_NNN_zip_attempt_upload.csv` is now described as provenance rather than a
+recovery mechanism.
+
+Tests: `TestRequiredFilesIsIdempotent` in `tests/test_file_by_file_upload.py`
+— a second derivation from a rewritten manifest matches the first, raw names
+never become companions, and a second full `run_file_by_file` succeeds with the
+same file set.
+
+Suite: 774 tests, docstring audit 0 gaps.
+
 ## July 2026 — md5 in the raw hash cache, so a restart re-reads nothing
 
 The hash cache made SHA-512 verification durable across restarts. It did not make the
