@@ -30,6 +30,11 @@ SAFETY INVARIANTS (see run_file_by_file)
   before the record is published / submitted for review.
 * The ZIP is explicitly removed from the record — a file-by-file record
   must never carry the ZIP.
+* The set must fit Zenodo's 100-files-per-record limit, refused BEFORE the
+  point of no return (a 6270-WAV site can never be uploaded this way).
+* ``auto_publish`` is the master publish gate.  With it off, the finished
+  record stays a DRAFT and the staging folder stays in ``Staging_Area/``
+  where the recovery tools can still see it.
 """
 
 import csv
@@ -37,6 +42,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -55,8 +61,10 @@ import azus_common  # noqa: E402
 import hash_raw_wavs  # noqa: E402
 from prepare_dataset import _FILE_LIST_HEADERS  # noqa: E402
 from models.audiomoth import DraftConfig  # noqa: E402
-from standalone_tasks import archive_staging_to_uploaded  # noqa: E402
+from requests.exceptions import HTTPError, RequestException  # noqa: E402
+
 from standalone_uploader import (  # noqa: E402
+    _PUT_RETRY_ATTEMPTS as _DEFAULT_UPLOAD_ATTEMPTS,
     Credentials,
     delete_draft_file,
     ensure_doi_reserved,
@@ -71,6 +79,15 @@ logger = logging.getLogger("azus.file_by_file")
 
 _MANIFEST_TEMPLATE = "ESID_{esid}_to_upload.csv"
 _FILE_LIST_NAME = "file_list.csv"
+
+# Zenodo accepts at most 100 files per record:
+#   https://help.zenodo.org/docs/deposit/manage-files/
+# A file-by-file record carries every WAV + CONFIG.TXT + every companion
+# individually, so a large site can exceed this — ESID 797 had 6270 WAVs.
+# Exceeding it means the upload CANNOT succeed, and discovering that after
+# the point of no return leaves a record whose ZIP has been deleted and
+# whose file set can never be completed.  Refused up front instead.
+_ZENODO_MAX_FILES_PER_RECORD = 100
 
 
 # ===================================================================
@@ -163,6 +180,53 @@ def required_files(
     return raw_files, companion_names
 
 
+def committed_keys(entries: List[Dict[str, object]]) -> set:
+    """Names of the files a draft holds as fully committed.
+
+    Args:
+        entries: Raw entries from ``GET /records/{id}/draft/files``.
+
+    Returns:
+        The ``key`` of every entry whose ``status`` is ``"completed"``.  A
+        ``pending`` slot is deliberately excluded — it holds no usable
+        bytes.
+    """
+    return {e.get("key") for e in entries if e.get("status") == "completed"}
+
+
+def only_zip_missing_from_entries(
+    entries: List[Dict[str, object]],
+    companion_names: List[str],
+    zip_name: str,
+) -> bool:
+    """Decide "only the ZIP is missing" from already-fetched draft entries.
+
+    Split out of :func:`only_zip_missing` so a caller that has already
+    listed the draft's files does not pay for a second GET, and so the
+    decision itself is testable without any network.
+
+    CAUTION — this predicate FAILS OPEN by construction: an empty
+    ``companion_names`` makes the companion test vacuously true, so a
+    record missing EVERYTHING reads as "only the ZIP is missing".  That is
+    correct for a pure predicate but dangerous for a caller, because a
+    True here authorises a one-way door.  Every caller must first prove the
+    companion list is real — see :func:`required_files` and the manifest
+    assertions in the tools that use this.
+
+    Args:
+        entries: Raw entries from ``GET /records/{id}/draft/files``.
+        companion_names: Standalone companions the record must already hold.
+        zip_name: The ESID's ZIP filename.
+
+    Returns:
+        True when every companion is committed and the ZIP is not.
+    """
+    committed = committed_keys(entries)
+    if any(name not in committed for name in companion_names):
+        return False  # a companion also failed — not a ZIP-only problem
+    return zip_name not in committed
+
+
 def only_zip_missing(
     credentials: Credentials, record_id: str, staging_dir: Path, esid: str
 ) -> bool:
@@ -173,6 +237,11 @@ def only_zip_missing(
     companion is already committed on the Zenodo record AND the ZIP is not
     committed.  If any companion is also missing (a companion failure) or
     the ZIP is already committed (nothing to switch), returns False.
+
+    Fetches the draft's file list, then delegates the decision to
+    :func:`only_zip_missing_from_entries` — see the fail-open caution in
+    that function's docstring, which applies here too whenever
+    ``staging_dir`` lacks its manifests.
 
     Args:
         credentials: Zenodo API credentials.
@@ -186,12 +255,9 @@ def only_zip_missing(
     """
     _raw, companion_names = required_files(staging_dir, esid)
     entries = list_draft_files(credentials, record_id)
-    committed = {
-        e.get("key") for e in entries if e.get("status") == "completed"
-    }
-    if any(name not in committed for name in companion_names):
-        return False  # a companion also failed — not a ZIP-only problem
-    return _zip_name(esid) not in committed
+    return only_zip_missing_from_entries(
+        entries, companion_names, _zip_name(esid)
+    )
 
 
 # ===================================================================
@@ -301,6 +367,52 @@ def rewrite_manifest_file_by_file(
 
 
 # ===================================================================
+#  Archiving
+# ===================================================================
+
+def archive_new_version_staging(
+    staging_dir: Path, esid: str, tag: str = ""
+) -> Optional[Path]:
+    """Move a finished staging folder to ``Uploaded_Data/``, refusing to clobber.
+
+    Deliberately NOT ``standalone_tasks.archive_staging_to_uploaded``: that
+    one ``shutil.rmtree``s its destination, so an ESID with both a stale
+    uploaded twin and a re-prepped staging folder loses the twin
+    irrecoverably.  Across hundreds of records that is a mass deletion, so
+    this refuses instead and leaves the folder where it is.
+
+    A refusal is NOT fatal — by the time this runs the Zenodo side is
+    already correct; only the local tidy-up did not happen.
+
+    Args:
+        staging_dir: The staging folder to move.
+        esid: Canonical ESID string (names the destination).
+        tag: Log prefix, e.g. ``"[ESID 073]"``.
+
+    Returns:
+        The destination path on success, or None when refused or failed.
+    """
+    destination = azus_common.UPLOADED_DATA / f"ESID_{esid}_Uploaded"
+    try:
+        if not staging_dir.is_dir():
+            return None
+        if destination.exists():
+            logger.error(
+                "%s REFUSING to archive — %s already exists. The staging "
+                "folder is left in place; reconcile the two by hand.",
+                tag, destination,
+            )
+            return None
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staging_dir), str(destination))
+        logger.info("%s Archived staging folder to: %s", tag, destination)
+        return destination
+    except OSError as exc:
+        logger.warning("%s Could not archive the staging folder: %s", tag, exc)
+        return None
+
+
+# ===================================================================
 #  Mode marker
 # ===================================================================
 
@@ -350,6 +462,7 @@ def run_file_by_file(
     community_id: Optional[str] = None,
     reserve_doi: bool = False,
     auto_publish: bool = False,
+    upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
 ) -> bool:
     """Finish one ESID's upload file-by-file against its existing draft.
 
@@ -367,7 +480,15 @@ def run_file_by_file(
         credentials: Zenodo API credentials.
         community_id: Community to submit the finished record to (or None).
         reserve_doi: Reserve a DataCite DOI before submit/publish.
-        auto_publish: Publish the record outright once complete.
+        auto_publish: THE MASTER PUBLISH GATE.  False (default) leaves the
+            finished record as a draft — nothing submitted, nothing
+            published, and the staging folder stays in ``Staging_Area/`` so
+            the recovery tools can still see it.  True publishes: via the
+            community review queue when ``community_id`` is set, otherwise
+            directly.  ``community_id`` decides only HOW, never WHETHER.
+        upload_attempts: PUT attempts per file before giving up on it.
+            Applies to EVERY file here (there is no ZIP on this path), so a
+            transient blip on one WAV costs one retry rather than the run.
 
     Returns:
         True when the record is complete (all files committed + verified)
@@ -403,6 +524,23 @@ def run_file_by_file(
             logger.error(
                 "%s %d required file(s) not found locally — aborting before "
                 "any upload: %s", tag, len(missing), ", ".join(missing[:10]),
+            )
+            return False
+
+        # 2b. Refuse a set Zenodo cannot hold.  Checked BEFORE the hash pass
+        #     and long before the point of no return, so an oversized ESID
+        #     costs one directory read rather than a full pass over the audio
+        #     followed by an unfinishable record.
+        total_files = len(raw_files) + len(companion_names)
+        if total_files > _ZENODO_MAX_FILES_PER_RECORD:
+            logger.error(
+                "%s REFUSING to switch — the file-by-file set is %d file(s) "
+                "(%d raw + %d companion) but Zenodo accepts at most %d per "
+                "record. This site cannot be uploaded file-by-file; it needs "
+                "splitting (Resources/split_oversized_raw_folders.py) or the "
+                "ZIP. Nothing was changed.",
+                tag, total_files, len(raw_files), len(companion_names),
+                _ZENODO_MAX_FILES_PER_RECORD,
             )
             return False
 
@@ -448,15 +586,37 @@ def run_file_by_file(
             )
             return False
 
-        # 4. Confirm the draft exists; NEVER let a 404 fall through to fresh
-        #    creation (which would mint a blank duplicate record).
-        if get_draft_record(credentials, record_id) is None:
-            logger.error(
-                "%s Draft record %s not found on Zenodo (404). Aborting — "
-                "reset this folder's upload_state.json to re-create/re-upload.",
-                tag, record_id,
+        # 4. Confirm the draft exists.  Three outcomes, and the difference
+        #    matters (mirrors the resume path at standalone_uploader.py
+        #    1762-1782):
+        #      dict   -> the draft is there.
+        #      None   -> a true 404. ABORT: letting this fall through would
+        #                mint a blank duplicate record.
+        #      raises -> /draft is broken for this draft but the draft
+        #                itself may be fine. A lingering "pending" file slot
+        #                is documented to make Zenodo's serializer 500 —
+        #                which is EXACTLY the state a timed-out ZIP leaves,
+        #                i.e. the state this module exists to repair. Aborting
+        #                on it (as this did until July 2026, seen on ESID 797)
+        #                blocked the repair on its own symptom. Proceed: the
+        #                file-list endpoint below is a different Zenodo
+        #                handler and is the corroborating call — if THAT
+        #                fails too, the except at the bottom catches it.
+        try:
+            if get_draft_record(credentials, record_id) is None:
+                logger.error(
+                    "%s Draft record %s not found on Zenodo (404). Aborting — "
+                    "reset this folder's upload_state.json to "
+                    "re-create/re-upload.", tag, record_id,
+                )
+                return False
+        except (HTTPError, RequestException) as exc:
+            logger.warning(
+                "%s Could not read draft %s (%s: %s) — most likely a leftover "
+                "pending file slot breaking Zenodo's serializer. Continuing "
+                "via the file-list endpoint, which uses a different handler.",
+                tag, record_id, exc.__class__.__name__, exc,
             )
-            return False
 
         # 5. ZIP-STATE GUARD (before any mutation). Inspect the record: if the
         #    ZIP is already COMMITTED, the ZIP upload SUCCEEDED — this ESID is
@@ -527,6 +687,15 @@ def run_file_by_file(
             title_guard=False,
             auto_publish=False,
             submit_review=False,
+            # zip_filename=None makes upload_attempts apply to EVERY file
+            # rather than just a ZIP — there is no ZIP on this path.
+            upload_attempts=upload_attempts,
+            zip_filename=None,
+            # md5s harvested from the same size+mtime-validated cache rows as
+            # the SHA-512s.  Without this, a restart re-hashes every
+            # already-committed WAV to verify it, re-reading the whole
+            # dataset — the opposite of resumable.
+            known_md5s=resolved_hashes.md5s or None,
         )
         if not result.get("successful"):
             err = (result.get("error") or {}).get("error_message", "unknown")
@@ -555,17 +724,41 @@ def run_file_by_file(
             )
             return False
 
-        # 9. Reserve DOI (best-effort), then submit-to-community / publish.
+        # 9. Reserve DOI (best-effort), then publish — but ONLY when the
+        #    caller asked for it.  auto_publish is the master gate;
+        #    community_id decides only HOW to publish, never WHETHER.
+        #    Until July 2026 the test was `if community_id: submit(...)`
+        #    FIRST, so a truthy community_id (the production default) pushed
+        #    every completed record into the review queue even with
+        #    auto_publish=False — and a manager's accept publishes
+        #    permanently.  This ordering matches upload_to_zenodo, where
+        #    submit_review and auto_publish are independent.
         ensure_doi_reserved(credentials, record_id)
-        if community_id:
+        if not auto_publish:
+            logger.info(
+                "%s Complete and left as a DRAFT — %d file(s) committed, ZIP "
+                "absent, nothing submitted or published (auto_publish is "
+                "off).", tag, len(required_names),
+            )
+        elif community_id:
             logger.info("%s Submitting to community review queue...", tag)
             submit_to_community_review(credentials, record_id, community_id)
-        elif auto_publish:
+        else:
             logger.info("%s Publishing record...", tag)
             publish_draft(credentials, record_id)
 
-        # 10. Archive the completed staging folder out of Staging_Area/.
-        archive_staging_to_uploaded(staging_dir, esid, tag)
+        # 10. Archive the staging folder out of Staging_Area/ — ONLY when the
+        #     record actually left draft state.  Uploaded_Data/ means
+        #     "uploaded AND published"; moving a folder there while its
+        #     record is still a draft hides it from every recovery tool
+        #     (they all scan Staging_Area/) and orphans the later publish.
+        if auto_publish:
+            archive_new_version_staging(staging_dir, esid, tag)
+        else:
+            logger.info(
+                "%s Staging folder left in place — the record is still a "
+                "draft and must stay visible to the recovery tools.", tag,
+            )
         logger.info(
             "%s File-by-file upload COMPLETE (%d files on record).",
             tag, len(required_names),

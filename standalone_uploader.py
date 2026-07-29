@@ -118,6 +118,23 @@ class FileIntegrityError(Exception):
     """
 
 
+def _rate_limit_message(response: "requests.Response", label: str) -> str:
+    """Build the retry message for an HTTP 429, honouring ``Retry-After``.
+
+    Args:
+        response: The 429 response.
+        label: What was being requested, for the log line.
+
+    Returns:
+        A message naming the wait Zenodo asked for, when it supplied one.
+    """
+    retry_after = (response.headers or {}).get("Retry-After", "")
+    suffix = (
+        f" Zenodo asked for {retry_after}s." if str(retry_after).strip() else ""
+    )
+    return f"Rate limited (HTTP 429) on {label}.{suffix}"
+
+
 def _calculate_md5(file_path: str) -> str:
     """Stream a file through md5 (Zenodo's checksum algorithm).
 
@@ -862,6 +879,11 @@ def _put_file_content_with_retry(
                     url, data=fh, headers=auth_headers,
                     timeout=_REQUEST_TIMEOUT,
                 )
+            if response.status_code == 429:
+                # See _api_get_with_retry: 429 is the retryable 4xx.
+                raise RequestException(
+                    _rate_limit_message(response, Path(file_path).name)
+                )
             # Treat 5xx as a transient error worth retrying; 4xx is fatal.
             if 500 <= response.status_code < 600:
                 raise RequestException(
@@ -978,6 +1000,14 @@ def _api_get_with_retry(
             )
             if allow_404 and response.status_code == 404:
                 return None
+            if response.status_code == 429:
+                # Rate limited. A 4xx, so raise_for_status would make this
+                # fatal — but it is the one 4xx that retrying DOES fix.
+                # Route it into the backoff below, honouring Retry-After
+                # when Zenodo supplies one.
+                raise RequestException(
+                    _rate_limit_message(response, label)
+                )
             if 500 <= response.status_code < 600:
                 raise RequestException(
                     f"Server error HTTP {response.status_code}: "

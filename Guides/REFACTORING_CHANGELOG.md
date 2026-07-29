@@ -1,5 +1,62 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — three defects in the file-by-file fallback, found by ESID 797
+
+A production run on ESID 797 failed three ways at once, and the log made all three
+visible. Fixing them is a prerequisite for scanning Zenodo for convertible drafts,
+because at a few hundred records each becomes a mass event rather than one bad ESID.
+
+**1. `auto_publish=False` did not leave the record a draft.** The publish step tested
+`if community_id:` FIRST and only then `elif auto_publish:`. `project_config.json` holds
+a real community UUID and `finish_stuck_uploads._load_publish_config` reads it — so every
+completed conversion went into the community review queue whatever `auto_publish` said,
+and a manager's accept publishes permanently. **`auto_publish` is now the master gate**;
+`community_id` decides only *how* to publish, never *whether*. This also aligns the module
+with `upload_to_zenodo`, where the two are independent parameters — this was the only place
+that conflated them. Consequence, deliberately: `finish_stuck_uploads
+--enable-file-by-file` reads `uploads.auto_publish` from `config.json`, which the template
+sets to `false`, so it now leaves drafts. `Guides/UPLOAD_RECOVERY_WORKFLOW.md` is corrected
+in the same change; set `uploads.auto_publish: true` for the old behaviour.
+
+**2. Step 10 deleted an existing `Uploaded_Data/` twin.**
+`archive_staging_to_uploaded` `rmtree`s its destination, and the fallback called it
+unconditionally on success. The module now owns `archive_new_version_staging`, which
+**refuses** rather than clobbering — the previous version's archive is the only local record
+of what it contained. It is also only called when the record actually left draft state:
+`Uploaded_Data/` means "uploaded AND published", and moving a folder there while its record
+is still a draft hides it from every recovery tool (they all scan `Staging_Area/`) and
+orphans the later publish.
+
+**3. A broken `/draft` blocked the repair it was a symptom of.** A leftover pending file
+slot makes Zenodo's serializer 500 on `GET /draft` — exactly what a timed-out ZIP leaves
+behind. `upload_to_zenodo` has always tolerated this and resumed via the file-list endpoint
+(a different Zenodo handler); the fallback's existence check did not, so it aborted on its
+own symptom. It now distinguishes all three outcomes: a dict proceeds, a **404 still
+aborts** (letting that fall through would mint a duplicate record), and a 5xx proceeds with
+a warning, with `list_draft_files` as the corroborating call.
+
+Also in this change:
+
+- **A hard 100-files-per-record refusal** (`_ZENODO_MAX_FILES_PER_RECORD`, cited to
+  <https://help.zenodo.org/docs/deposit/manage-files/>), checked before the hash pass and
+  well before the point of no return. ESID 797 had 6270 WAVs: it could never have been
+  uploaded file-by-file, and the old code would have discovered that only after deleting
+  the ZIP slot. Refusing early leaves the ESID recoverable as a ZIP.
+- **`upload_attempts` reaches the WAVs.** `run_file_by_file` gained the keyword and
+  forwards it with `zip_filename=None`, which makes it apply to every file rather than to a
+  ZIP that does not exist on this path. `finish_stuck_uploads` now forwards its existing
+  `--upload-attempts` there too, instead of only using it for the ZIP pass.
+- **`only_zip_missing_from_entries`** extracted as a pure predicate, with its fail-open
+  behaviour documented at the top of the docstring: an empty companion list makes the test
+  vacuously true, so a caller must prove the list is real before trusting a True. The
+  network version delegates to it, and a caller that already listed the draft's files avoids
+  a second GET.
+- **HTTP 429 is now retryable** in both of `standalone_uploader`'s retry loops. Both treated
+  every 4xx as fatal — right for 400/401/404, wrong for the one 4xx that retrying fixes.
+  429 now routes into the existing backoff and honours `Retry-After` when Zenodo supplies it.
+
+10 new tests (suite 674 → 684), audit 0 gaps.
+
 ## July 2026 — make the raw-file hash pass durable instead of optional
 
 The file-by-file fallback verifies every raw WAV and `CONFIG.TXT` against the

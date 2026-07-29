@@ -107,11 +107,17 @@ class HashResult:
             served from the cache.  A name absent here could not be read.
         reused: How many hashes came from the cache unchanged.
         hashed: How many files were read and hashed this call.
+        md5s: ``{name: md5}`` for every file whose cache row carries one.
+            Fed to the uploader as ``known_md5s`` so a resume does not
+            re-read already-committed files to verify them.  Populated only
+            when the caller asks for md5 (see ``need_md5``); a row cached
+            before md5 was recorded simply does not appear here.
         missing: Requested names that are not present in the folder.
         errors: ``"name: reason"`` for each file that could not be read.
     """
 
     hashes: Dict[str, str] = field(default_factory=dict)
+    md5s: Dict[str, str] = field(default_factory=dict)
     reused: int = 0
     hashed: int = 0
     missing: List[str] = field(default_factory=list)

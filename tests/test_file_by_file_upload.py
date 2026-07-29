@@ -23,6 +23,8 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from requests.exceptions import RequestException
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "Resources"))
@@ -146,20 +148,21 @@ class _FixtureCase(unittest.TestCase):
             "submit_to_community_review": mock.patch.object(
                 fbf, "submit_to_community_review"),
             "ensure_doi_reserved": mock.patch.object(fbf, "ensure_doi_reserved"),
-            "archive_staging_to_uploaded": mock.patch.object(
-                fbf, "archive_staging_to_uploaded"),
+            "archive_new_version_staging": mock.patch.object(
+                fbf, "archive_new_version_staging"),
         }
         started = {k: p.start() for k, p in patchers.items()}
         for p in patchers.values():
             self.addCleanup(p.stop)
         return started
 
-    def _run(self, *, community_id="COMM", reserve_doi=False, auto_publish=False):
+    def _run(self, *, community_id="COMM", reserve_doi=False,
+             auto_publish=False, upload_attempts=3):
         return fbf.run_file_by_file(
             esid=_ESID, staging_dir=self.staging, raw_dir=self.raw,
             record_id=_RECORD, credentials=mock.Mock(),
             community_id=community_id, reserve_doi=reserve_doi,
-            auto_publish=auto_publish,
+            auto_publish=auto_publish, upload_attempts=upload_attempts,
         )
 
 
@@ -176,7 +179,14 @@ class TestRequiredFiles(_FixtureCase):
 
 
 class TestHappyPath(_FixtureCase):
-    def test_submits_to_community_and_archives(self):
+    def test_uploads_the_full_set_and_leaves_a_draft(self):
+        """auto_publish=False must mean DRAFT, even with a community_id.
+
+        Until July 2026 the publish step tested `if community_id:` FIRST, so
+        a truthy community_id (the production default) submitted every
+        completed record for review regardless of auto_publish — and a
+        manager's accept publishes permanently.
+        """
         self._all_names = list(self.build())
         api = self._patch_api()
         ok = self._run(community_id="COMM", reserve_doi=True)
@@ -189,13 +199,31 @@ class TestHappyPath(_FixtureCase):
         # publish OFF on the upload call (this module owns the gate).
         self.assertFalse(api["upload_to_zenodo"].call_args.kwargs["auto_publish"])
         self.assertFalse(api["upload_to_zenodo"].call_args.kwargs["submit_review"])
+        # upload_attempts applies to EVERY file: no ZIP on this path.
+        self.assertIsNone(api["upload_to_zenodo"].call_args.kwargs["zip_filename"])
 
-        # Completeness passed → submitted to community, NOT published.
+        # THE CONTRACT: nothing left draft state, and the folder stayed put
+        # so the recovery tools can still see it.
+        api["submit_to_community_review"].assert_not_called()
+        api["publish_draft"].assert_not_called()
+        api["archive_new_version_staging"].assert_not_called()
+        api["delete_draft_file"].assert_not_called()
+
+    def test_submits_to_community_only_when_auto_publish_is_on(self):
+        self._all_names = list(self.build())
+        api = self._patch_api()
+        self.assertTrue(self._run(community_id="COMM", auto_publish=True))
         api["submit_to_community_review"].assert_called_once()
         api["publish_draft"].assert_not_called()
-        api["archive_staging_to_uploaded"].assert_called_once()
-        # No ZIP on the record → no delete needed.
-        api["delete_draft_file"].assert_not_called()
+        api["archive_new_version_staging"].assert_called_once()
+
+    def test_forwards_upload_attempts_to_every_file(self):
+        self._all_names = list(self.build())
+        api = self._patch_api()
+        self.assertTrue(self._run(upload_attempts=2))
+        kwargs = api["upload_to_zenodo"].call_args.kwargs
+        self.assertEqual(kwargs["upload_attempts"], 2)
+        self.assertIsNone(kwargs["zip_filename"])
 
         # file_list.csv rewritten without the ZIP row; mode marked.
         rows = list(csv.DictReader(
@@ -241,7 +269,7 @@ class TestZipRemoval(_FixtureCase):
         api["upload_to_zenodo"].assert_not_called()        # no file-by-file
         api["submit_to_community_review"].assert_not_called()
         api["publish_draft"].assert_not_called()
-        api["archive_staging_to_uploaded"].assert_not_called()
+        api["archive_new_version_staging"].assert_not_called()
         # Mode was NOT marked — the ESID stays recoverable as ZIP.
         state = json.loads((self.staging / "upload_state.json").read_text())
         self.assertNotIn("mode", state)
@@ -348,6 +376,127 @@ class TestArchivesExcludedFromPrep(_FixtureCase):
             azus_common.MANIFEST_ARCHIVE_FILE_BY_FILE.format(esid=_ESID), stashed)
 
 
+class TestFileCountCeiling(_FixtureCase):
+    """Zenodo caps a record at 100 files; refuse before the one-way door."""
+
+    def _oversize(self, total_wavs):
+        """Add file_list.csv rows for `total_wavs` WAVs that exist on disk."""
+        rows = [_flrow(_ZIP, "ZIP Archive (.zip)", b"z")]
+        for name in _COMPANIONS:
+            rows.append(_flrow(name, "CSV", b"x"))
+        rows.append(_flrow("CONFIG.TXT", "Plain Text (.txt)", _CONFIG))
+        (self.raw / "CONFIG.TXT").write_bytes(_CONFIG)
+        for i in range(total_wavs):
+            name = f"20240408_{i:06d}.WAV"
+            data = b"A" * 16
+            (self.raw / name).write_bytes(data)
+            rows.append(_flrow(name, "Waveform Audio File Format (.WAV)", data))
+        for name in ("README.md", "total_eclipse_data.csv"):
+            (self.staging / name).write_text("x")
+        with open(self.staging / "file_list.csv", "w", encoding="utf-8",
+                  newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=_FILE_LIST_HEADERS)
+            w.writeheader()
+            w.writerows(rows)
+        with open(self.staging / f"ESID_{_ESID}_to_upload.csv", "w",
+                  encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["File Name", "Notes"])
+            w.writeheader()
+            for name in [_ZIP] + _COMPANIONS:
+                w.writerow({"File Name": name, "Notes": ""})
+        (self.staging / "upload_state.json").write_text(
+            json.dumps({"record_id": _RECORD})
+        )
+
+    def test_refuses_over_the_limit_before_the_point_of_no_return(self):
+        # 3 companions + CONFIG.TXT + 97 WAVs = 101 files.
+        self._oversize(97)
+        self._all_names = []
+        api = self._patch_api()
+        with mock.patch.object(
+            fbf, "mark_file_by_file_mode",
+            side_effect=AssertionError("must refuse BEFORE the mode marker"),
+        ):
+            self.assertFalse(self._run())
+        api["upload_to_zenodo"].assert_not_called()
+        api["delete_draft_file"].assert_not_called()
+        # Refused before any network call at all.
+        api["get_draft_record"].assert_not_called()
+
+    def test_exactly_at_the_limit_is_allowed(self):
+        # 3 companions + CONFIG.TXT + 96 WAVs = 100 files.
+        self._oversize(96)
+        names = [f"20240408_{i:06d}.WAV" for i in range(96)]
+        self._all_names = _COMPANIONS + ["CONFIG.TXT"] + names
+        api = self._patch_api()
+        self.assertTrue(self._run())
+        api["upload_to_zenodo"].assert_called_once()
+
+    def test_the_limit_matches_the_documented_zenodo_cap(self):
+        self.assertEqual(fbf._ZENODO_MAX_FILES_PER_RECORD, 100)
+
+
+class TestDraftEndpointFailure(_FixtureCase):
+    """A broken /draft must not block the repair it is a symptom of."""
+
+    def test_5xx_on_get_draft_proceeds(self):
+        """ESID 797: a pending ZIP slot 500s /draft — the exact state this
+        module exists to clear."""
+        self._all_names = list(self.build())
+        api = self._patch_api()
+        api["get_draft_record"].side_effect = RequestException("HTTP 500")
+        self.assertTrue(self._run())
+        api["upload_to_zenodo"].assert_called_once()
+
+    def test_true_404_still_aborts(self):
+        """The invariant at risk when loosening the None check: a genuinely
+        absent draft must never fall through to fresh creation."""
+        self._all_names = list(self.build())
+        api = self._patch_api(draft=None)
+        with mock.patch.object(
+            fbf, "mark_file_by_file_mode",
+            side_effect=AssertionError("a 404 must abort before the marker"),
+        ):
+            self.assertFalse(self._run())
+        api["upload_to_zenodo"].assert_not_called()
+
+    def test_file_list_failing_too_aborts(self):
+        self._all_names = list(self.build())
+        api = self._patch_api(list_side_effect=RequestException("HTTP 500"))
+        api["get_draft_record"].side_effect = RequestException("HTTP 500")
+        self.assertFalse(self._run())
+        api["upload_to_zenodo"].assert_not_called()
+
+
+class TestArchiveRefusesToClobber(_FixtureCase):
+    """The previous version's archive is never deleted."""
+
+    def test_refuses_when_the_destination_exists(self):
+        uploaded = self.root / "Uploaded_Data"
+        destination = uploaded / f"ESID_{_ESID}_Uploaded"
+        destination.mkdir(parents=True)
+        (destination / "evidence.txt").write_text("do not delete me\n")
+        with mock.patch.object(azus_common, "UPLOADED_DATA", uploaded):
+            self.assertIsNone(
+                fbf.archive_new_version_staging(self.staging, _ESID, "[t]")
+            )
+        self.assertTrue(self.staging.is_dir(), "staging must stay put")
+        self.assertEqual(
+            (destination / "evidence.txt").read_text(), "do not delete me\n"
+        )
+
+    def test_moves_when_the_destination_is_free(self):
+        uploaded = self.root / "Uploaded_Data"
+        (self.staging / "marker.txt").write_text("x")
+        with mock.patch.object(azus_common, "UPLOADED_DATA", uploaded):
+            destination = fbf.archive_new_version_staging(
+                self.staging, _ESID, "[t]"
+            )
+        self.assertEqual(destination, uploaded / f"ESID_{_ESID}_Uploaded")
+        self.assertFalse(self.staging.exists())
+        self.assertTrue((destination / "marker.txt").is_file())
+
+
 class TestSafetyGates(_FixtureCase):
     def test_draft_404_aborts_before_upload(self):
         self._all_names = list(self.build())
@@ -379,7 +528,7 @@ class TestSafetyGates(_FixtureCase):
         self.assertFalse(self._run())
         api["submit_to_community_review"].assert_not_called()
         api["publish_draft"].assert_not_called()
-        api["archive_staging_to_uploaded"].assert_not_called()
+        api["archive_new_version_staging"].assert_not_called()
 
     def test_upload_failure_blocks_publish(self):
         self._all_names = list(self.build())
@@ -388,7 +537,7 @@ class TestSafetyGates(_FixtureCase):
                            "error": {"error_message": "timeout"}})
         self.assertFalse(self._run())
         api["submit_to_community_review"].assert_not_called()
-        api["archive_staging_to_uploaded"].assert_not_called()
+        api["archive_new_version_staging"].assert_not_called()
 
 
 class TestOnlyZipMissing(_FixtureCase):

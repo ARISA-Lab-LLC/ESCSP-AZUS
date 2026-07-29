@@ -178,12 +178,34 @@ Four things to know before you run it:
   `file_list.csv` before anything is uploaded, and the record is only
   published or submitted once a completeness gate confirms the full set is
   committed and the ZIP is gone.
-- **Success submits the record.** With a `community_id` in
-  `project_config.json` — the production default — a completed
-  file-by-file run submits the record to the community review queue, and
-  acceptance publishes it. A published record cannot accept new files. To
-  rehearse without that, run against a `--config` whose `project_config`
-  has no `community_id`; the run then stops at "uploaded, still a draft".
+- **Success leaves a DRAFT unless `uploads.auto_publish` is true.** As of
+  July 2026 `auto_publish` is the master publish gate: with it off (the
+  shipped default) a completed file-by-file run uploads everything, checks
+  completeness, and stops — nothing submitted, nothing published, and the
+  staging folder stays in `Staging_Area/` so this tool can still see it.
+  `community_id` now decides only *how* to publish, never *whether*.
+
+  Before that fix the test was `if community_id:` first, so a truthy
+  `community_id` — the production default — submitted every completed record
+  for review regardless of `auto_publish`, and a manager's accept published
+  it permanently. If you want that behaviour, set
+  `uploads.auto_publish: true` in `config.json`, which is now an honest
+  description of what it does.
+
+- **A site with too many files is refused up front.** Zenodo accepts at most
+  100 files per record (<https://help.zenodo.org/docs/deposit/manage-files/>),
+  and a file-by-file record carries every WAV individually. An ESID whose
+  required set exceeds that is refused **before** the mode marker and before
+  the ZIP slot is cleared, so it stays recoverable as a ZIP. ESID 797 had
+  6270 WAVs — it could never have been uploaded this way, and now says so in
+  the first second instead of after a full hash pass.
+
+- **A broken `/draft` no longer blocks the repair.** A leftover pending ZIP
+  slot makes Zenodo's serializer return HTTP 500 on `GET /draft` — which is
+  precisely the state a timed-out ZIP leaves, i.e. the state this fallback
+  exists to clear. The switch used to abort on it. It now proceeds via the
+  file-list endpoint (a different Zenodo handler); a true 404 still aborts,
+  because that would otherwise mint a duplicate record.
 
 Once switched, the ESID is marked `mode: file_by_file` in its
 `upload_state.json` and the ordinary ZIP pipeline **skips it** — so

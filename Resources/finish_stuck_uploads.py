@@ -483,6 +483,9 @@ def _run_with_file_by_file(
             record_id=record_id, credentials=credentials,
             community_id=community_id, reserve_doi=reserve_doi,
             auto_publish=auto_publish,
+            # On this path there is no ZIP, so --upload-attempts applies to
+            # every WAV rather than to a single archive.
+            upload_attempts=args.upload_attempts,
         )
 
     failures: List[str] = []
