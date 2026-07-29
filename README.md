@@ -124,7 +124,12 @@ Python code.
   altered afterwards is detected by the `stat` and re-hashed. Safe to re-run
   (only new or changed files are read) and safe to skip entirely: an un-warmed
   folder is hashed and cached on first use. `--recheck` ignores the caches for
-  a genuine re-verification. Covered by `tests/test_hash_raw_wavs.py`.
+  a genuine re-verification. `--backfill-md5` also records each file's md5
+  beside its SHA-512 — Zenodo verifies uploads by md5, so a cache carrying one
+  lets an interrupted file-by-file run confirm what it already sent instead of
+  re-reading it. Both digests come from a single pass, and a row written before
+  the MD5 column existed stays fully valid for SHA-512, so no existing cache is
+  invalidated. Covered by `tests/test_hash_raw_wavs.py`.
 - **New version of a published record** — `Resources/new_version_upload.py`
   publishes a re-prepped staging package as a **new Zenodo version** of an
   already-published record, for the case where the published metadata is wrong

@@ -555,18 +555,33 @@ def run_file_by_file(
         #    cache updated.  This cannot weaken the check — a stale entry is
         #    detected by the stat and re-hashed — it only stops the work
         #    being thrown away.  Pre-warm with Resources/hash_raw_wavs.py.
+        #
+        #    need_md5 asks the cache for each file's md5 as well.  Zenodo
+        #    verifies an upload by md5, so handing those to the uploader as
+        #    known_md5s (step 9) lets a restart confirm an already-committed
+        #    file WITHOUT re-reading it.  Without them a resume re-reads
+        #    every byte it already sent, which on a multi-day run is the
+        #    whole cost the cache exists to remove.  Both digests come from
+        #    the same single pass, so asking for md5 costs nothing extra.
         logger.info(
             "%s Verifying SHA-512 of %d raw file(s) against file_list.csv "
             "(cached hashes reused where still valid)...", tag, len(raw_files),
         )
         resolved_hashes = hash_raw_wavs.ensure_hashes(
-            raw_dir, [name for name, _ in raw_files], tag=tag,
+            raw_dir, [name for name, _ in raw_files], tag=tag, need_md5=True,
         )
         logger.info(
-            "%s %d hash(es) reused from %s, %d computed now.",
+            "%s %d hash(es) reused from %s, %d computed now, %d md5 "
+            "backfilled.",
             tag, resolved_hashes.reused, hash_raw_wavs.CACHE_FILENAME,
-            resolved_hashes.hashed,
+            resolved_hashes.hashed, resolved_hashes.md5_backfilled,
         )
+        # Not fatal on its own — an unreadable file surfaces below as a
+        # missing hash, and a cache/file SHA-512 disagreement is resolved in
+        # favour of the file, which is then checked against file_list.csv.
+        # But it must never be silent: it means a cache row was wrong.
+        for problem in resolved_hashes.errors[:10]:
+            logger.warning("%s Hash cache problem: %s", tag, problem)
 
         hash_problems: List[str] = []
         for name, expected in raw_files:

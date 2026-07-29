@@ -1,5 +1,49 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — md5 in the raw hash cache, so a restart re-reads nothing
+
+The hash cache made SHA-512 verification durable across restarts. It did not make the
+*upload* durable, and that turned out to be the larger cost.
+
+`upload_to_zenodo`'s resume reconciliation skips an already-committed file only after
+confirming its size **and** md5 — Zenodo's own checksum. Its `known_md5s` parameter lets a
+caller supply those instead; with nothing to supply, it read every byte it had already sent
+back off disk to compute them. So a conversion interrupted at 90% re-read ~90% of the
+dataset before uploading its first remaining file, which on a multi-day run is precisely
+the cost the cache was built to remove.
+
+`wav_hashes.csv` now carries an `MD5` column beside the `SHA-512`, and
+`file_by_file_upload` passes it through as `known_md5s`.
+
+- **`azus_common.calculate_digests(path, ("sha512", "md5"))` feeds both hashers from one
+  chunk loop**, so recording md5 costs no additional reads — the same reason the ZIP path
+  uses it.
+- **The column is appended LAST**, so `csv.DictReader` on a pre-MD5 cache yields `None` for
+  it rather than mis-aligning the other four columns. `load_cache` now returns
+  `(size, mtime, sha512, md5)` with `""` for a legacy row.
+- **A legacy row stays fully valid for SHA-512.** Adding the column does not invalidate a
+  cache that took days to build: a caller that does not need md5 reads nothing at all. This
+  is pinned by a test that counts `calculate_digests` calls and asserts zero.
+- **`need_md5=True` backfills on demand.** A matching row with an empty md5 cell is read
+  once, and both digests are filled. Without this a warm legacy cache would never acquire
+  md5s — it would always look fresh.
+- **The backfill cross-checks the cached SHA-512 for free.** The bytes are in hand anyway.
+  A row whose SHA-512 disagrees with the file it describes — while size and mtime are
+  unchanged, which no ordinary edit achieves — is reported as an error, and the **fresh**
+  hash is served, because the file on disk is what `file_list.csv` must be compared
+  against. The stale row is replaced.
+- **`--backfill-md5`** pre-pays the cost overnight rather than during an upload.
+- md5 is served only when size+mtime match **and** the cell is non-empty, so `known_md5s`
+  always comes from the same validated row as the SHA-512. Harvesting md5s any other way
+  would reintroduce the staleness hole the cache was designed to close.
+
+Also: the two tests that simulated an unreadable file were patching `calculate_sha512`,
+which `ensure_hashes` no longer calls; they now patch `calculate_digests`. And
+`hash_raw_wavs.py`'s exit code 1 covers a cache disagreement as well as an unreadable
+file — the summary line said "unreadable" for both.
+
+Tests: `tests/test_hash_raw_wavs.py::TestMd5Cache`, 8 new (692 total).
+
 ## July 2026 — three defects in the file-by-file fallback, found by ESID 797
 
 A production run on ESID 797 failed three ways at once, and the log made all three

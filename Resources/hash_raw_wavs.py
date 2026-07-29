@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-compute and cache SHA-512 hashes of raw WAV files, per ESID folder.
+"""Pre-compute and cache hashes of raw WAV files, per ESID folder.
 
 PURPOSE
 =======
@@ -17,6 +17,22 @@ This module makes that work durable.  Each raw ESID folder gets a
 time and SHA-512.  A later run reuses a cached hash whenever the file's
 size AND mtime still match, and hashes only what is new or changed — so a
 restart re-reads nothing.
+
+WHY MD5 TOO
+===========
+Zenodo verifies an upload by md5, and ``upload_to_zenodo`` skips an
+already-committed file only after confirming its size and md5.  Supplied
+with cached md5s it confirms them from the CSV; without them it re-reads
+every byte it already sent.  So on a run interrupted at 90%, the md5
+column is the difference between resuming in seconds and paying for
+another full pass.  ``azus_common.calculate_digests`` derives both digests
+from one chunk loop, so recording md5 costs no extra reads.
+
+The column was added after caches were already in service, and a row
+lacking it stays FULLY VALID for SHA-512 — an existing cache is never
+invalidated.  ``--backfill-md5`` fills those rows in one read each (and
+cross-checks the cached SHA-512 while the bytes are in hand), so the cost
+can be pre-paid rather than met mid-upload.
 
 Run as a CLI it pre-warms the cache for a whole ``Raw_Data`` tree, which
 can be done at any convenient time (overnight, before a batch) so the
@@ -63,11 +79,15 @@ USAGE
     # Ignore the caches and hash everything again (a real re-verification)
     python Resources/hash_raw_wavs.py /path/to/Raw_Data --recheck
 
+    # Add md5 beside each SHA-512 so an interrupted upload resumes for free
+    python Resources/hash_raw_wavs.py /path/to/Raw_Data --backfill-md5
+
 EXIT CODES
 ==========
 * ``0`` — every folder's cache is complete
-* ``1`` — at least one file could not be read (its folder's cache is
-  written for everything that could be)
+* ``1`` — at least one file could not be read, or a cached SHA-512 was
+  found to disagree with the file it describes (each folder's cache is
+  still written for everything that could be resolved)
 * ``2`` — usage error (folder missing, bad ``--esid``)
 """
 
@@ -95,7 +115,14 @@ logger = logging.getLogger("azus.wav_hashes")
 # keeps the cached hashes valid in whichever half a file lands in.
 CACHE_FILENAME = "wav_hashes.csv"
 
-_CACHE_COLUMNS = ["File Name", "File Size (Bytes)", "Modified (epoch)", "SHA-512"]
+# MD5 is appended LAST so csv.DictReader on a pre-MD5 cache yields None for
+# it rather than mis-aligning the other columns.  Zenodo verifies uploads by
+# md5, so caching it beside the SHA-512 lets a resume skip an
+# already-committed file without re-reading it — and
+# azus_common.calculate_digests computes both in ONE pass over the bytes.
+_CACHE_COLUMNS = [
+    "File Name", "File Size (Bytes)", "Modified (epoch)", "SHA-512", "MD5",
+]
 
 
 @dataclass
@@ -107,6 +134,8 @@ class HashResult:
             served from the cache.  A name absent here could not be read.
         reused: How many hashes came from the cache unchanged.
         hashed: How many files were read and hashed this call.
+        md5_backfilled: How many files were read only to add a missing md5
+            to a row whose SHA-512 was already valid.
         md5s: ``{name: md5}`` for every file whose cache row carries one.
             Fed to the uploader as ``known_md5s`` so a resume does not
             re-read already-committed files to verify them.  Populated only
@@ -120,6 +149,7 @@ class HashResult:
     md5s: Dict[str, str] = field(default_factory=dict)
     reused: int = 0
     hashed: int = 0
+    md5_backfilled: int = 0
     missing: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
@@ -155,7 +185,7 @@ def cache_path(folder: Path) -> Path:
     return folder / CACHE_FILENAME
 
 
-def load_cache(folder: Path) -> Dict[str, Tuple[int, int, str]]:
+def load_cache(folder: Path) -> Dict[str, Tuple[int, int, str, str]]:
     """Read a folder's hash cache, tolerating absence and corruption.
 
     A missing, unreadable or malformed cache reads as empty rather than
@@ -167,12 +197,15 @@ def load_cache(folder: Path) -> Dict[str, Tuple[int, int, str]]:
         folder: The raw ESID folder.
 
     Returns:
-        ``{name: (size, mtime, sha512)}`` for every well-formed row.
+        ``{name: (size, mtime, sha512, md5)}`` for every well-formed row.
+        ``md5`` is ``""`` for rows written before the MD5 column existed —
+        those rows stay FULLY VALID for SHA-512, so adding the column never
+        forces a re-hash of an already-cached tree.
     """
     path = cache_path(folder)
     if not path.is_file():
         return {}
-    entries: Dict[str, Tuple[int, int, str]] = {}
+    entries: Dict[str, Tuple[int, int, str, str]] = {}
     try:
         with open(path, "r", encoding="utf-8", newline="") as fh:
             for row in csv.DictReader(fh):
@@ -185,7 +218,9 @@ def load_cache(folder: Path) -> Dict[str, Tuple[int, int, str]]:
                     mtime = int((row.get("Modified (epoch)") or "").strip())
                 except ValueError:
                     continue
-                entries[name] = (size, mtime, digest)
+                entries[name] = (
+                    size, mtime, digest, (row.get("MD5") or "").strip()
+                )
     except (OSError, csv.Error) as exc:
         logger.warning(
             "Could not read %s (%s) — treating the cache as empty.", path, exc,
@@ -194,7 +229,9 @@ def load_cache(folder: Path) -> Dict[str, Tuple[int, int, str]]:
     return entries
 
 
-def write_cache(folder: Path, entries: Dict[str, Tuple[int, int, str]]) -> None:
+def write_cache(
+    folder: Path, entries: Dict[str, Tuple[int, int, str, str]]
+) -> None:
     """Write a folder's hash cache atomically, in name order.
 
     Written via a hidden temp file plus ``os.replace`` so an interrupted
@@ -204,7 +241,7 @@ def write_cache(folder: Path, entries: Dict[str, Tuple[int, int, str]]) -> None:
 
     Args:
         folder: The raw ESID folder.
-        entries: ``{name: (size, mtime, sha512)}`` to record.
+        entries: ``{name: (size, mtime, sha512, md5)}`` to record.
     """
     path = cache_path(folder)
     tmp = path.with_name(f".{path.name}.tmp")
@@ -213,12 +250,13 @@ def write_cache(folder: Path, entries: Dict[str, Tuple[int, int, str]]) -> None:
             writer = csv.DictWriter(fh, fieldnames=_CACHE_COLUMNS)
             writer.writeheader()
             for name in sorted(entries):
-                size, mtime, digest = entries[name]
+                size, mtime, digest, md5 = entries[name]
                 writer.writerow({
                     "File Name": name,
                     "File Size (Bytes)": size,
                     "Modified (epoch)": mtime,
                     "SHA-512": digest,
+                    "MD5": md5,
                 })
         os.replace(tmp, path)
     except OSError as exc:
@@ -235,6 +273,7 @@ def ensure_hashes(
     *,
     tag: str = "",
     recheck: bool = False,
+    need_md5: bool = False,
 ) -> HashResult:
     """Resolve SHA-512 for ``names``, reusing and updating the folder cache.
 
@@ -249,6 +288,11 @@ def ensure_hashes(
         tag: Log prefix, e.g. ``"[ESID 445]"``.
         recheck: Ignore cached hashes and re-read every file.  Use to
             genuinely re-verify rather than to go fast.
+        need_md5: Also return each file's md5, for the uploader's
+            ``known_md5s``.  A cached row that predates the MD5 column is
+            read ONCE to fill it (both digests come from that single pass),
+            and its SHA-512 is cross-checked while we are there.  Rows that
+            already carry an md5 are still served without any read.
 
     Returns:
         A :class:`HashResult`.  Unreadable files are reported in its
@@ -257,7 +301,8 @@ def ensure_hashes(
     prefix = f"{tag} " if tag else ""
     cache = {} if recheck else load_cache(folder)
     result = HashResult()
-    updated: Dict[str, Tuple[int, int, str]] = dict(cache)
+    updated: Dict[str, Tuple[int, int, str, str]] = dict(cache)
+    algorithms = ("sha512", "md5") if need_md5 else ("sha512",)
     changed = False
 
     for name in names:
@@ -270,22 +315,54 @@ def ensure_hashes(
         size, mtime = stat.st_size, int(stat.st_mtime)
 
         cached = cache.get(name)
-        if cached is not None and cached[0] == size and cached[1] == mtime:
+        fresh = cached is not None and cached[0] == size and cached[1] == mtime
+        cached_md5 = cached[3] if fresh else ""
+
+        # Serve from the cache unless the caller needs an md5 this row does
+        # not carry (a row written before the MD5 column existed).
+        if fresh and not (need_md5 and not cached_md5):
             result.hashes[name] = cached[2]
+            if cached_md5:
+                result.md5s[name] = cached_md5
             result.reused += 1
             continue
 
-        logger.debug("%sHashing %s (%d bytes)...", prefix, name, size)
+        backfilling = fresh and need_md5 and not cached_md5
+        logger.debug(
+            "%s%s %s (%d bytes)...", prefix,
+            "Backfilling md5 for" if backfilling else "Hashing", name, size,
+        )
         try:
-            digest = azus_common.calculate_sha512(str(path))
+            digests = azus_common.calculate_digests(str(path), algorithms)
         except OSError as exc:
             result.errors.append(f"{name}: {exc}")
             updated.pop(name, None)
             changed = True
             continue
+
+        digest = digests["sha512"]
+        md5 = digests.get("md5", "")
+
+        # Re-deriving SHA-512 during a backfill is free (same read), so use
+        # it as a cross-check.  A disagreement means the file changed while
+        # its size AND mtime stayed put — report it rather than quietly
+        # replacing the row, but serve the FRESH hash: the file on disk is
+        # the truth, and the caller compares it against file_list.csv.
+        if backfilling and digest != cached[2]:
+            result.errors.append(
+                f"{name}: the cached SHA-512 disagrees with the file even "
+                "though its size and mtime are unchanged — the cache was "
+                "stale or the file was modified in place"
+            )
+
+        if backfilling:
+            result.md5_backfilled += 1
+        else:
+            result.hashed += 1
         result.hashes[name] = digest
-        result.hashed += 1
-        updated[name] = (size, mtime, digest)
+        if md5:
+            result.md5s[name] = md5
+        updated[name] = (size, mtime, digest, md5)
         changed = True
 
     if changed:
@@ -301,10 +378,16 @@ def _report(folder: Path, result: HashResult, tag: str) -> None:
         result: Its :class:`HashResult`.
         tag: Log prefix.
     """
-    if result.hashed == 0 and not result.errors:
+    if result.hashed == 0 and result.md5_backfilled == 0 and not result.errors:
         logger.info(
             "%s already up to date — %d file(s) served from %s, nothing read.",
             tag, result.reused, cache_path(folder).name,
+        )
+    elif result.md5_backfilled:
+        logger.info(
+            "%s %d hashed, %d md5-backfilled, %d reused from cache -> %s",
+            tag, result.hashed, result.md5_backfilled, result.reused,
+            cache_path(folder).name,
         )
     else:
         logger.info(
@@ -317,7 +400,7 @@ def _report(folder: Path, result: HashResult, tag: str) -> None:
             tag, len(result.missing), ", ".join(result.missing[:5]),
         )
     for problem in result.errors[:5]:
-        logger.error("%s could not read %s", tag, problem)
+        logger.error("%s %s", tag, problem)
 
 
 def main() -> None:
@@ -351,6 +434,19 @@ def main() -> None:
         help=(
             "Ignore the existing caches and re-read every file. Use this to "
             "genuinely re-verify the data, not to go faster."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-md5", action="store_true",
+        help=(
+            "Also record each file's md5 beside its SHA-512. Zenodo verifies "
+            "uploads by md5, so a cache that carries one lets an interrupted "
+            "file-by-file upload resume WITHOUT re-reading the files it "
+            "already sent. Rows written before the MD5 column existed are "
+            "read once to fill it (both digests come from that single pass, "
+            "and the SHA-512 is cross-checked while we are there); rows that "
+            "already have an md5 are still served from cache. Pre-pay this "
+            "cost overnight rather than during an upload."
         ),
     )
     parser.add_argument(
@@ -393,15 +489,20 @@ def main() -> None:
         sys.exit(0)
 
     logger.info("=" * 70)
-    logger.info("RAW WAV HASH CACHE%s", " — RECHECK (ignoring caches)"
-                if args.recheck else "")
+    if args.recheck:
+        mode_note = " — RECHECK (ignoring caches)"
+    elif args.backfill_md5:
+        mode_note = " — BACKFILLING MD5"
+    else:
+        mode_note = ""
+    logger.info("RAW WAV HASH CACHE%s", mode_note)
     logger.info("=" * 70)
     logger.info("Raw data: %s", raw_root.resolve())
     logger.info("Folders:  %d (%s)", len(folders), order_desc)
     logger.info("Cache:    %s (one per ESID folder)", CACHE_FILENAME)
     logger.info("=" * 70)
 
-    total_hashed = total_reused = 0
+    total_hashed = total_reused = total_backfilled = 0
     problem_esids: List[str] = []
     for _sort, esid, folder in folders:
         tag = f"[ESID {esid}]"
@@ -417,10 +518,14 @@ def main() -> None:
         if not names:
             logger.warning("%s no WAV files or CONFIG.TXT found — skipped.", tag)
             continue
-        result = ensure_hashes(folder, names, tag=tag, recheck=args.recheck)
+        result = ensure_hashes(
+            folder, names, tag=tag, recheck=args.recheck,
+            need_md5=args.backfill_md5,
+        )
         _report(folder, result, tag)
         total_hashed += result.hashed
         total_reused += result.reused
+        total_backfilled += result.md5_backfilled
         if result.errors:
             problem_esids.append(esid)
 
@@ -429,10 +534,13 @@ def main() -> None:
     logger.info("=" * 70)
     logger.info("Folders processed: %d", len(folders))
     logger.info("Files hashed:      %d", total_hashed)
+    if args.backfill_md5:
+        logger.info("md5 backfilled:    %d", total_backfilled)
     logger.info("Reused from cache: %d", total_reused)
     if problem_esids:
         logger.error(
-            "ESID(s) with unreadable file(s): %s", ", ".join(problem_esids)
+            "ESID(s) with an unreadable file or a cache disagreement: %s",
+            ", ".join(problem_esids),
         )
     logger.info("=" * 70)
     sys.exit(1 if problem_esids else 0)

@@ -93,7 +93,11 @@ These are convenience wrappers around the main code path:
   raw ESID folder. Run it whenever convenient (overnight, before a batch) so
   the upload run never pays for hashing, and so a restarted upload does not
   re-read the dataset. Reuses a cached hash only when size and mtime still
-  match, so it cannot weaken the check.
+  match, so it cannot weaken the check. `--backfill-md5` also records each
+  file's md5, which is what Zenodo verifies uploads against — with it, an
+  interrupted file-by-file run confirms an already-committed file from the CSV
+  instead of re-reading it. Adding the column never invalidates an existing
+  cache.
 - **Resources/new_version_upload.py** — publish a re-prepped staging package
   as a NEW VERSION of an already-published record, for the case where the
   published metadata is wrong AND its ZIP is broken. Requires `--esid` and

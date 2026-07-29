@@ -110,11 +110,21 @@ dataset; doing it ahead of time means the upload run does not wait on it, and a
 restart does not repeat it:
 
 ```bash
-python Resources/hash_raw_wavs.py /absolute/path/to/Raw_Data --esid 445
+python Resources/hash_raw_wavs.py /absolute/path/to/Raw_Data --esid 445 --backfill-md5
 ```
 
 That is an optimisation, not a prerequisite — an un-cached folder is hashed on
 first use either way.
+
+`--backfill-md5` is worth adding for anything long-running. Zenodo verifies an
+upload by md5, and the resume logic skips an already-committed file only after
+confirming its size **and** md5. Given cached md5s it confirms them from the
+CSV; without them it re-reads every byte it already sent. On a run interrupted
+at 90% that is the difference between resuming in seconds and paying for
+another full pass. The file-by-file switch asks for md5s itself, so it will
+backfill them on demand — pre-paying just moves the cost off the upload run.
+Both digests come from a single read, and a cache written before the `MD5`
+column existed stays fully valid for SHA-512, so nothing is invalidated.
 
 ```bash
 # Always look first — read-only, no network calls, writes nothing.

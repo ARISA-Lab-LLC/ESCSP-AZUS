@@ -193,15 +193,15 @@ class TestCacheIsReusedButNeverTrustedBlindly(_Case):
         self.assertEqual(result.reused, 2)
 
     def test_unreadable_file_is_an_error_not_a_hash(self):
-        real = azus_common.calculate_sha512
+        real = azus_common.calculate_digests
 
-        def fail_one(path):
+        def fail_one(path, algorithms):
             if path.endswith("CONFIG.TXT"):
                 raise OSError("simulated read failure")
-            return real(path)
+            return real(path, algorithms)
 
         with mock.patch.object(
-            hrw.azus_common, "calculate_sha512", side_effect=fail_one
+            hrw.azus_common, "calculate_digests", side_effect=fail_one
         ):
             result = hrw.ensure_hashes(self.folder, self.names())
         self.assertNotIn("CONFIG.TXT", result.hashes)
@@ -332,21 +332,171 @@ class TestCli(_Case):
         self.assertTrue(hrw.cache_path(part).is_file())
 
     def test_unreadable_file_exits_1(self):
-        real = azus_common.calculate_sha512
+        real = azus_common.calculate_digests
 
-        def fail_one(path):
+        def fail_one(path, algorithms):
             if path.endswith("CONFIG.TXT"):
                 raise OSError("simulated")
-            return real(path)
+            return real(path, algorithms)
 
         with mock.patch.object(
-            hrw.azus_common, "calculate_sha512", side_effect=fail_one
+            hrw.azus_common, "calculate_digests", side_effect=fail_one
         ):
             self.assertEqual(self.run_cli(), 1)
 
     def test_cache_file_is_not_itself_hashed(self):
         self.run_cli()
         self.assertNotIn(hrw.CACHE_FILENAME, hrw.load_cache(self.folder))
+
+
+class TestMd5Cache(_Case):
+    """md5 rides along beside the SHA-512, and a legacy cache still works.
+
+    Zenodo verifies an upload by md5.  Caching it means an interrupted
+    file-by-file run can confirm an already-committed file from the cache
+    instead of re-reading it — the difference between a resume costing
+    seconds and costing a full pass over the dataset.
+    """
+
+    def _count_reads(self):
+        """Wrap calculate_digests so the test can count actual file reads."""
+        real = azus_common.calculate_digests
+        calls = []
+
+        def counting(path, algorithms):
+            calls.append((os.path.basename(path), tuple(algorithms)))
+            return real(path, algorithms)
+
+        patcher = mock.patch.object(
+            hrw.azus_common, "calculate_digests", side_effect=counting
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_md5_is_absent_unless_requested(self):
+        result = hrw.ensure_hashes(self.folder, self.names())
+        self.assertEqual(result.md5s, {})
+        row = hrw.load_cache(self.folder)["CONFIG.TXT"]
+        self.assertEqual(row[3], "")
+
+    def test_md5_is_recorded_and_correct_when_requested(self):
+        result = hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        expected = azus_common.calculate_digests(
+            str(self.folder / "CONFIG.TXT"), ("md5",)
+        )["md5"]
+        self.assertEqual(result.md5s["CONFIG.TXT"], expected)
+        self.assertEqual(hrw.load_cache(self.folder)["CONFIG.TXT"][3], expected)
+
+    def test_one_read_serves_both_digests(self):
+        calls = self._count_reads()
+        hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            {algorithms for _name, algorithms in calls}, {("sha512", "md5")}
+        )
+
+    def test_legacy_cache_reuses_sha512_with_zero_reads(self):
+        """The load-bearing compatibility property.
+
+        Adding a column must not invalidate a cache that took days to
+        build.  A pre-MD5 row is still valid for SHA-512, so a caller that
+        does not need md5 must read nothing at all.
+        """
+        hrw.ensure_hashes(self.folder, self.names())
+        self._strip_md5_column()
+
+        calls = self._count_reads()
+        result = hrw.ensure_hashes(self.folder, self.names())
+        self.assertEqual(calls, [])
+        self.assertEqual(result.reused, 3)
+        self.assertEqual(result.hashed, 0)
+        self.assertEqual(result.md5_backfilled, 0)
+
+    def test_legacy_cache_backfills_md5_in_one_read(self):
+        hrw.ensure_hashes(self.folder, self.names())
+        self._strip_md5_column()
+
+        calls = self._count_reads()
+        result = hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result.md5_backfilled, 3)
+        self.assertEqual(result.hashed, 0)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.md5s), 3)
+        # And the backfill is durable: the next run needs no reads at all.
+        calls.clear()
+        again = hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        self.assertEqual(calls, [])
+        self.assertEqual(again.reused, 3)
+        self.assertEqual(again.md5s, result.md5s)
+
+    def test_backfill_cross_checks_the_cached_sha512(self):
+        """A free integrity check: the backfill re-derives SHA-512 anyway.
+
+        A row whose SHA-512 disagrees with the file it describes — while
+        size and mtime are unchanged — is reported, and the FRESH hash is
+        served, because the file on disk is the truth the caller compares
+        against file_list.csv.
+        """
+        hrw.ensure_hashes(self.folder, self.names())
+        self._corrupt_cached_sha512("CONFIG.TXT")
+
+        result = hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        self.assertTrue(
+            any("CONFIG.TXT" in e and "disagrees" in e for e in result.errors),
+            result.errors,
+        )
+        truth = azus_common.calculate_sha512(str(self.folder / "CONFIG.TXT"))
+        self.assertEqual(result.hashes["CONFIG.TXT"], truth)
+        self.assertEqual(hrw.load_cache(self.folder)["CONFIG.TXT"][2], truth)
+
+    def test_changed_file_is_rehashed_not_backfilled(self):
+        hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        target = self.folder / "CONFIG.TXT"
+        target.write_bytes(b"GAIN=high\n")
+        os.utime(target, (0, 0))
+
+        result = hrw.ensure_hashes(self.folder, self.names(), need_md5=True)
+        self.assertEqual(result.hashed, 1)
+        self.assertEqual(result.md5_backfilled, 0)
+        self.assertEqual(result.reused, 2)
+        self.assertEqual(
+            result.hashes["CONFIG.TXT"], azus_common.calculate_sha512(str(target))
+        )
+
+    def test_cli_backfill_md5_fills_a_legacy_cache(self):
+        self.assertEqual(self.run_cli(), 0)
+        self._strip_md5_column()
+        self.assertEqual(self.run_cli("--backfill-md5"), 0)
+        for name, row in hrw.load_cache(self.folder).items():
+            self.assertTrue(row[3], f"{name} has no md5")
+
+    def _strip_md5_column(self):
+        """Rewrite the cache as a pre-MD5, four-column file."""
+        path = hrw.cache_path(self.folder)
+        with open(path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        legacy = hrw._CACHE_COLUMNS[:-1]
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=legacy)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row[key] for key in legacy})
+
+    def _corrupt_cached_sha512(self, name):
+        """Replace one row's SHA-512, leaving size and mtime untouched."""
+        path = hrw.cache_path(self.folder)
+        with open(path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        for row in rows:
+            if row["File Name"] == name:
+                row["SHA-512"] = "0" * 128
+            row["MD5"] = ""
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=hrw._CACHE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 class TestSplitPreservesTheCache(_Case):
