@@ -71,6 +71,21 @@ From the project root:
     # Just list what's stuck — do not actually re-run uploads
     python Resources/finish_stuck_uploads.py --list-only
 
+OUTPUT
+======
+Everything printed to the screen is ALSO written to
+``Records/YYYYMMDD_HHMMSS_finish_stuck_uploads.log`` (timestamp first, so
+runs sort chronologically).  That is on by default and needs no flag:
+these runs are long and unattended, and a failure hours in should leave
+something to read.  ``--log PATH`` moves it; a log file that cannot be
+opened is reported on screen and the run continues regardless.
+
+One gap to know about: Phase A shells out to ``standalone_tasks.py``, so
+that phase's detail goes to the screen and to its own ``azus_upload.log``
+— not into this tool's log.  The startup banner says so.  When diagnosing
+a Phase A failure, read ``azus_upload.log``; for the file-by-file phases,
+read this tool's log.
+
 Exit code is the exit code of the underlying standalone_tasks.py run
 (0 if everything finished, 1 if any ESID still failed).
 """
@@ -80,6 +95,7 @@ import json
 import logging
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -206,6 +222,69 @@ def discover_stuck_esids() -> Tuple[List[Tuple[int, str, Path, str]], List[str]]
     found.sort(key=lambda t: t[0])
     excluded.sort()
     return found, excluded
+
+
+# =====================================================================
+#  Logging
+# =====================================================================
+
+def default_log_path() -> Path:
+    """Build this run's log path: ``Records/<stamp>_finish_stuck_uploads.log``.
+
+    Timestamp first so repeated runs sort chronologically in a directory
+    listing — the same convention ``esid_record_report.py`` uses for its
+    CSVs.
+
+    Returns:
+        The path for this run's log (its parent may not exist yet).
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _PROJECT_ROOT / "Records" / f"{stamp}_finish_stuck_uploads.log"
+
+
+def configure_logging(verbose: bool = False,
+                      log_path: Optional[Path] = None) -> Optional[Path]:
+    """Send this tool's output to BOTH the screen and a log file.
+
+    Recovery runs are long and unattended, and until now everything this
+    tool printed existed only on the terminal — a failure hours in left
+    nothing to read afterwards.  (``standalone_tasks.py`` has always had
+    its own ``azus_upload.log``; this tool had nothing.)
+
+    A logging problem must never fail a recovery run, so a directory or
+    file that cannot be created is reported on screen and the run
+    continues with screen output only.
+
+    Args:
+        verbose: Log at DEBUG instead of INFO.
+        log_path: Where to write; defaults to :func:`default_log_path`.
+
+    Returns:
+        The log file actually opened, or None when only the screen is
+        being written.
+    """
+    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    target = log_path or default_log_path()
+    opened: Optional[Path] = None
+    problem: Optional[str] = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(target, encoding="utf-8"))
+        opened = target
+    except OSError as exc:
+        problem = f"{target}: {exc}"
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+    )
+    if problem is not None:
+        logger.warning(
+            "Could not open a log file (%s) — this run's output will only "
+            "appear on screen.", problem,
+        )
+    return opened
 
 
 # =====================================================================
@@ -639,6 +718,19 @@ def main() -> None:
             "committed to the record."
         ),
     )
+    parser.add_argument(
+        "--log", default=None, metavar="PATH",
+        help=(
+            "Write this run's screen output here instead of the default "
+            "Records/YYYYMMDD_HHMMSS_finish_stuck_uploads.log. Logging to a "
+            "file is always on: a recovery run is long and unattended, and a "
+            "failure hours in should leave something to read."
+        ),
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Log at DEBUG level (screen and log file alike).",
+    )
     args = parser.parse_args()
 
     # --- Validate --workers up front (mirror standalone_tasks.py) ---
@@ -673,21 +765,32 @@ def main() -> None:
             f"--tries-threshold must be at least 1 (got {args.tries_threshold})."
         )
 
-    # --- Configure logging ---
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-
     # --- Expand --esid values (numbers and/or spreadsheet paths) ---
+    # Before logging is configured, so a mistyped --esid does not leave a
+    # log file behind for a run that never started.  The error still
+    # reaches the screen.
     requested: Optional[List[str]] = None
     if args.esid:
         try:
             requested = azus_common.load_esid_args(args.esid)
         except ValueError as exc:
-            logger.error("%s", exc)
+            print(f"{exc}", file=sys.stderr)
             sys.exit(2)
+
+    # --- Configure logging (screen + Records/<stamp>_*.log) ---
+    log_file = configure_logging(
+        verbose=args.verbose,
+        log_path=Path(args.log) if args.log else None,
+    )
+    if log_file is not None:
+        logger.info("Log file: %s", log_file)
+        # Phase A runs standalone_tasks.py as a SUBPROCESS, so its output
+        # goes to the screen and to its own azus_upload.log — not into the
+        # file above.  Say so, or a Phase A failure looks like a gap.
+        logger.info(
+            "Note: Phase A (the ZIP pass) runs standalone_tasks.py in a "
+            "subprocess; its detail lands in azus_upload.log, not here."
+        )
 
     # --- Banner ---
     logger.info("=" * 70)

@@ -178,7 +178,10 @@ class TestFinishStuckEsidFilter(_TmpTestCase):
             "from pathlib import Path\n"
             f"root = Path({str(self.root)!r})\n"
             "with mock.patch.object(fsu, '_STAGING_AREA', root):\n"
-            f"    sys.argv = ['x', '--list-only', '--esid', {filter_csv!r}]\n"
+            # --log keeps this run's log inside the temp tree; without it
+            # the tool writes into the real Records/ folder.
+            f"    sys.argv = ['x', '--list-only', '--esid', {filter_csv!r},\n"
+            f"                '--log', str(root / 'run.log')]\n"
             "    fsu.main()\n"
         )
         result = subprocess.run(

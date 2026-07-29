@@ -12,6 +12,7 @@ Run from the project root:
 """
 
 import json
+import logging
 import sys
 import tempfile
 import unittest
@@ -211,6 +212,81 @@ class TestSkipIntegrityHashForwarding(unittest.TestCase):
         cmd = self._cmd(skip_date_check=True, skip_integrity_hash=False)
         self.assertIn("--skip-date-check", cmd)
         self.assertNotIn("--skip-integrity-hash", cmd)
+
+
+class TestDefaultFileLogging(unittest.TestCase):
+    """Screen output is always also written to Records/, and a logging
+    problem never fails a recovery run."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        # basicConfig is a no-op once handlers exist, and other tests in
+        # this suite may have configured the root logger already, so drive
+        # configure_logging directly and restore the root logger after.
+        root = logging.getLogger()
+        original = list(root.handlers)
+        original_level = root.level
+
+        def restore():
+            for handler in list(root.handlers):
+                if handler not in original:
+                    handler.close()
+                    root.removeHandler(handler)
+            for handler in original:
+                if handler not in root.handlers:
+                    root.addHandler(handler)
+            root.setLevel(original_level)
+
+        self.addCleanup(restore)
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+
+    def test_default_path_is_timestamp_first_in_records(self):
+        path = fs.default_log_path()
+        self.assertEqual(path.parent.name, "Records")
+        self.assertTrue(path.name.endswith("_finish_stuck_uploads.log"))
+        stamp = path.name.split("_finish")[0]
+        self.assertRegex(stamp, r"^\d{8}_\d{6}$")
+        # Timestamp first so a directory listing sorts chronologically.
+        self.assertTrue(path.name[0].isdigit())
+
+    def test_writes_the_log_and_still_prints(self):
+        target = self.root / "Records" / "20260729_120000_finish_stuck_uploads.log"
+        opened = fs.configure_logging(log_path=target)
+        self.assertEqual(opened, target)
+        fs.logger.info("a distinctive line")
+        logging.getLogger().handlers[-1].flush()
+        self.assertIn("a distinctive line", target.read_text(encoding="utf-8"))
+        self.assertTrue(
+            any(isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                for h in logging.getLogger().handlers),
+            "screen output must survive alongside the file",
+        )
+
+    def test_creates_the_records_directory(self):
+        target = self.root / "brand" / "new" / "run.log"
+        self.assertEqual(fs.configure_logging(log_path=target), target)
+        self.assertTrue(target.is_file())
+
+    def test_unwritable_log_does_not_fail_the_run(self):
+        """A logging problem must never stop a recovery."""
+        blocker = self.root / "blocked"
+        blocker.write_text("I am a file, not a directory\n")
+        target = blocker / "run.log"          # parent cannot be a directory
+        self.assertIsNone(fs.configure_logging(log_path=target))
+        self.assertTrue(
+            any(isinstance(h, logging.StreamHandler)
+                for h in logging.getLogger().handlers),
+            "the screen handler must still be installed",
+        )
+
+    def test_verbose_sets_debug_level(self):
+        fs.configure_logging(verbose=True,
+                             log_path=self.root / "v.log")
+        self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
 
 class TestForceCliGuard(unittest.TestCase):
