@@ -81,6 +81,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import azus_common
+# Reused so --esid behaves identically here and in prep_all_datasets:
+# same accepted values, same "in the given order" semantics, same
+# reporting of requested ESIDs that have no folder.  (prep_all_datasets
+# imports only stdlib + azus_common, so this adds no weight.)
+from prep_all_datasets import filter_and_order_discovered
 
 logger = logging.getLogger("azus.wav_hashes")
 
@@ -290,10 +295,16 @@ def _report(folder: Path, result: HashResult, tag: str) -> None:
         result: Its :class:`HashResult`.
         tag: Log prefix.
     """
-    logger.info(
-        "%s %d hashed, %d reused from cache -> %s",
-        tag, result.hashed, result.reused, cache_path(folder).name,
-    )
+    if result.hashed == 0 and not result.errors:
+        logger.info(
+            "%s already up to date — %d file(s) served from %s, nothing read.",
+            tag, result.reused, cache_path(folder).name,
+        )
+    else:
+        logger.info(
+            "%s %d hashed, %d reused from cache -> %s",
+            tag, result.hashed, result.reused, cache_path(folder).name,
+        )
     if result.missing:
         logger.warning(
             "%s %d requested file(s) not present: %s",
@@ -320,9 +331,13 @@ def main() -> None:
     parser.add_argument(
         "--esid", nargs="+", default=None, metavar="ESID_OR_CSV",
         help=(
-            "Only these ESIDs. Literal ESIDs (445, 120A, 122_Part_1_of_2) "
-            "and/or CSV files whose first column lists ESIDs; the two may be "
-            "mixed. Default: every ESID subfolder found."
+            "Hash only the specified ESID(s), IN THE GIVEN ORDER. Each value "
+            "is either a literal ESID (1-3 digits, or a suffixed id like "
+            "120A / 122_Part_1_of_2) or the path to a CSV whose first column "
+            "lists ESIDs (header row optional); numbers and CSV paths may be "
+            "mixed. Requested ESIDs with no raw folder are reported and "
+            "skipped. Without this flag, every ESID folder is hashed in "
+            "numerical order. (Same semantics as prep_all_datasets.py.)"
         ),
     )
     parser.add_argument(
@@ -346,18 +361,27 @@ def main() -> None:
         sys.exit(2)
 
     folders = azus_common.find_esid_folders(raw_root)
+    order_desc = "in numerical order"
     if args.esid:
         try:
-            requested = {e.casefold() for e in azus_common.load_esid_args(args.esid)}
+            requested = azus_common.load_esid_args(args.esid)
         except ValueError as exc:
-            logger.error("%s", exc)
+            logger.error("Invalid --esid value: %s", exc)
             sys.exit(2)
-        folders = [f for f in folders if f[1].casefold() in requested]
+        folders, missing = filter_and_order_discovered(folders, requested)
+        if missing:
+            logger.warning(
+                "%d requested ESID(s) have no raw folder under %s and will "
+                "be skipped: %s",
+                len(missing), raw_root, ", ".join(missing),
+            )
         if not folders:
             logger.error(
-                "None of the requested ESID(s) has a folder under %s.", raw_root
+                "None of the requested --esid value(s) match a raw folder "
+                "under %s — nothing to do.", raw_root,
             )
             sys.exit(2)
+        order_desc = "in --esid order"
     if not folders:
         logger.info("No ESID subfolders found in %s — nothing to do.", raw_root)
         sys.exit(0)
@@ -367,7 +391,7 @@ def main() -> None:
                 if args.recheck else "")
     logger.info("=" * 70)
     logger.info("Raw data: %s", raw_root.resolve())
-    logger.info("Folders:  %d", len(folders))
+    logger.info("Folders:  %d (%s)", len(folders), order_desc)
     logger.info("Cache:    %s (one per ESID folder)", CACHE_FILENAME)
     logger.info("=" * 70)
 

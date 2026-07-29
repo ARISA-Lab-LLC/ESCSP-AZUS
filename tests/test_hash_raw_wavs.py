@@ -233,6 +233,78 @@ class TestCli(_Case):
         ):
             self.assertEqual(self.run_cli(), 0)
 
+    def test_esid_honours_the_given_order(self):
+        """Same semantics as prep_all_datasets: --esid order, not numeric."""
+        second = self.raw / "ESID#008"
+        second.mkdir()
+        (second / "20240408_140000.WAV").write_bytes(b"MORE" * 10)
+        with mock.patch.object(hrw, "ensure_hashes",
+                               wraps=hrw.ensure_hashes) as spy:
+            self.assertEqual(self.run_cli("--esid", "008", "007"), 0)
+        order = [call.args[0].name for call in spy.call_args_list]
+        self.assertEqual(order, ["ESID#008", "ESID#007"])
+
+    def test_requested_esid_without_a_folder_is_reported_not_dropped(self):
+        with self.assertLogs("azus.wav_hashes", level="WARNING") as caught:
+            self.assertEqual(self.run_cli("--esid", "007", "999"), 0)
+        self.assertTrue(
+            any("999" in line and "no raw folder" in line
+                for line in caught.output),
+            caught.output,
+        )
+
+    def test_a_new_file_in_a_cached_folder_is_still_hashed(self):
+        """The cache is per FILE, not per folder — a folder that already has
+        a wav_hashes.csv still picks up newly added WAVs."""
+        self.run_cli()
+        (self.folder / "20240408_190000.WAV").write_bytes(b"BRANDNEW" * 50)
+        result = hrw.ensure_hashes(self.folder, self.names())
+        self.assertEqual(result.hashed, 1)
+        self.assertEqual(result.reused, 3)
+        self.assertIn("20240408_190000.WAV", hrw.load_cache(self.folder))
+
+    def test_an_unchanged_folder_does_not_rewrite_its_cache(self):
+        self.run_cli()
+        before = hrw.cache_path(self.folder).stat().st_mtime_ns
+        self.run_cli()
+        self.assertEqual(
+            hrw.cache_path(self.folder).stat().st_mtime_ns, before,
+            "an up-to-date folder must not be rewritten",
+        )
+
+    def test_esid_accepts_a_csv_file(self):
+        """--esid takes a CSV whose first column lists ESIDs, header optional."""
+        second = self.raw / "ESID#008"
+        second.mkdir()
+        (second / "20240408_140000.WAV").write_bytes(b"MORE" * 10)
+        with_header = self.root / "want.csv"
+        with_header.write_text("ESID#\n008\n")
+        self.assertEqual(self.run_cli("--esid", str(with_header)), 0)
+        self.assertTrue(hrw.cache_path(second).is_file())
+        self.assertFalse(hrw.cache_path(self.folder).exists())
+
+        bare = self.root / "bare.csv"
+        bare.write_text("007\n")
+        self.assertEqual(self.run_cli("--esid", str(bare)), 0)
+        self.assertTrue(hrw.cache_path(self.folder).is_file())
+
+    def test_esid_mixes_literals_and_csv_paths_in_order(self):
+        second = self.raw / "ESID#008"
+        second.mkdir()
+        (second / "20240408_140000.WAV").write_bytes(b"MORE" * 10)
+        listing = self.root / "want.csv"
+        listing.write_text("ESID#\n007\n")
+        with mock.patch.object(hrw, "ensure_hashes",
+                               wraps=hrw.ensure_hashes) as spy:
+            self.assertEqual(self.run_cli("--esid", "008", str(listing)), 0)
+        self.assertEqual(
+            [call.args[0].name for call in spy.call_args_list],
+            ["ESID#008", "ESID#007"],
+        )
+
+    def test_esid_rejects_a_token_that_is_neither(self):
+        self.assertEqual(self.run_cli("--esid", "not-an-esid"), 2)
+
     def test_esid_filter(self):
         second = self.raw / "ESID#008"
         second.mkdir()
