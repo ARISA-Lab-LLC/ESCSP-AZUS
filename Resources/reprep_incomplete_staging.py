@@ -196,12 +196,15 @@ def main() -> None:
         esid = row["ESID#"]
         if row["Uploaded Data"]:
             # Already on Zenodo with a broken ZIP — needs a reviewed
-            # new-version upload, never automated here.
+            # new-version upload, never automated here.  Resources/
+            # new_version_upload.py does that, deliberately as a separate
+            # operator decision: it publishes a new DOI.
             skipped_uploaded.append(esid)
             logger.warning(
                 "[ESID %s] SKIPPED — already uploaded (%s) with "
                 "Prep Completed=No. This ESID's Zenodo record needs a "
-                "manually reviewed new-version upload; re-prepping here "
+                "reviewed new-version upload (re-prep it, then see "
+                "Resources/new_version_upload.py); re-prepping here alone "
                 "would not fix what is already published.",
                 esid, row["Uploaded Data"],
             )

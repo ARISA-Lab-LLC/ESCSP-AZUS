@@ -145,6 +145,13 @@ Staging_Area/
 ├── ESID_004/
 │   ├── ESID_004.zip                     ← Audio archive (WAV files + CONFIG.TXT)
 │   ├── ESID_004_to_upload.csv           ← Upload manifest (what Zenodo receives)
+│   ├── ESID_004_zip_attempt_upload.csv  ← ONLY after the file-by-file fallback
+│   │                                      ran: the manifest as it was for the
+│   │                                      ZIP attempt (written once, never
+│   │                                      replaced) (NOT uploaded to Zenodo)
+│   ├── ESID_004_file_by_file_upload.csv ← ONLY after the fallback ran: mirror
+│   │                                      of the rewritten manifest
+│   │                                      (NOT uploaded to Zenodo)
 │   ├── README.html                      ← Zenodo description (NOT uploaded as file)
 │   ├── README.md                        ← Uploaded to Zenodo
 │   ├── file_list.csv                    ← File manifest with SHA-512 hashes
@@ -176,6 +183,8 @@ Staging_Area/
 |------|--------------------|---------|
 | `ESID_XXX.zip` | Yes | All WAV recordings + CONFIG.TXT |
 | `ESID_XXX_to_upload.csv` | No | Tells AZUS which files to upload |
+| `ESID_XXX_zip_attempt_upload.csv` | No | Provenance. Present only once the file-by-file fallback has run for this ESID: a snapshot of `ESID_XXX_to_upload.csv` **as it was for the ZIP attempt**, taken before the fallback rewrote it. Written once and never replaced, so a re-run cannot overwrite the original history. Restore it over the live manifest if a failed fallback run needs retrying. |
+| `ESID_XXX_file_by_file_upload.csv` | No | Provenance. Present only once the fallback has run: a mirror of the rewritten manifest, i.e. the individual WAVs + CONFIG.TXT + companions that replaced the ZIP. Refreshed on each fallback run. |
 | `README.html` | No | Content becomes the Zenodo description field |
 | `README.md` | Yes | Human-readable documentation |
 | `file_list.csv` | Yes | Complete file listing with SHA-512 hashes |
@@ -250,6 +259,43 @@ Raw_Data/
 
 > ⚠️ `CONFIG.TXT` is generated automatically by the AudioMoth device and will
 > be present in any genuine AudioMoth recording folder. Do not create it manually.
+
+#### Sites too large for one Zenodo record
+
+Zenodo caps a record at **50 GB**. A site whose raw data exceeds that cannot be
+one record, so it becomes two — and the raw folders are named accordingly:
+
+```
+Raw_Data/
+├── ESID#445_Part_1_of_2/
+│   ├── 20240408_160000.WAV               ← the EARLIER half of the recordings
+│   ├── ...
+│   └── CONFIG.TXT
+└── ESID#445_Part_2_of_2/
+    ├── 20240408_180000.WAV               ← the LATER half
+    ├── ...
+    └── CONFIG.TXT                        ← copied from Part 1
+```
+
+Rename the oversized folder to `_Part_1_of_2`, create the empty
+`_Part_2_of_2` beside it, then let
+`Resources/split_oversized_raw_folders.py` do the rest (dry-run by default).
+From there each part is prepped and uploaded exactly like any other ESID: the
+suffixed ESID `445_Part_1_of_2` flows through prep, the ZIP name, the manifest,
+and the record title (which renders as `ESID#445 Part 1 of 2`).
+
+> ⚠️ **Each part needs its own row in the collectors spreadsheet.**
+> `prepare_dataset.py` matches the ESID with an exact string compare and exits 1
+> when it misses — there is no fallback to the bare `445`. The convention (see
+> the sites already split: 012, 122, 243, 692, 929, 930, 963) is to **replace**
+> the `445` row with `445_Part_1_of_2` and `445_Part_2_of_2`, identical except
+> the `ESID` cell.
+
+> ⚠️ Splitting the raw folders does **not** touch anything already prepped or
+> uploaded for the un-split site. A surviving `Staging_Area/ESID_445_Staging/`
+> holds a ZIP and `file_list.csv` for the whole pre-split dataset — both now
+> stale — and possibly an `upload_state.json` pointing at a live Zenodo record
+> titled `… ESID#445`. Resolve that record, or one site ends up with three.
 
 ---
 

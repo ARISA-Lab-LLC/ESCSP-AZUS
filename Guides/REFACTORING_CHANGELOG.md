@@ -1,5 +1,96 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — new versions of published records (the last manual dead-end)
+
+Published Zenodo files are immutable, so a record with wrong metadata AND a
+broken ZIP could only be fixed by a new version — and nothing here did that.
+`reprep_incomplete_staging.py` has always refused those rows outright ("needs a
+manually reviewed new-version upload, never automated here"), and the
+remediation backlog in this file names them as the class of damage with no
+remedy. `Resources/new_version_upload.py` closes it.
+
+**Three primitives added to `standalone_uploader.py`** — it already was the
+hardened REST client (13 endpoints, four retry strategies, five importers), so
+no second client and no new dependency:
+
+- `get_published_record` — `GET /records/{id}`. The only source for
+  `metadata.version` (to bump), the `versions.*` flags, and
+  `parent.pids.doi.identifier`, the **concept DOI, which nothing in this
+  project previously recorded**. Doubles as the post-publish confirmation.
+- `create_new_version_draft` — `POST /records/{id}/versions`, **deliberately
+  single-shot**. This is the same non-idempotent-POST hazard documented for
+  draft creation: a 5xx may still have created the draft, so a blind retry
+  would either put a second draft on the chain or fail outright. A caller that
+  sees it raise must re-inspect and let a human adopt or discard.
+- `update_draft_metadata` — `PUT /records/{id}/draft`, the first metadata
+  mutation of an existing draft anywhere in this codebase (the creation body is
+  built once, inside `if not is_resume:`). Retried on 5xx *because* a
+  full-representation replace is idempotent.
+
+No generic POST/PUT retry primitive was added, on purpose: a generic helper
+invites wrapping the versions POST, which is exactly the bug
+`_create_draft_with_guarded_retry` exists to prevent.
+
+**Two decisions carry most of the safety.**
+
+*The title guard needed no change.* A new version legitimately shares its title
+with the published parent, which is precisely what the guard raises
+`DuplicateTitleError` on — but the conditional is
+`if title_guard and not existing_draft_id`, so creating the version draft
+first and handing its id to `upload_to_zenodo` bypasses the guard entirely.
+The whole file-upload → verify → DOI tail then runs unchanged and
+`tests/test_uploader_title_guard.py` stays green.
+
+*`files-import` is NOT called.* Linking the previous version's files would be
+free, but the reconciliation loop leaves remote entries absent from the upload
+list untouched — so an imported v1 file whose name the corrected package does
+not use would ride forward onto the published new version permanently. For the
+case this tool exists to fix, that file is the corrupt ZIP. Starting from an
+empty draft makes the invariant checkable in both directions, which is what the
+completeness gate enforces: the file set on the new version equals the new
+package, exactly. (The demo dry run caught a real instance of this — a
+`STALE_NOTES.csv` present on the published version and dropped by the
+re-prepped package.)
+
+**Also never called: `submit_to_community_review`.** A new version inherits
+community membership through the shared parent; re-submitting it would put it in
+a queue where a manager's *accept* publishes it — the race `--defer-zip` exists
+to avoid. Enforced by `submit_review=False` plus a tripwire test.
+
+**Other load-bearing details.** `state_file_path=None`, and the tool's own state
+file carries no `record_id` key: with one, the staging folder would match
+`finish_stuck_uploads.discover_stuck_esids()` and a well-meaning recovery run
+would resume the new-version draft through the main pipeline with
+`submit_review=True`. A cross-tool test pins that it stays invisible.
+`archive_staging_to_uploaded` is left alone — it `rmtree`s its destination,
+which for a versioned ESID would destroy the previous version's archive — so the
+tool owns a small replacement that moves to `ESID_NNN_Uploaded_<label>/` and
+**refuses rather than deleting**. The PUT body is an echo-merge of exactly five
+keys (`access`, `files`, `metadata`, `custom_fields`, `pids`): a full replace
+that omitted `pids` would strip a reserved DOI, and dump-only fields would 400.
+
+**`--publish` is OFF by default even under `--execute`, and that default is the
+rollback strategy** — every state up to publication is undone by discarding one
+draft, and nothing before publication can touch the record being superseded.
+Version labels advance by a trailing letter (`2024.1.0` → `2024.1.0a`), refusing
+anything ambiguous (`z`, uppercase, multi-letter — which is what stops
+`1.0-beta` becoming `1.0-betb`) with a message naming `--version-label`.
+
+There is no sandbox account for this project, so the **dry run is the
+compensating control**: two read-only GETs, no writes, and it prints the fully
+constructed URLs, a per-key metadata diff, the file plan including anything not
+carried forward, and the exact READ/WRITE call sequence with a NOT-CALLED block.
+Six behaviours could not be verified without a sandbox and are listed in the
+tool's docstring to be checked on the first real run.
+
+Also fixed: `Guides/TEST_UPLOAD_GUIDE.md` told you to export
+`INVENIO_RDM_BASE_URL` **without** a trailing slash, while
+`get_credentials_from_env` does not normalise it — yielding
+`https://zenodo.org/apirecords/...`. The guide now says slash, and the new tool
+refuses to run without one rather than silently normalising shared code.
+
+75 new tests (suite 551 → 626), audit 0 gaps.
+
 ## July 2026 — splitting sites too large for one Zenodo record
 
 **Why sites get split at all** — nothing in this repo previously recorded it,

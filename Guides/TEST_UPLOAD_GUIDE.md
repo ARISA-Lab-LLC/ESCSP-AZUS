@@ -64,13 +64,20 @@ Successfully installed pydantic-2.x.x requests-2.x.x ...
 # Zenodo API credentials — DO NOT commit this file to version control
 
 # For TESTING: Zenodo Sandbox
-export INVENIO_RDM_BASE_URL="https://sandbox.zenodo.org/api"
+export INVENIO_RDM_BASE_URL="https://sandbox.zenodo.org/api/"
 export INVENIO_RDM_ACCESS_TOKEN="your-sandbox-token-here"
 
 # For PRODUCTION: uncomment and fill in (keep sandbox lines commented out)
-# export INVENIO_RDM_BASE_URL="https://zenodo.org/api"
+# export INVENIO_RDM_BASE_URL="https://zenodo.org/api/"
 # export INVENIO_RDM_ACCESS_TOKEN="your-production-token-here"
 ```
+
+> ⚠️ **The base URL must end with a trailing slash.** Every API URL is built
+> by string concatenation (`f"{base_url}records/..."`), so a value without
+> the slash produces `https://zenodo.org/apirecords/...` and every call
+> fails. `get_credentials_from_env` does not normalise it — it is taken
+> verbatim. `templates/set_env.sh.example` ships the slash;
+> `Resources/new_version_upload.py` refuses to run without it.
 
 > ⚠️ `Resources/set_env.sh` must never be committed to git. Confirm it is in
 > `.gitignore` before working in a repository.
@@ -83,7 +90,7 @@ source Resources/set_env.sh
 **Verify:**
 ```bash
 echo $INVENIO_RDM_BASE_URL
-# Should output: https://sandbox.zenodo.org/api
+# Should output: https://sandbox.zenodo.org/api/     <- note the trailing slash
 ```
 
 ### Step 1.3: Confirm project_config.json
@@ -448,7 +455,8 @@ cat ~/AZUS_Test_Workspace/Records/successful_results.csv
 
 ### Option A — Publish (makes the record public)
 
-> ⚠️ Once published, records **cannot be deleted**, only versioned.
+> ⚠️ Once published, records **cannot be deleted**, only versioned — see
+> `Resources/new_version_upload.py` for the tool that does that.
 
 Via web interface: click "Publish" and confirm.
 

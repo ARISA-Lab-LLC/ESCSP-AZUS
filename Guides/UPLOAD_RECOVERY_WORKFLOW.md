@@ -67,8 +67,13 @@ Using the Phase 1 reports:
   Keep the one your `upload_state.json` points to.
 - **Published duplicates:** this is curation, not deletion. Pick the
   canonical record, remove the other from the community, and contact
-  Zenodo support to withdraw it if needed. No AZUS tool touches
-  published records.
+  Zenodo support to withdraw it if needed. No AZUS tool deletes a
+  published record.
+- **A published record whose FILES are wrong** (broken/short ZIP, truncated
+  WAVs found after the fact) is not a duplicate and not a deletion — it needs
+  a new version. Re-prep the ESID, then see
+  `Resources/new_version_upload.py`. Published files are immutable, so this
+  is the only fix; it mints a new version DOI under the same concept DOI.
 
 ## Phase 4 — Restart uploads
 
@@ -93,6 +98,75 @@ If a run dies, run 4b again. For stubborn ZIP failures, add
 `--upload-attempts 1` to fail fast per file and lean on the outer re-run
 loop instead of in-run backoff waits.
 
+### 4c — when one ZIP will not go, no matter how many times you re-run
+
+A multi-GB ZIP that times out repeatedly can be replaced, on the **same**
+draft, by the individual WAVs from `Raw_Data/` plus `CONFIG.TXT` and the
+standalone companions. This is **opt-in** and it is a **one-way door**.
+
+```bash
+# Always look first — read-only, no network calls, writes nothing.
+python Resources/finish_stuck_uploads.py --list-only
+
+# Then, for a genuinely stuck ESID:
+python Resources/finish_stuck_uploads.py \
+    --esid 445 --workers 1 --upload-attempts 1 \
+    --enable-file-by-file --raw-data-dir /absolute/path/to/Raw_Data
+```
+
+An ESID is switched only when **both** hold: the ZIP is the *sole* missing
+file (every companion is already committed on the record), and its
+`number_of_tries` has reached `--tries-threshold` (default 3). Anything
+else is reported and left alone.
+
+Four things to know before you run it:
+
+- **The ZIP is attempted again first.** `--enable-file-by-file` does not
+  skip the normal ZIP pass — a ZIP-mode ESID goes through it before the
+  switch is even evaluated, which on a 40 GB file is hours. Pass
+  `--upload-attempts 1` to keep that short. Note this also *increments*
+  `number_of_tries`, so an ESID sitting at 2 tries passes a threshold of 3
+  after the pass.
+- **Reverting is not automated**, because going back to a ZIP would mean
+  deleting files already committed to the record. To suppress switching
+  entirely while still continuing ESIDs already in this mode, set
+  `--tries-threshold 999`.
+- **A committed ZIP is never touched.** If the ZIP actually succeeded, the
+  tool refuses the switch and leaves it alone; only a failed or pending ZIP
+  slot is cleared. Every raw WAV is SHA-512-checked against the prep
+  `file_list.csv` before anything is uploaded, and the record is only
+  published or submitted once a completeness gate confirms the full set is
+  committed and the ZIP is gone.
+- **Success submits the record.** With a `community_id` in
+  `project_config.json` — the production default — a completed
+  file-by-file run submits the record to the community review queue, and
+  acceptance publishes it. A published record cannot accept new files. To
+  rehearse without that, run against a `--config` whose `project_config`
+  has no `community_id`; the run then stops at "uploaded, still a draft".
+
+Once switched, the ESID is marked `mode: file_by_file` in its
+`upload_state.json` and the ordinary ZIP pipeline **skips it** — so
+`standalone_tasks.py` and this tool never fight over the same record. That
+also means Phase 4a/4b will appear to ignore the ESID from then on; that is
+correct, not a bug.
+
+**If a file-by-file run fails partway through**, restore the manifest
+before retrying. The run rewrites `ESID_NNN_to_upload.csv` to list the
+WAVs, and a retry reads that back and looks for them in the *staging*
+folder, aborting with "N required file(s) not found locally":
+
+```bash
+cd Staging_Area/ESID_445_Staging
+cp ESID_445_zip_attempt_upload.csv ESID_445_to_upload.csv
+```
+
+That snapshot is written once, before the first rewrite, and never
+replaced — see the file-roles table in `DIRECTORY_STRUCTURE_GUIDE.md`.
+
+> ⚠️ **As of 2026-07-28 this fallback is fully unit-tested but has not yet
+> been exercised against the live Zenodo API.** Use `--list-only` first,
+> run one ESID at a time, and read the log before trusting a batch.
+
 **Log lines to watch for** (these used to be silent):
 
 ```
@@ -103,6 +177,21 @@ Tracker skip (already uploaded): ESID_NNN.zip
 ESID folder has no ZIP — skipping: ...
 Deferred: N (ZIP not uploaded yet)
 ```
+
+From a `--enable-file-by-file` run (Phase 4c):
+
+```
+[ESID NNN] SWITCHING to file-by-file (tries=3 >= 3, only the ZIP is missing)...
+[ESID NNN] Not switching — number_of_tries=2 < threshold=3 ...
+[ESID NNN] Not switching — the ZIP is not the sole missing file ...
+Clearing INCOMPLETE ZIP slot from record: ESID_NNN.zip (status=pending)
+The ZIP is already COMMITTED on the record — ... NOT switched ...
+NOT publishing — N required file(s) are not committed on the record: ...
+N required file(s) not found locally — aborting before any upload: ...
+```
+
+The last one is the manifest-rewrite trap: restore
+`ESID_NNN_zip_attempt_upload.csv` over the live manifest and re-run.
 
 ## Phase 5 — Verify after each batch
 
@@ -133,3 +222,7 @@ mv azus_upload.log Reports/azus_upload_$(date +%Y%m%d).log
 | Are the WAVs/ZIPs themselves intact? | `Resources/audit_wav_integrity.py` |
 | Is a prepared folder complete? | `Resources/audit_prep_completeness.py` |
 | Finish incomplete uploads | `Resources/finish_stuck_uploads.py` |
+| What is stuck, without touching anything? | `finish_stuck_uploads.py --list-only` |
+| One ZIP keeps timing out | `finish_stuck_uploads.py --enable-file-by-file` (Phase 4c — one-way) |
+| A published record's files are wrong | `Resources/new_version_upload.py` (new version; dry-run by default, `--publish` off) |
+| The site is too big for Zenodo's 50 GB cap | `Resources/split_oversized_raw_folders.py` (splits the raw folder into two parts; each part then needs its own collectors-CSV row) |

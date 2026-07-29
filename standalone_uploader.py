@@ -78,6 +78,14 @@ _PRE_CREATE_PAUSE_S = 2
 _DOI_RESERVE_ATTEMPTS = 3
 _DOI_RESERVE_BACKOFF_S = (5, 15)  # before attempts 2 and 3
 
+# PUT /records/{id}/draft replaces a draft's FULL representation, so it is
+# genuinely idempotent — re-sending the same body converges on the same
+# state whether or not the first attempt landed.  That is what makes a
+# retry safe here and unsafe for POST /records/{id}/versions, which must
+# never be retried (see create_new_version_draft).
+_DRAFT_PUT_ATTEMPTS = 3
+_DRAFT_PUT_BACKOFF_S = (5, 15)  # before attempts 2 and 3
+
 # Read-buffer size for local file hashing.  Mirrors
 # Resources/azus_common.py HASH_BUFFER_SIZE — kept local (not imported)
 # so this lowest-level module stays importable without the Resources/
@@ -1029,6 +1037,168 @@ def get_draft_record(
     if response is None:
         return None
     return response.json()
+
+
+def get_published_record(
+    credentials: Credentials, record_id: str
+) -> Optional[Dict[str, Any]]:
+    """Fetch a PUBLISHED record's body (not its draft).
+
+    :func:`get_draft_record` reads ``/records/{id}/draft``, which 404s for
+    a published record that has no open edit draft.  This reads the
+    published record itself — the only source for the three things a new
+    version needs: ``metadata.version`` (to bump), ``versions.is_latest``
+    / ``versions.is_latest_draft`` (to refuse an unsafe version), and
+    ``parent.pids.doi.identifier`` (the concept DOI, which nothing else in
+    this project records).
+
+    It also serves as the post-publish confirmation: 200 means the publish
+    landed, 404 means the record is still a draft.
+
+    NOTE: Zenodo resolves a CONCEPT record id to the latest version, and
+    ``requests`` follows that redirect — so the returned ``id`` may differ
+    from ``record_id``.  A caller acting on one specific version MUST
+    compare the two rather than assume they match.
+
+    Args:
+        credentials: Zenodo API credentials.
+        record_id: The published record's ID.
+
+    Returns:
+        The published record dict on 200, or None on 404.
+
+    Raises:
+        HTTPError: 4xx other than 404.
+        RequestException: 5xx or transport error after all API retries.
+    """
+    url = f"{credentials.base_url}records/{record_id}"
+    response = _api_get_with_retry(
+        url=url,
+        auth_headers=_auth_headers(credentials),
+        label=f"GET published record {record_id}",
+        allow_404=True,
+    )
+    if response is None:
+        return None
+    return response.json()
+
+
+def create_new_version_draft(
+    credentials: Credentials, record_id: str
+) -> Dict[str, Any]:
+    """Create a new-version draft of a published record.
+
+        POST /api/records/{id}/versions
+
+    The returned draft belongs to the same parent — so it inherits the
+    concept DOI and the community membership — carries the previous
+    version's descriptive metadata, and has NO files.  Its
+    ``publication_date`` and ``version`` are CLEARED and must be
+    re-supplied via :func:`update_draft_metadata` before publishing.
+
+    DELIBERATELY SINGLE-SHOT — never retried.  This is the same
+    non-idempotent-POST hazard this module documents for draft creation: a
+    5xx or a dropped connection may still have created the draft, and a
+    blind retry would either put a SECOND draft on the chain or fail
+    outright, since InvenioRDM allows only one open draft per chain.  A
+    caller that sees this raise must re-inspect the chain and let a human
+    adopt or discard the result — never retry.
+
+    Args:
+        credentials: Zenodo API credentials.
+        record_id: The PUBLISHED record to create a new version of.
+
+    Returns:
+        The new draft's full body, including its new ``id``.
+
+    Raises:
+        HTTPError: any 4xx/5xx — including the 400 InvenioRDM returns when
+            an unpublished draft already exists on this chain.
+        RequestException: transport failure (AMBIGUOUS — the draft may
+            still have been created).
+    """
+    url = f"{credentials.base_url}records/{record_id}/versions"
+    logger.info("  Creating a new version draft of record %s...", record_id)
+    response = requests.post(
+        url, headers=_auth_headers(credentials), timeout=_REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def update_draft_metadata(
+    credentials: Credentials, record_id: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Replace a draft's representation with ``payload``.
+
+        PUT /api/records/{id}/draft
+
+    The ONLY way to change an existing draft's metadata: the creation POST
+    body is assembled once, inside ``if not is_resume:``, so a resumed
+    draft's metadata is otherwise never touched.  A new version needs this
+    to re-supply the ``publication_date`` and ``version`` that
+    ``POST /versions`` clears.
+
+    ``payload`` is sent EXACTLY as given — no key is added, removed, or
+    defaulted here.  That is deliberate: this endpoint replaces the whole
+    representation, so an omitted ``pids`` would strip a reserved DOI and
+    an omitted ``files`` could disable the file bucket on a draft that
+    already holds hours of uploads.  Composing a correct body — echoing
+    every unchanged key back from the draft being updated — is the
+    caller's job.
+
+    Retried on 5xx, unlike :func:`create_new_version_draft`, because a
+    full-representation replace is idempotent.
+
+    Args:
+        credentials: Zenodo API credentials.
+        record_id: The draft record ID.
+        payload: The complete draft representation to send.
+
+    Returns:
+        The updated draft body as Zenodo returns it.
+
+    Raises:
+        HTTPError: 4xx — a validation error naming the offending field.
+        RequestException: 5xx or transport error after all retries.
+    """
+    url = f"{credentials.base_url}records/{record_id}/draft"
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _DRAFT_PUT_ATTEMPTS + 1):
+        try:
+            response = requests.put(
+                url,
+                headers=_auth_headers(credentials, "application/json"),
+                json=payload,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if 500 <= response.status_code < 600:
+                raise RequestException(
+                    f"Server error HTTP {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+            response.raise_for_status()
+            return response.json()
+        except HTTPError:
+            # 4xx — a validation error; retrying cannot fix it.
+            raise
+        except RequestException as exc:
+            last_exc = exc
+            if attempt < _DRAFT_PUT_ATTEMPTS:
+                backoff = _DRAFT_PUT_BACKOFF_S[attempt - 1]
+                logger.warning(
+                    "  Draft metadata PUT for %s failed (attempt %d/%d): "
+                    "%s. Retrying in %ds...",
+                    record_id, attempt, _DRAFT_PUT_ATTEMPTS, exc, backoff,
+                )
+                time.sleep(backoff)
+            else:
+                logger.error(
+                    "  Draft metadata PUT for %s failed after %d attempt(s). "
+                    "Last error: %s", record_id, _DRAFT_PUT_ATTEMPTS, exc,
+                )
+    assert last_exc is not None
+    raise last_exc
 
 
 def list_draft_files(

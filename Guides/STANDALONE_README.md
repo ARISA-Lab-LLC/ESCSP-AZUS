@@ -77,7 +77,29 @@ These are convenience wrappers around the main code path:
   already prepared (folder exists in `Staging_Area/` or `Uploaded_Data/`).
 - **Resources/finish_stuck_uploads.py** — scan `Staging_Area/` for ESIDs
   with `upload_state.json` (interrupted uploads) and finish them via
-  `standalone_tasks.py --esid <discovered list> --workers N`.
+  `standalone_tasks.py --esid <discovered list> --workers N`. With the
+  opt-in `--enable-file-by-file --raw-data-dir PATH`, an ESID whose ZIP is
+  the only missing file and whose `number_of_tries` has reached
+  `--tries-threshold` (default 3) switches to uploading the individual
+  WAVs instead of the ZIP. Use `--list-only` first: it is read-only and
+  makes no network calls.
+- **Resources/new_version_upload.py** — publish a re-prepped staging package
+  as a NEW VERSION of an already-published record, for the case where the
+  published metadata is wrong AND its ZIP is broken. Requires `--esid` and
+  `--record-id` explicitly. **Dry-run by default**, and `--publish` is OFF even
+  under `--execute` — the normal outcome is an inspectable draft, which is what
+  makes the operation reversible right up to the moment you publish. Read the
+  dry run's metadata diff before every execute; with no sandbox available it is
+  the safety review.
+- **Resources/split_oversized_raw_folders.py** — for a site too large for
+  Zenodo's 50 GB per-record cap, fill its `ESID#NNN_Part_2_of_2` raw folder
+  from `ESID#NNN_Part_1_of_2`: copy the non-WAV companions and move the
+  later half of the WAVs so the two halves are close to equal in bytes.
+  **Dry-run by default** — nothing moves without `--perform-split`. Safe to
+  interrupt: the plan is derived from both folders at once, so `--resume`
+  finishes a partial run at the same cut. Remember that each half also
+  needs its own row in the collectors spreadsheet (the tool reports whether
+  they exist but never edits it).
 
 ### Existing Files (Reused)
 

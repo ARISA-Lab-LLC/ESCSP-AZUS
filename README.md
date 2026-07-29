@@ -113,6 +113,22 @@ Python code.
   whether the collectors spreadsheet has
   the two per-part rows that `prepare_dataset.py` requires — but never edits it.
   Covered by `tests/test_split_oversized_raw_folders.py`.
+- **New version of a published record** — `Resources/new_version_upload.py`
+  publishes a re-prepped staging package as a **new Zenodo version** of an
+  already-published record, for the case where the published metadata is wrong
+  AND its ZIP is broken (published files are immutable, so a new version is the
+  only fix). Requires `--esid` and `--record-id` explicitly — nothing is
+  inferred. **Dry-run by default**, and `--publish` is OFF even under
+  `--execute`, so the normal outcome is an inspectable draft; that default is
+  the rollback plan, since an unpublished draft can be discarded and a
+  published version cannot. Deliberately does NOT call `files-import` (an
+  imported file the new package does not use would ride forward onto the new
+  DOI permanently) and never submits to community review (a manager's accept
+  would publish it). The version label advances by a trailing letter,
+  `2024.1.0` → `2024.1.0a`. With no sandbox available the dry run is the
+  safety review: it prints the constructed URLs, a per-key metadata diff,
+  the file plan including anything not carried forward, and the exact
+  READ/WRITE call sequence. Covered by `tests/test_new_version_upload.py`.
 - **Duplicate-record check** — `Resources/find_duplicate_records.py` fetches
   every record title from the project community and/or your Zenodo account
   (drafts included) and reports duplicate-title groups to a CSV — with a
