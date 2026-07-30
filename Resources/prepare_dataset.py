@@ -1790,8 +1790,12 @@ def copy_related_identifiers(
 # to Zenodo. README.html content becomes the Zenodo description field;
 # the 4readme CSV is an intermediate formatting artefact; the manifest
 # file itself would be circular.
-_MANIFEST_EXCLUDES = {
-    "README.html",
+# Never listed in the upload manifest.  The metadata inputs come from the
+# shared contract (azus_common.METADATA_INPUT_FILES) so prep and the upload
+# side cannot disagree about which files feed the record rather than being
+# part of it; README.html has always been here for that reason, and
+# related_identifiers.csv / references.csv belong in the same category.
+_MANIFEST_EXCLUDES = set(azus_common.METADATA_INPUT_FILES) | {
     "total_eclipse_data_4readme.csv",
 }
 
@@ -1801,7 +1805,9 @@ def create_upload_manifest(output_dir: Path, esid: str) -> Path:
 
     Scans ``output_dir`` for all files present and writes a manifest CSV
     that ``standalone_tasks.py`` reads at upload time.  Files in
-    ``_MANIFEST_EXCLUDES`` are omitted.
+    ``_MANIFEST_EXCLUDES`` are omitted — notably the metadata inputs
+    (``azus_common.METADATA_INPUT_FILES``), which are read from the folder
+    to BUILD the record and are not files OF the record.
 
     The manifest CSV uses a ``File Name`` column (the only column consumed
     by ``read_upload_manifest``), plus human-readable ``File Size (KB)``

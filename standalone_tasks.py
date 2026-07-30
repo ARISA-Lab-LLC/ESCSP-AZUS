@@ -1768,10 +1768,18 @@ def create_upload_data(
         readme_html_path = esid_staging_dir / "README.html"
         readme_md_path   = esid_staging_dir / "README.md"
 
-        # Exclude files that are handled via dedicated UploadData fields:
-        #   README.html  — content becomes the Zenodo description; not uploaded as a file
+        # Exclude files that must not reach additional_files:
         #   README.md    — added explicitly via UploadData.readme_md
-        #   the archives  — added explicitly via UploadData.archives
+        #   the archives — added explicitly via UploadData.archives
+        #   the metadata inputs (azus_common.METADATA_INPUT_FILES) —
+        #     README.html becomes the description, and
+        #     related_identifiers.csv / references.csv become record
+        #     metadata; all three are read from the folder to BUILD the
+        #     record and are not files OF it.  Excluded HERE as well as in
+        #     prep's manifest, because the manifest is a directory scan
+        #     written at prep time: folders prepped before that rule
+        #     existed still list them, and re-prepping a multi-GB site to
+        #     drop a 2 KB input file would be absurd.
         # Without this exclusion an archive would appear twice in all_files
         # (once here, once from archives), causing a 400 "already exists"
         # error on the second upload attempt.  EVERY archive must be
@@ -1779,9 +1787,11 @@ def create_upload_data(
         # the per-day layout it lists them all, and any archive left in
         # additional_files would upload as a "companion" — with the default
         # retry budget instead of --upload-attempts.
-        excluded = {"README.html", "README.md"} | {
-            Path(a).name for a in archives
-        }
+        excluded = (
+            {"README.md"}
+            | set(azus_common.METADATA_INPUT_FILES)
+            | {Path(a).name for a in archives}
+        )
         additional_files = [
             path for filename, path in dataset_files.items()
             if path and filename not in excluded

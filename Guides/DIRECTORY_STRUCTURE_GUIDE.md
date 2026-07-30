@@ -250,8 +250,21 @@ AudioMoth_Operation_Manual.pdf
 License.txt
 ```
 
-`README.html` is deliberately excluded — its content is used as the Zenodo
-description field, not uploaded as a file.
+Three files in the folder are deliberately excluded — they are INPUTS used
+to BUILD the record's metadata, not files OF the record
+(`azus_common.METADATA_INPUT_FILES`):
+
+| File | Becomes |
+|---|---|
+| `README.html` | the record's description field |
+| `related_identifiers.csv` | the record's related identifiers |
+| `references.csv` | the record's references |
+
+They stay on disk in the staging folder — the upload step reads both CSVs
+from there directly, so excluding them from the manifest does not change the
+metadata they produce. The exclusion is applied both when prep writes the
+manifest and again when the upload side assembles its file list, so a folder
+prepped before this rule existed does not need re-prepping.
 
 ---
 
@@ -353,7 +366,7 @@ Staging_Area/
     ├── README.md                        ← Generated from README.html
     ├── file_list.csv                    ← Generated (SHA-512 hashes — includes ZIP row)
     ├── total_eclipse_data.csv           ← Generated (single-row metadata)
-    ├── related_identifiers.csv          ← Copied from Resources/ (keyword-selected)
+    ├── related_identifiers.csv          ← Copied from Resources/ (keyword-selected); NOT uploaded — metadata input
     ├── total_eclipse_data_data_dict.csv ← Copied from Resources/ (via resource_files_list.csv)
     ├── CONFIG_data_dict.csv             ← Copied from Resources/ (via resource_files_list.csv)
     ├── WAV_data_dict.csv                ← Copied from Resources/ (via resource_files_list.csv)

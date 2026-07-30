@@ -1,5 +1,44 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — metadata inputs were being uploaded as record files
+
+`related_identifiers.csv` was reaching Zenodo as a file on the record. It is an
+INPUT: prep copies it into the staging folder and the upload step reads it to build
+the record's related-identifiers metadata. It is not part of the dataset.
+
+The mechanism was `create_upload_manifest` being a directory SCAN whose
+`_MANIFEST_EXCLUDES` held only `README.html` and one vestigial name. Anything else
+sitting in the folder was listed, and the upload side faithfully uploaded it.
+Reproduced through the real prep CLI, which also exposed the sharper half of the
+defect: **`file_list.csv` never listed the file**, so affected records ship a
+payload file that the record's own file manifest does not document.
+
+`README.html` was already excluded for precisely this reason, which showed the
+defect was a class rather than an instance. There is a third member: the upload side
+supports a per-record `references.csv` read from the staging folder
+(`standalone_tasks.py`'s citation override), so the same bug would have appeared
+through that supported path the moment anyone used it. All three are now named once,
+in `azus_common.METADATA_INPUT_FILES`, and both sides consume that one definition.
+
+**Excluded on BOTH sides, deliberately.** Prep stops writing them into new
+manifests — the root fix — and `create_upload_data` excludes them again when it
+assembles the file list. The second layer is not redundant: the manifest is written
+at prep time, so every folder prepped before this rule still lists these files, and
+re-prepping a multi-GB site to drop a 2 KB input file would be absurd. A test pins
+that back-compat case with a deliberately stale manifest.
+
+The files stay on disk, and the metadata path is unaffected: both CSVs are read
+straight from the staging folder, never via the manifest. A test asserts
+`get_draft_config` still receives both per-record paths.
+
+**Not fixed here, and worth knowing:** records that already carry the file keep it.
+The uploader's resume logic only *filters* what to upload
+(`to_upload = [p for p in files if ...]`) — nothing iterates remote entries that
+have no local counterpart, so an extra file on an existing draft is never pruned.
+Cleaning those up is a reconciliation feature, deliberately out of scope.
+
+Suite: 8 tests added (981 total), docstring audit 0 gaps.
+
 ## July 2026 — finish_stuck_uploads.py and the per-day layout
 
 Most of this tool was already layout-agnostic and needed nothing:

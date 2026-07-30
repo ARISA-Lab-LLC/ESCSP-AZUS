@@ -76,6 +76,31 @@ STATE_FILENAME = "upload_state.json"
 # finishes it — so the two never fight over the same Zenodo record.
 FILE_BY_FILE_MODE = "file_by_file"
 
+# Files that live in a prepared folder but are INPUTS used to BUILD the
+# Zenodo record's metadata — they are not payload files of the record and
+# must never be uploaded:
+#
+#   README.html              -> becomes the record's description field
+#   related_identifiers.csv  -> becomes the record's related-identifiers
+#   references.csv           -> becomes the record's references
+#
+# Both CSVs are read straight from the staging folder at upload time
+# (standalone_tasks.py's per-record citation override, and
+# new_version_upload.py), so excluding them from the upload manifest does
+# not affect the metadata they produce.
+#
+# ONE definition, consumed by BOTH sides: prepare_dataset excludes these
+# when it writes the manifest, and the upload side excludes them again when
+# it assembles the file list.  The second layer is not redundant — the
+# manifest is a directory scan written at prep time, so folders prepped
+# before this rule existed still list these files, and re-prepping a
+# multi-GB site just to drop a 2 KB input file would be absurd.
+METADATA_INPUT_FILES: Tuple[str, ...] = (
+    "README.html",
+    "related_identifiers.csv",
+    "references.csv",
+)
+
 # Provenance archives of the upload manifest, written by the file-by-file
 # fallback when it rewrites ESID_NNN_to_upload.csv.  The zip_attempt copy
 # is the manifest AS IT WAS for the ZIP upload (written ONCE, never
