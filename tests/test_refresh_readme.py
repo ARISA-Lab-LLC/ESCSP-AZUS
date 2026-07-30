@@ -243,7 +243,7 @@ class TestFixtureIsValid(_DatasetTestCase):
     def test_built_dataset_passes_integrity_gate(self):
         folder, _, _ = self.build_dataset("007")
         problems = standalone_tasks.verify_dataset_integrity(
-            str(folder / "ESID_007.zip")
+            str(folder), "007"
         )
         self.assertEqual(problems, [])
 
@@ -302,7 +302,7 @@ class TestRefreshFolder(_DatasetTestCase):
         self.build_dataset("007")
         folder = self._refresh("007")
         problems = standalone_tasks.verify_dataset_integrity(
-            str(folder / "ESID_007.zip")
+            str(folder), "007"
         )
         self.assertEqual(problems, [])
 
@@ -420,7 +420,7 @@ class TestRefreshFolder(_DatasetTestCase):
         # And the whole thing is still uploadable.
         self.assertEqual(
             standalone_tasks.verify_dataset_integrity(
-                str(folder / "ESID_007.zip")
+                str(folder), "007"
             ),
             [],
         )
@@ -443,7 +443,7 @@ class TestRefreshFolder(_DatasetTestCase):
         )
         self.assertEqual(
             standalone_tasks.verify_dataset_integrity(
-                str(folder / "ESID_007.zip")
+                str(folder), "007"
             ),
             [],
         )
@@ -464,7 +464,7 @@ class TestRefreshFolder(_DatasetTestCase):
         # Rewrote successfully; still uploadable and README refreshed.
         self.assertEqual(
             standalone_tasks.verify_dataset_integrity(
-                str(folder / "ESID_077.zip")
+                str(folder), "077"
             ),
             [],
         )
@@ -546,7 +546,7 @@ class TestMain(_DatasetTestCase):
         code = self._run(["--collector-csv", str(self.collector_csv)])
         self.assertEqual(code, 0)
         problems = standalone_tasks.verify_dataset_integrity(
-            str(self.staging / "ESID_007_Staging" / "ESID_007.zip")
+            str(self.staging / "ESID_007_Staging"), "007"
         )
         self.assertEqual(problems, [])
 

@@ -121,7 +121,8 @@ for _p in (str(_PROJECT_ROOT), str(_RESOURCES_DIR)):
 
 import azus_common  # noqa: E402
 import esid_record_report as err_mod  # noqa: E402
-import file_by_file_upload as fbf  # noqa: E402
+import file_by_file_upload as fbf
+import prepare_dataset as _prep_contract  # noqa: E402
 import hash_raw_wavs  # noqa: E402
 from finish_stuck_uploads import _load_publish_config  # noqa: E402
 from standalone_uploader import (  # noqa: E402
@@ -203,11 +204,17 @@ UPLOADED_TWIN_EXISTS = "UPLOADED_TWIN_EXISTS"
 STATE_RECORD_MISMATCH = "STATE_RECORD_MISMATCH"
 COMPANIONS_MISSING = "COMPANIONS_MISSING"
 PARTIALLY_CONVERTED = "PARTIALLY_CONVERTED"
+UNSUPPORTED_ZIP_LAYOUT = "UNSUPPORTED_ZIP_LAYOUT"
 DRAFT_LIST_FAILED = "DRAFT_LIST_FAILED"
 
 _RECOMMENDED_ACTION = {
     CONVERTIBLE: (
         "re-run with --execute to convert this draft to file-by-file"
+    ),
+    UNSUPPORTED_ZIP_LAYOUT: (
+        "per-day staging folder — finish it with standalone_tasks.py "
+        "(which uploads every day archive to one record); this tool is "
+        "single-archive only"
     ),
     RESUMABLE: (
         "already in file-by-file mode — re-run with --execute to continue "
@@ -745,6 +752,18 @@ def local_verdict(
             f"{azus_common.PREP_SENTINEL} is absent from "
             f"{package.staging_dir.name}"
         )
+    # This tool converts a stuck ZIP-only draft into a file-by-file record,
+    # so it inherits file_by_file_upload's single-archive vocabulary — and
+    # its CONVERTIBLE verdict opens a one-way door.  Refuse any other
+    # layout here, before the draft listing.
+    layout = _prep_contract.staging_zip_mode(package.staging_dir, esid)
+    if layout is not None and layout != _prep_contract.ZIP_MODE_SINGLE:
+        return UNSUPPORTED_ZIP_LAYOUT, (
+            f"{package.staging_dir.name} holds a {layout} ZIP layout; this "
+            "tool supports the single-archive layout only (per-day is a "
+            "later phase)"
+        )
+
     if not package.raw_files or not package.companion_names:
         return MANIFESTS_MISSING, (
             f"file_list.csv yielded {len(package.raw_files)} raw row(s) and "

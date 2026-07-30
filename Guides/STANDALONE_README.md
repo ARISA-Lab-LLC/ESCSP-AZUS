@@ -84,8 +84,8 @@ These are convenience wrappers around the main code path:
   Zenodo's 100-files-per-record cap (~85 days with the standard
   companions) is refused before the first ZIP byte. `--single-zip`
   preserves the legacy one-archive layout with metadata appended inside.
-  ⚠️ **The upload pipeline does not handle per-day folders yet** — do not
-  feed them to `standalone_tasks.py` until that phase lands.
+  `standalone_tasks.py` uploads either layout: a per-day folder becomes ONE
+  Zenodo record with every day archive attached to it.
 - **Resources/prep_all_datasets.py** — batch-prepare every ESID under a
   top-level raw-data folder, in numerical order, skipping any ESID
   already prepared (folder exists in `Staging_Area/` or `Uploaded_Data/`).
@@ -381,6 +381,44 @@ tail -f azus_upload.log
 # Check uploaded files
 wc -l Records/uploaded_files.txt
 ```
+
+### Skip ESIDs already on Zenodo (`--skip-existing-records`)
+
+For a re-run over a raw-data folder where some sites are already done. Before
+any local work, each ESID's intended record title is looked up on Zenodo; if a
+record with that title exists, the folder is skipped and the run moves to the
+next ESID.
+
+```bash
+python standalone_tasks.py --skip-existing-records
+```
+
+- **Both drafts and published records count as existing.** A published record
+  means the site is finished. An unfinished draft is finished with
+  `Resources/finish_stuck_uploads.py`, not by this run — skipping it here does
+  not abandon it.
+- **Skipped, not failed.** Skipped folders appear in the run summary's
+  `Skipped` count and write no row to `failed_results.csv`, which stays a list
+  of things that actually need attention. The staging folder is left untouched.
+- **It asks Zenodo, not `upload_state.json`.** A folder whose state file was
+  lost or hand-deleted is still recognised — that is exactly the folder that
+  would otherwise create a duplicate record.
+- **The check runs before the integrity gate.** A skipped folder costs one API
+  search instead of re-hashing every archive, which is where the time goes on a
+  multi-GB site.
+- **It fails closed.** If the search cannot be completed (network, auth, an
+  unrecognized response), the dataset is FAILED rather than uploaded — the
+  point of the flag is not to touch what already exists, so an undeterminable
+  answer must not become an upload. Re-run without the flag to upload anyway;
+  the uploader's duplicate guard still protects the record.
+
+Without this flag the behaviour is unchanged: an existing draft is **resumed**
+(its missing files uploaded) rather than skipped.
+
+Note that the duplicate guard inside the uploader searches again immediately
+before creating a draft. That second search is deliberate — it closes the
+window between this pre-check and draft creation — so a run with this flag
+performs two searches for any ESID that is not skipped.
 
 ### Resume After Interruption
 

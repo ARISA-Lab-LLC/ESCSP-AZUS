@@ -412,7 +412,7 @@ class TestGetRecordingDates(TempDirTestCase):
         )
         # Expected strings follow tasks.UPLOAD_DATE_FORMAT ("%Y-%m-%d").
         self.assertEqual(
-            tasks.get_recording_dates(str(zip_path), self.config),
+            tasks.get_recording_dates([str(zip_path)], self.config),
             ("2024-04-08", "2024-04-09"),
         )
 
@@ -425,7 +425,7 @@ class TestGetRecordingDates(TempDirTestCase):
              "20240409_130000.WAV"],
         )
         self.assertEqual(
-            tasks.get_recording_dates(str(zip_path), self.config),
+            tasks.get_recording_dates([str(zip_path)], self.config),
             ("2024-04-08", "2024-04-09"),
         )
 
@@ -436,7 +436,7 @@ class TestGetRecordingDates(TempDirTestCase):
             ["20240408_120000.WAV", "20240501_000000.txt"],
         )
         self.assertEqual(
-            tasks.get_recording_dates(str(zip_path), self.config),
+            tasks.get_recording_dates([str(zip_path)], self.config),
             ("2024-04-08", "2024-04-08"),
         )
 
@@ -446,7 +446,7 @@ class TestGetRecordingDates(TempDirTestCase):
             ["not-a-date.WAV", "19990101_000000.WAV"],
         )
         with self.assertRaises(ValueError):
-            tasks.get_recording_dates(str(zip_path), self.config)
+            tasks.get_recording_dates([str(zip_path)], self.config)
 
     def test_missing_zip_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -546,7 +546,7 @@ class TestCreateUploadData(TempDirTestCase):
     def test_matched_pair_builds_upload_data(self):
         staging, zip_path, dd_path = self._make_staging()
         upload_data, unmatched = tasks.create_upload_data(
-            [("005", str(zip_path))],
+            [("005", str(staging), [str(zip_path)])],
             [make_collector("005")],
             project_config=self.config,
         )
@@ -555,9 +555,10 @@ class TestCreateUploadData(TempDirTestCase):
         (data,) = upload_data
         self.assertIsInstance(data, UploadData)
         self.assertEqual(data.esid, "005")
-        self.assertEqual(data.zip_file, str(zip_path))
-        # The ZIP is carried by the dedicated zip_file field — it must NOT
-        # also appear in additional_files (double upload = Zenodo 400).
+        self.assertEqual(data.archives, [str(zip_path)])
+        self.assertEqual(data.staging_folder, str(staging))
+        # The archives are carried by the dedicated archives field — they
+        # must NOT also appear in additional_files (double upload = 400).
         self.assertEqual(data.additional_files, [str(dd_path)])
         # READMEs resolve from the staging dir even though the manifest
         # never lists them.
@@ -570,9 +571,9 @@ class TestCreateUploadData(TempDirTestCase):
         )
 
     def test_missing_readmes_stay_none(self):
-        _, zip_path, _ = self._make_staging(readmes=False)
+        staging, zip_path, _ = self._make_staging(readmes=False)
         upload_data, _ = tasks.create_upload_data(
-            [("005", str(zip_path))],
+            [("005", str(staging), [str(zip_path)])],
             [make_collector("005")],
             project_config=self.config,
         )
@@ -580,9 +581,9 @@ class TestCreateUploadData(TempDirTestCase):
         self.assertIsNone(upload_data[0].readme_md)
 
     def test_missing_collector_reports_unmatched_esid(self):
-        _, zip_path, _ = self._make_staging(esid="007")
+        staging, zip_path, _ = self._make_staging(esid="007")
         upload_data, unmatched = tasks.create_upload_data(
-            [("007", str(zip_path))],
+            [("007", str(staging), [str(zip_path)])],
             [make_collector("005")],  # no collector for 007
             project_config=self.config,
         )
@@ -592,15 +593,16 @@ class TestCreateUploadData(TempDirTestCase):
     def test_discovery_failure_writes_failure_row_and_continues(self):
         """A dataset whose manifest lists a missing file must not abort the
         batch: it gets a failure-CSV row and the good dataset still uploads."""
-        _, bad_zip, _ = self._make_staging(
+        bad_staging, bad_zip, _ = self._make_staging(
             esid="005",
             manifest_names=["ESID_005.zip", "GHOST_FILE.csv"],
         )
-        _, good_zip, _ = self._make_staging(esid="006")
+        good_staging, good_zip, _ = self._make_staging(esid="006")
         failure_csv = self.root / "failed_results.csv"
 
         upload_data, unmatched = tasks.create_upload_data(
-            [("005", str(bad_zip)), ("006", str(good_zip))],
+            [("005", str(bad_staging), [str(bad_zip)]),
+             ("006", str(good_staging), [str(good_zip)])],
             [make_collector("005"), make_collector("006")],
             project_config=self.config,
             failure_results_file=str(failure_csv),
@@ -616,11 +618,11 @@ class TestCreateUploadData(TempDirTestCase):
                       rows[0]["error_message"])
 
     def test_discovery_failure_without_results_file_skips_dataset(self):
-        _, bad_zip, _ = self._make_staging(
+        bad_staging, bad_zip, _ = self._make_staging(
             manifest_names=["ESID_005.zip", "GHOST_FILE.csv"],
         )
         upload_data, unmatched = tasks.create_upload_data(
-            [("005", str(bad_zip))],
+            [("005", str(bad_staging), [str(bad_zip)])],
             [make_collector("005")],
             project_config=self.config,
         )

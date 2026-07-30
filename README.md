@@ -17,12 +17,15 @@ Python code.
 
 ## Upload Resilience
 
-- **Verified-integrity uploads (four layers)** — no ZIP reaches Zenodo
-  unverified. (1) A pre-upload gate fails any dataset whose staging folder
-  lacks the `.prep_complete` sentinel, whose ZIP is unreadable, whose ZIP
-  contents disagree with the `file_list.csv` prep wrote (per-WAV name +
-  size), or whose ZIP SHA-512 doesn't match the recorded hash
-  (`--skip-integrity-hash` skips only the hash step). (2) Resume runs no
+- **Verified-integrity uploads (four layers)** — no archive reaches Zenodo
+  unverified, in either ZIP layout. (1) A pre-upload gate fails any dataset
+  whose staging folder lacks the `.prep_complete` sentinel, holds an
+  incoherent (mixed) ZIP layout, has an unreadable archive, has archive
+  contents that disagree with the `file_list.csv` prep wrote (per-WAV name +
+  size, scoped to the archive that OWNS each WAV), describes a recording day
+  whose archive is absent, or has an archive whose SHA-512 doesn't match the
+  recorded hash (`--skip-integrity-hash` skips only the hash step; one bad
+  archive withholds the digests of all of them). (2) Resume runs no
   longer skip already-committed files by name alone — each is verified
   against the local file by size and md5, and a mismatched remote copy
   (e.g. a short ZIP from an interrupted run) is deleted and re-uploaded
@@ -31,8 +34,20 @@ Python code.
   and the dataset fails. (4) `prepare_dataset.py` verifies the finished
   ZIP against a fresh cross-checked scan of the raw folder BEFORE the
   atomic move and sentinel, and refuses to build in place inside
-  `Staging_Area/`. Covered by `tests/test_upload_integrity.py` and
-  `tests/test_prepare_dataset_verification.py`.
+  `Staging_Area/`. Covered by `tests/test_upload_integrity.py` (the legacy
+  single-ZIP pin), `tests/test_upload_integrity_day_zips.py`,
+  `tests/test_upload_day_zip_discovery.py`,
+  `tests/test_per_day_prep_to_upload.py` (real prep output through the real
+  upload path) and `tests/test_prepare_dataset_verification.py`.
+- **Skip what Zenodo already holds (`--skip-existing-records`)** — an opt-in
+  pre-check that looks each ESID's intended record title up on Zenodo before any
+  local work and skips the folder if a record already exists there, as a draft
+  or as a published record. Counted as skipped rather than failed, and the
+  check runs before the integrity gate so a skipped folder costs one API search
+  instead of re-hashing every archive. It queries Zenodo rather than reading
+  `upload_state.json`, so a folder whose state file was lost is still
+  recognised. Fails closed: an undeterminable search fails the dataset rather
+  than uploading blindly. Covered by `tests/test_skip_existing_records.py`.
 - **Duplicate prevention (three layers)** — re-prepping a staging folder now
   preserves its `upload_state.json`/request-log link to the existing Zenodo
   draft; a lost state file is recovered from the request log automatically;
@@ -108,11 +123,21 @@ Python code.
   marker (`2024.1.0A` → `2024.1.0Aa`). A site whose day count would blow
   Zenodo's 100-files-per-record cap is refused before the first ZIP byte.
   `--single-zip` (also on `prep_all_datasets.py`) preserves the legacy
-  layout. Both audit tools understand both layouts. ⚠️ The upload pipeline
-  does not handle per-day folders yet — that is the next phase; do not feed
-  them to `standalone_tasks.py` until it lands. Covered by
+  layout. Both audit tools understand both layouts, and so does
+  `standalone_tasks.py`: a per-day folder uploads as ONE Zenodo record
+  holding every day archive, and the version marker now reaches the record
+  (the upload step reads the version from the staging folder's own
+  `total_eclipse_data.csv`, which is where prep applies the `A`). The
+  recovery tools — `file_by_file_upload.py`, `new_version_upload.py`,
+  `finish_zip_only_drafts.py`, `refresh_readme.py` — still speak the
+  single-archive vocabulary and refuse a per-day folder loudly; per-day
+  support for those is the next phase. Covered by
   `tests/test_prepare_dataset_day_zips.py`, `tests/test_azus_common_day_names.py`,
-  and `tests/test_audit_prep_completeness_day_zips.py`.
+  `tests/test_audit_prep_completeness_day_zips.py`,
+  `tests/test_upload_integrity_day_zips.py`,
+  `tests/test_upload_day_zip_discovery.py`,
+  `tests/test_per_day_prep_to_upload.py`, and
+  `tests/test_per_day_tool_refusals.py`.
 - **Interrupted-prep detection** — `prepare_dataset.py` moves into
   `Staging_Area/` via a two-phase atomic pattern and writes a `.prep_complete`
   sentinel file as its very last action. `prep_all_datasets.py`'s skip check

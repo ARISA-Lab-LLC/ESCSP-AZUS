@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from requests.exceptions import HTTPError, RequestException
@@ -1629,7 +1629,7 @@ def upload_to_zenodo(
     title_guard: bool = True,
     abort_event: Optional["threading.Event"] = None,
     known_md5s: Optional[Dict[str, str]] = None,
-    zip_filename: Optional[str] = None,
+    priority_files: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Upload files to Zenodo and optionally publish the record.
 
@@ -1657,14 +1657,14 @@ def upload_to_zenodo(
             until every file (including the deferred ZIP) is uploaded,
             because a community manager accepting the record publishes it —
             and published records cannot accept new files.
-        upload_attempts: Total number of PUT attempts for the data ZIP
-            (step 2 of the per-file upload).  Defaults to
+        upload_attempts: Total number of PUT attempts for each data
+            archive (step 2 of the per-file upload).  Defaults to
             ``_PUT_RETRY_ATTEMPTS`` (3); ``1`` means one shot.  The
             ``--upload-attempts`` CLI flag on ``standalone_tasks.py``
-            surfaces this to end users.  When ``zip_filename`` is given,
-            this setting applies ONLY to that file — every other
+            surfaces this to end users.  When ``priority_files`` is
+            given, this setting applies ONLY to those files — every other
             (small) file always gets the default ``_PUT_RETRY_ATTEMPTS``
-            attempts.  When ``zip_filename`` is None, it applies to all
+            attempts.  When ``priority_files`` is None, it applies to all
             files (the historical behavior, kept for direct callers).
         title_guard: When True (default) and no ``existing_draft_id`` was
             supplied, search the account's records for the intended title
@@ -1685,9 +1685,13 @@ def upload_to_zenodo(
             verification and for resume-time checks of already-committed
             files, sparing a second full read of large files.  Missing
             entries are hashed on demand.
-        zip_filename: Basename of the dataset's data ZIP within
-            ``files``.  Scopes ``upload_attempts`` to that one file (see
-            above).  None applies ``upload_attempts`` to every file.
+        priority_files: Basenames of the dataset's data archives within
+            ``files``.  Scopes ``upload_attempts`` to those files (see
+            above).  In the per-day layout every day archive is named, so
+            none silently falls back to the smaller default budget.  A
+            set, deliberately: a bare string is also a collection, and
+            ``in`` against it would become a substring test.  None
+            applies ``upload_attempts`` to every file.
 
     Returns:
         Dictionary with keys:
@@ -2067,13 +2071,13 @@ def upload_to_zenodo(
                 i, len(to_upload), file_name, file_size_mb,
             )
 
-            # --upload-attempts tunes ONLY the data ZIP (the multi-GB
-            # transfer where retry cost matters); companion files keep
-            # the default.  A None zip_filename (direct caller) keeps
-            # the historical apply-to-all behavior.
+            # --upload-attempts tunes ONLY the data archives (the
+            # multi-GB transfers where retry cost matters); companion
+            # files keep the default.  A None priority_files (direct
+            # caller) keeps the historical apply-to-all behavior.
             attempts_for_file = (
                 upload_attempts
-                if zip_filename is None or file_name == zip_filename
+                if priority_files is None or file_name in priority_files
                 else _PUT_RETRY_ATTEMPTS
             )
 

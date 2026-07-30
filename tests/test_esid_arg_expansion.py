@@ -222,8 +222,9 @@ class TestUploadOrderFollowsFilter(_TmpTestCase):
             folder.mkdir(exist_ok=True)
             (folder / f"ESID_{esid}.zip").write_bytes(b"zip")
 
-        def fake_create_upload_data(esid_file_pairs, **_kwargs):
-            return ([SimpleNamespace(esid=e) for e, _ in esid_file_pairs],
+        def fake_create_upload_data(esid_folder_archives, **_kwargs):
+            return ([SimpleNamespace(esid=e)
+                     for e, _folder, _archives in esid_folder_archives],
                     [])
 
         tracker = mock.MagicMock()

@@ -82,9 +82,11 @@ import azus_common
 from azus_common import calculate_sha512
 from prepare_dataset import (
     _FILE_LIST_HEADERS,
+    ZIP_MODE_SINGLE,
     create_readme_html,
     create_readme_md,
     extract_collector_data,
+    staging_zip_mode,
 )
 
 logger = logging.getLogger("azus.refresh_readme")
@@ -93,9 +95,21 @@ logger = logging.getLogger("azus.refresh_readme")
 # not contain this string was generated from an older template and needs
 # to be refreshed.  Kept verbatim (do not reflow) so the substring test
 # matches the rendered text exactly.
+#
+# UPDATE THIS whenever README_template.html's wording changes — that is the
+# mechanism by which existing records become "stale" and get refreshed, and
+# leaving it pointing at removed wording makes every README read as stale
+# while refresh_folder then refuses to write one (it re-checks the sentinel
+# in its own output).  This value tracks the July 2026 per-day rewording,
+# which replaced "all available audio files are included individually".
+#
+# It must also sit on a SINGLE line of README_template.html: the check runs
+# against README.md, whose converter joins wrapped lines, but the test suite
+# and refresh_folder both also look for it in the HTML, where a sentence
+# split across two template lines is not contiguous.
 _SENTINEL = (
-    "If a zip file upload was not possible due to upload or bandwidth "
-    "limitations, all available audio files are included individually."
+    "at the end of the version number indicates that the record has "
+    "multiple zip files."
 )
 
 # Canonical README.md manifest fields, matching the auto-generated row in
@@ -136,10 +150,11 @@ def scan_staging(
     """Classify every staging folder as stale, current, or anomalous.
 
     A folder is *stale* (selected for refresh) when its ``README.md``
-    exists, lacks the sentinel, AND the dataset ZIP is present to swap the
-    README inside.  Folders that are already current, or that cannot be
-    refreshed (no ``README.md``, no ZIP), are reported separately so
-    nothing is skipped silently.
+    exists, lacks the sentinel, AND the single dataset ZIP is present to
+    swap the README inside.  Folders that are already current, or that
+    cannot be refreshed (no ``README.md``, no ZIP, or a per-day layout
+    whose archives carry no README to swap), are reported separately with
+    their reason so nothing is skipped silently.
 
     Args:
         staging_root: The ``Staging_Area`` folder holding
@@ -159,6 +174,19 @@ def scan_staging(
             continue
         if readme_is_current(readme):
             skipped.append((esid, folder, "already current"))
+            continue
+        # This tool swaps README.md INSIDE the dataset archive, so it needs
+        # the single-archive layout.  Per-day archives carry no metadata at
+        # all, which makes their refresh a companion-only rewrite with no
+        # archive surgery — genuinely simpler, but a different routine, and
+        # a later phase.  Report the real reason rather than "no ZIP".
+        mode = staging_zip_mode(folder, esid)
+        if mode is not None and mode != ZIP_MODE_SINGLE:
+            skipped.append((
+                esid, folder,
+                f"stale README but a {mode} ZIP layout — per-day refresh "
+                "is not supported yet",
+            ))
             continue
         zip_path = folder / f"ESID_{esid}.zip"
         if not zip_path.is_file():

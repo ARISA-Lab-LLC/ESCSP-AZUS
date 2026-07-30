@@ -213,9 +213,14 @@ def _twin_is_or_inside(raw_folder: Path, twin: Path) -> bool:
 def _single_zip(folder: Path) -> Optional[Path]:
     """Return the folder's one data ZIP, or None when absent/ambiguous.
 
-    The staging layout holds exactly one ``ESID_*.zip`` per folder; a
-    missing or duplicated ZIP means the folder cannot be SHA-verified
-    and must be inspected by a human instead.
+    The legacy staging layout holds exactly one ``ESID_*.zip`` per
+    folder; a missing or duplicated ZIP means the folder cannot be
+    SHA-verified and must be inspected by a human instead.
+
+    A per-day folder holds N day archives and so also returns None here —
+    the fail-safe answer.  Comparing a per-day leftover against its twin
+    means comparing archive SETS, which is a later phase; until then such
+    a folder is escalated rather than deleted.
 
     Args:
         folder: A staging-layout folder (raw-side leftover or twin).

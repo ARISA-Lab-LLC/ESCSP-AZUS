@@ -13,6 +13,23 @@ your audit trail. Run everything from a consistent directory (recommended:
 create a `Reports/` folder and run from there) so the reports accumulate in
 one place.
 
+> **ZIP layout matters to this workflow.** Sites prepped since July 2026
+> hold one archive per recording day (`ESID_NNN_YYYY_MM_DD.zip`) instead of
+> a single `ESID_NNN.zip`. `standalone_tasks.py` and
+> `finish_stuck_uploads.py` handle both — a per-day folder uploads as one
+> record with every day archive attached, and Phase 4's restart commands
+> work unchanged.
+>
+> The *conversion* tools do **not** yet handle per-day folders and will
+> refuse one loudly rather than act on it: the file-by-file fallback
+> (`--enable-file-by-file`, Phase 4c), `finish_zip_only_drafts.py`, and
+> `new_version_upload.py`. That refusal is deliberate — file-by-file exists
+> to replace a single oversized archive that will not upload, and per-day
+> archives are roughly 1/N the size, so the problem it solves largely
+> disappears. If one day's archive will not go, re-run
+> `standalone_tasks.py` for that ESID; the uploader skips the days already
+> committed. Per-day support for the conversion tools is a later phase.
+
 ---
 
 ## Phase 0 — Sync (once per code update)
@@ -99,6 +116,21 @@ If a run dies, run 4b again. For stubborn ZIP failures, add
 loop instead of in-run backoff waits.
 
 ### 4c — when one ZIP will not go, no matter how many times you re-run
+
+> **Per-day sites do not use this path.** A folder holding
+> `ESID_NNN_YYYY_MM_DD.zip` archives is finished by Phase 4a/4b like any
+> other — `standalone_tasks.py` uploads its remaining day archives to the
+> same record, and the uploader skips the days already committed. The
+> file-by-file fallback replaces ONE whole-site archive with the WAVs it
+> held, so it cannot apply to a per-day folder and will refuse one; per-day
+> archives are each a fraction of the size, so the timeout this section
+> exists for should not arise. If one day's archive will not go, re-run
+> Phase 4a for that ESID.
+>
+> If a per-day folder's `upload_state.json` still carries
+> `"mode": "file_by_file"` from before the per-day migration, that marker
+> is **stale** and is now ignored — the folder is finished by the ordinary
+> archive path, and `--list-only` labels it. Nothing rewrites the file.
 
 A multi-GB ZIP that times out repeatedly can be replaced, on the **same**
 draft, by the individual WAVs from `Raw_Data/` plus `CONFIG.TXT` and the

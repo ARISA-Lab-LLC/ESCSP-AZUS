@@ -70,7 +70,8 @@ class TestGuard2ProcessInner(unittest.TestCase):
             data = UploadData(
                 esid="007",
                 data_collector=_make_collector("007"),
-                zip_file=str(folder / "ESID_007.zip"),
+                staging_folder=str(folder),
+                archives=[str(folder / "ESID_007.zip")],
             )
             stats = {"skipped": 0}
             tasks._process_one_dataset_inner(

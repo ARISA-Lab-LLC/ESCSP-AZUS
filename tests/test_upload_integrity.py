@@ -1,4 +1,9 @@
-"""Unit tests for the upload-path integrity verification.
+"""Unit tests for the upload-path integrity verification (LEGACY LAYOUT).
+
+LEGACY SINGLE-ZIP REGRESSION PIN.  Every assertion here describes the
+``--single-zip`` layout and must keep passing unchanged — that layout is
+permanent, because published records were produced with it.  Per-day
+coverage lives in tests/test_upload_integrity_day_zips.py.
 
 Covers the pre-upload gate ``verify_dataset_integrity`` in
 standalone_tasks.py and the remote-entry verification helpers
@@ -111,22 +116,26 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
     def _zip_of(self, staging: Path) -> str:
         return str(next(staging.glob("ESID_*.zip")))
 
+    def _verify(self, staging: Path, esid: str = "005", **kw):
+        """Run the gate on a staging FOLDER (its subject, then and now)."""
+        return tasks.verify_dataset_integrity(str(staging), esid, **kw)
+
     def test_clean_folder_passes(self):
         staging = make_staging_folder(self.root)
         self.assertEqual(
-            tasks.verify_dataset_integrity(self._zip_of(staging)), []
+            self._verify(staging), []
         )
 
     def test_missing_sentinel_fails(self):
         staging = make_staging_folder(self.root, sentinel=False)
-        problems = tasks.verify_dataset_integrity(self._zip_of(staging))
+        problems = self._verify(staging)
         self.assertTrue(any(".prep_complete" in p for p in problems))
 
     def test_corrupt_zip_fails(self):
         staging = make_staging_folder(self.root)
         zip_path = Path(self._zip_of(staging))
         zip_path.write_bytes(b"this is not a zip archive")
-        problems = tasks.verify_dataset_integrity(str(zip_path))
+        problems = self._verify(staging)
         self.assertTrue(any("not a readable archive" in p for p in problems))
 
     def test_wav_missing_from_zip_fails(self):
@@ -135,9 +144,7 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
         # Rebuild the ZIP without one of the WAVs the manifest lists.
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("ESID_005/20240408_120000.WAV", b"\x01" * 4000)
-        problems = tasks.verify_dataset_integrity(
-            str(zip_path), verify_zip_hash=False
-        )
+        problems = self._verify(staging, verify_zip_hash=False)
         self.assertTrue(any("MISSING from the ZIP" in p for p in problems))
 
     def test_extra_wav_in_zip_fails(self):
@@ -145,9 +152,7 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
         zip_path = Path(self._zip_of(staging))
         with zipfile.ZipFile(zip_path, "a") as zf:
             zf.writestr("ESID_005/20240408_999999.WAV", b"\x03" * 100)
-        problems = tasks.verify_dataset_integrity(
-            str(zip_path), verify_zip_hash=False
-        )
+        problems = self._verify(staging, verify_zip_hash=False)
         self.assertTrue(any("not listed in" in p for p in problems))
 
     def test_size_drift_fails(self):
@@ -157,9 +162,7 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("ESID_005/20240408_120000.WAV", b"\x01" * 4000)
             zf.writestr("ESID_005/20240408_121000.WAV", b"\x02" * 100)
-        problems = tasks.verify_dataset_integrity(
-            str(zip_path), verify_zip_hash=False
-        )
+        problems = self._verify(staging, verify_zip_hash=False)
         self.assertTrue(any("differ in size" in p for p in problems))
 
     def test_hash_mismatch_fails_and_skip_flag_bypasses_only_hash(self):
@@ -175,18 +178,18 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
-        problems = tasks.verify_dataset_integrity(zip_path)
+        problems = self._verify(staging)
         self.assertTrue(any("SHA-512 does not match" in p for p in problems))
         # Structural checks still pass, so skipping the hash passes overall.
         self.assertEqual(
-            tasks.verify_dataset_integrity(zip_path, verify_zip_hash=False),
+            self._verify(staging, verify_zip_hash=False),
             [],
         )
 
     def test_missing_file_list_fails(self):
         staging = make_staging_folder(self.root)
         (staging / "file_list.csv").unlink()
-        problems = tasks.verify_dataset_integrity(self._zip_of(staging))
+        problems = self._verify(staging)
         self.assertTrue(any("No file_list.csv" in p for p in problems))
 
     def test_file_list_without_zip_row_fails(self):
@@ -196,9 +199,7 @@ class TestVerifyDatasetIntegrity(unittest.TestCase):
             ("20240408_121000.WAV", f"{6000 / 1024:.2f}", "6000", "h"),
         ]
         _write_file_list(staging, wav_rows)
-        problems = tasks.verify_dataset_integrity(
-            self._zip_of(staging), verify_zip_hash=False
-        )
+        problems = self._verify(staging, verify_zip_hash=False)
         self.assertTrue(any("no row for" in p for p in problems))
 
 
@@ -215,6 +216,10 @@ class TestByteExactSizesAndDigests(unittest.TestCase):
     def _zip_of(self, staging: Path) -> str:
         return str(next(staging.glob("ESID_*.zip")))
 
+    def _verify(self, staging: Path, esid: str = "005", **kw):
+        """Run the gate on a staging FOLDER (its subject, then and now)."""
+        return tasks.verify_dataset_integrity(str(staging), esid, **kw)
+
     def test_sub_kb_drift_caught_without_hash_step(self):
         """A 1-byte truncation rounds to the same 2-decimal KB, so the
         legacy KB comparison misses it; the byte-exact column must catch
@@ -225,17 +230,13 @@ class TestByteExactSizesAndDigests(unittest.TestCase):
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("ESID_005/20240408_120000.WAV", b"\x01" * 3999)
             zf.writestr("ESID_005/20240408_121000.WAV", b"\x02" * 6000)
-        problems = tasks.verify_dataset_integrity(
-            str(zip_path), verify_zip_hash=False
-        )
+        problems = self._verify(staging, verify_zip_hash=False)
         self.assertTrue(any("differ in size" in p for p in problems))
 
     def test_legacy_manifest_falls_back_to_kb_and_passes_clean(self):
         staging = make_staging_folder(self.root, bytes_column=False)
         self.assertEqual(
-            tasks.verify_dataset_integrity(
-                self._zip_of(staging), verify_zip_hash=False
-            ),
+            self._verify(staging, verify_zip_hash=False),
             [],
         )
 
@@ -244,20 +245,21 @@ class TestByteExactSizesAndDigests(unittest.TestCase):
         zip_path = self._zip_of(staging)
         digests = {}
         self.assertEqual(
-            tasks.verify_dataset_integrity(zip_path, digests_out=digests), []
+            self._verify(staging, digests_out=digests), []
         )
-        self.assertEqual(digests["sha512"], _sha512(Path(zip_path)))
+        # Keyed by archive basename — one entry per archive, so the
+        # per-day layout can report each day's digests independently.
+        entry = digests[Path(zip_path).name]
+        self.assertEqual(entry["sha512"], _sha512(Path(zip_path)))
         self.assertEqual(
-            digests["md5"], hashlib.md5(Path(zip_path).read_bytes()).hexdigest()
+            entry["md5"], hashlib.md5(Path(zip_path).read_bytes()).hexdigest()
         )
 
     def test_digests_out_empty_when_hash_skipped_or_mismatched(self):
         staging = make_staging_folder(self.root)
         zip_path = self._zip_of(staging)
         skipped = {}
-        tasks.verify_dataset_integrity(
-            zip_path, verify_zip_hash=False, digests_out=skipped
-        )
+        self._verify(staging, verify_zip_hash=False, digests_out=skipped)
         self.assertEqual(skipped, {})
         # Tamper the recorded hash: the gate must not hand back digests
         # for an archive that failed verification.
@@ -270,9 +272,7 @@ class TestByteExactSizesAndDigests(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
         mismatched = {}
-        problems = tasks.verify_dataset_integrity(
-            zip_path, digests_out=mismatched
-        )
+        problems = self._verify(staging, digests_out=mismatched)
         self.assertTrue(any("SHA-512 does not match" in p for p in problems))
         self.assertEqual(mismatched, {})
 

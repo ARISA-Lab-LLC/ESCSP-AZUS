@@ -1,5 +1,281 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — finish_stuck_uploads.py and the per-day layout
+
+Most of this tool was already layout-agnostic and needed nothing:
+`discover_stuck_esids` keys purely on `upload_state.json` + `parse_esid`, and
+`run_recovery` shells out to `standalone_tasks.py --esid …`, which the per-day
+migration had already taught both layouts. There is not one `ESID_NNN.zip` literal
+or `glob("ESID_*.zip")` in the file. Phase A therefore required no functional
+change at all.
+
+**What did need fixing was a dead end.** A per-day folder carrying
+`mode == file_by_file` in its `upload_state.json` could be finished by NO path: the
+ZIP pipeline skipped it (Requirement 9) and the file-by-file fallback refused it
+(the fallback replaces one whole-site archive and cannot apply to N day archives).
+The tool then compounded it by advising a re-run with `--enable-file-by-file` —
+precisely the path that refuses. Reachable for any ESID switched to file-by-file
+before the migration and then re-prepped, which is the population in
+`Records/20260729_135442_convertible_file_by_file.csv`.
+
+**The fix reinterprets the marker rather than rewriting it.** New
+`azus_common.file_by_file_mode_blocks_zip_path` holds the whole rule in one place:
+the marker suppresses the ZIP path only when the layout is NOT per-day. For a
+per-day folder there is no second tool contending for the record — file-by-file
+refuses it — so the marker is stale and the ZIP path owns the folder.
+`upload_state.json` is left byte-identical, which matters because it is the
+anti-duplicate link between a folder and its draft and this guide's rule against
+hand-editing it stays absolute. Confirmed with the user that no upload was ever
+performed file-by-file, so no draft holds individually-uploaded WAVs and no
+"is anything already committed?" check was needed.
+
+The rule is applied at the Requirement-9 guards in `standalone_tasks.py`
+(discovery and the per-ESID worker) as well as in this tool's Phase A/B
+classification, so all three agree. Requirement 9 is unchanged for the layout it
+was written for: a `single` or *indeterminate* layout still keeps the marker in
+force — only a positively-identified per-day folder flips the decision.
+
+**A thinness found by the new tests, then fixed in the code.** Phase B2 and the
+`--force` loop relied on `only_zip_missing` returning False for per-day folders.
+That works, but only as a side effect of a guard inside a helper whose name
+promises something else — and per-day folders genuinely reach that evaluation now
+that a stale marker no longer diverts them. Both branches now check the layout
+*first*, via `_fallback_applies_to_layout`. Besides making the intent local, this
+skips a live `list_draft_files` call that was pure waste for a folder the fallback
+can never handle: in the mixed-staging demo, `only_zip_missing` went from being
+called for every ESID to zero.
+
+**Messages.** `only_zip_missing` returns a bare False for two unrelated causes, and
+the tool always blamed the wrong one — "a companion also failed, or the ZIP is
+already complete" — which since the migration directly contradicted the accurate
+ERROR `refuses_per_day_layout` had just logged. `_not_switchable_reason` now names
+the actual cause. A folder that was never a switch candidate no longer gets a "not
+switching" line at all; it gets "still unfinished after Phase A … re-run to retry".
+`--list-only` gained a layout column and labels a stale marker explicitly.
+
+**A note that will save someone.** `--skip-existing-records` must NEVER be added to
+`run_recovery`'s forwarded flag set: every ESID this tool handles has an
+`upload_state.json` pointing at an existing draft — that is the definition of stuck
+here — so forwarding it would skip all of them and turn the tool into a silent
+no-op. The comment sits on the command builder, where the next person adding a
+passthrough will be looking.
+
+No existing test was edited. `tests/test_finish_stuck_file_by_file.py` is
+byte-identical (all 22 pins), and `tests/test_req9_skip.py`'s two Requirement-9
+assertions are untouched — verified safe because its fixture writes a legacy
+`ESID_007.zip`, so its layout is `single` and the gate still skips it.
+
+### README template reworded for per-day, and the staleness sentinel with it
+
+`Resources/README_template.html` now tells readers the truth about the layout:
+"included in a single zip file … if a single zip file upload was not possible …
+audio files are included in multiple zip files based on the day of the
+observation", plus a new paragraph explaining that a trailing **A** on the version
+means the record carries per-day archives named `ESID_NNN_YYYY_MM_DD.zip`.
+
+That rewording removed the exact sentence `refresh_readme._SENTINEL` matched, which
+broke 14 tests in a way worth understanding: with the sentinel pointing at deleted
+wording, EVERY README reads as stale, and `refresh_folder` then refuses to write one
+because it re-checks the sentinel in its own freshly generated output. The sentinel
+is updated to the new A-version sentence.
+
+Two constraints on that constant, now recorded next to it. It must be **contiguous
+on a single line** of the template: the check runs against README.md, whose
+converter joins wrapped lines, but the HTML is also checked, and the reworded zip
+sentence is split across two template lines — so the obvious choice from the new
+wording does not work. And it must be updated whenever the template's wording
+changes, because that is precisely the mechanism by which existing records become
+stale and get refreshed.
+
+**Operational consequence:** every README generated from the old template is now
+correctly stale, so `refresh_readme.py` will want to rewrite them. It can do that
+for single-archive folders. Per-day folders it refuses (per-day support for that
+tool is a later phase), so those sites keep their old README until it lands — and
+note the refresh is genuinely cheaper there when it does, since per-day archives
+carry no README to swap.
+
+Suite: 19 tests added (973 total), docstring audit 0 gaps.
+
+## July 2026 — `--skip-existing-records`: skip ESIDs Zenodo already holds
+
+Re-running a batch over a raw-data folder where some sites are already uploaded
+meant either hand-maintaining an `--esid` list or letting each finished site walk
+through the integrity gate — which re-hashes every archive — only to be resumed or
+refused downstream. The new opt-in flag asks Zenodo, by the dataset's intended record
+title, whether a record already exists, and skips the folder if one does.
+
+**Placement is the substance of this change.** The check sits in
+`_process_one_dataset_inner` immediately after the Requirement-9 file-by-file guard and
+**before** the integrity gate, copying that guard's clean-skip shape: increment
+`stats["skipped"]`, return, leave the folder untouched. Ahead of the gate a skipped
+folder costs one API search instead of a multi-GB read, which is where the time
+actually goes on a large site.
+
+**It asks Zenodo rather than reading `upload_state.json`.** That is the deliberate
+choice: a folder whose state file was lost or hand-deleted is exactly the folder that
+would otherwise create a duplicate record, and a local-only check would miss it.
+
+**Both drafts and published records count as existing**, and both are counted as
+*skipped* rather than failed. A published record means the site is finished, so a
+failure row would be wrong — `failed_results.csv` stays a list of things that need
+attention. (Without the flag, a same-title published record still raises
+`DuplicateTitleError` as before; the flag changes nothing when it is off.)
+
+**It fails closed.** If the search cannot be completed — network, auth, or an
+unrecognized response body, which `_search_drafts_by_title` already refuses to read as
+"no matches" — the dataset is FAILED with an `ExistingRecordCheckFailed` row rather
+than falling through to an upload. The flag exists in order not to touch what already
+exists, so an undeterminable answer must not silently become an upload. This matches
+the stance the integrity gate already takes on its own crash.
+
+**The one real risk was title drift, and it is closed structurally.** The pre-check
+searches by title, so if it rendered the title even slightly differently from the
+record itself the search would match nothing and the flag would silently never fire —
+a failure with no symptom. `get_draft_config`'s inline title construction is therefore
+extracted into `build_record_title`, and both callers use it. The subtlety worth
+naming: the ESID renders in *display* form, so ESID `122_Part_1_of_2` titles as
+`ESID#122 Part 1 of 2`; a re-implementation would very plausibly have used the raw
+ESID and matched nothing. `tests/test_skip_existing_records.py` pins the two renderings
+against each other rather than against a literal.
+
+Two notes for operators. The uploader's duplicate guard searches **again** immediately
+before creating a draft; that second search is deliberate — it closes the window
+between the pre-check and draft creation — so a run with this flag performs two
+searches for any ESID it does not skip. And the flag is orthogonal to
+`--skip-title-guard`: this one decides whether to skip a whole dataset, that one
+decides whether the uploader refuses to create a duplicate.
+
+Suite: 13 tests added (954 total), docstring audit 0 gaps.
+
+## July 2026 — the upload pipeline learns the per-day layout
+
+Prep has produced one archive per recording day since earlier this month, but the
+upload side still modelled "a dataset" as "a ZIP file", and
+`Guides/STANDALONE_README.md` carried a blocking warning telling operators not to
+feed per-day folders to `standalone_tasks.py`. Retiring that warning is this
+change. A prepared FOLDER is now the unit of work: one folder is one dataset is
+one Zenodo record, holding one legacy archive or N day archives.
+
+The warning was doing less than assumed. On a per-day folder the old pipeline did
+not refuse cleanly — it misbehaved in three ways at once, all from a single root
+cause, and the integrity gate that appeared to be holding the line had a hole in it.
+
+**1. Discovery emitted one work item per ARCHIVE, not per folder (blocker).**
+`get_upload_data` globbed `ESID_*.zip` and appended each hit to the work list, so an
+N-day site became N datasets sharing one ESID, one title, one staging folder and one
+`upload_state.json` — N draft-creation attempts against one record, with only the
+title guard (disableable) standing between that and duplicates. Discovery now
+iterates folders and resolves each folder's archives once.
+
+**2. The other N−1 archives leaked in as low-retry companions (blocker).**
+`create_upload_data` excluded only the *current* ZIP name from `additional_files`.
+Because prep's upload manifest is a directory scan it lists every archive, so the
+rest arrived as "companions" — and companions deliberately keep the default 3-attempt
+budget rather than `--upload-attempts`, which is exactly backwards for a multi-GB
+archive. Every archive name is now excluded, and `upload_to_zenodo`'s
+`zip_filename: Optional[str]` became `priority_files: Optional[Set[str]]` so all of
+them get the configured budget. A `Set`, not a `Collection`: a bare `str` is also a
+collection, and `in` against one silently becomes a substring test.
+
+**3. Success on the first archive moved the staging folder (blocker).**
+`archive_staging_to_uploaded` runs inside `if result["successful"]`, which was
+correct — but with N work items per folder the first one to finish moved the folder
+into `Uploaded_Data/`, stranding items #2..N on paths that no longer existed.
+Needed no change of its own: collapsing the fan-out fixed it, which is the clearest
+evidence the folder was always the real subject.
+
+**4. The integrity gate passed a single-day per-day folder (HIGH).** The gate built
+`zip_wav_sizes` from ONE archive and compared it against EVERY `.wav` row in the
+folder's `file_list.csv`. That union comparison refused folders with ≥2 day archives
+— the behaviour mistaken for a clean refusal — but a folder with exactly ONE day
+present satisfied it and uploaded, with the wrong version string. That is precisely
+what an interrupted per-day prep leaves behind. The gate is now scoped per archive:
+each archive's expected WAVs are the `file_list.csv` rows whose `wav_day_key` maps
+back to it via `day_zip_name`, and both directions are checked — a WAV missing from
+ITS archive, and a day the manifest describes whose archive is absent. Ownership is
+re-derived, never read from the `Notes` column, which records the same mapping in
+prose for humans. A cross-day misfile (day 8's WAV inside day 9's archive) is now
+reported twice, once from each side; the old union comparison could not see it at all.
+
+**5. The version-`A` marker never reached the record (MEDIUM).** `prepare_dataset.py`
+applied the marker to the staged `total_eclipse_data.csv`, while `get_draft_config`
+sourced `version` from the MASTER collectors spreadsheet, which prep never writes
+back to — so a per-day record carried `2024.1.0A` in its own CSV and `2024.1.0` in
+its Zenodo version field. The upload step now reads the version from the staging
+folder's own CSV, so prep stays the single authority for the marker and upload merely
+consumes it. This also fixes `new_version_upload.bump_version_label`, which was
+already marker-aware but was being fed unmarked input. Note that
+`prepare_dataset.py`'s own comment already *claimed* this behaviour; the claim is now
+true rather than aspirational.
+
+**Also in this change.** A single layout seam, `resolve_dataset_archives`, replaces
+the `glob("ESID_*.zip")` discovery and the five places that recovered the staging
+folder by `.parent` from an archive path; it routes on the prep contract's
+`staging_zip_mode` (imported from the producer, as `audit_prep_completeness.py` does)
+and refuses a mixed layout before opening anything, so a mixed 43 GB folder never
+costs a full read. `UploadData.zip_file: str` became `staging_folder: str` +
+`archives: List[str]` with no scalar alias — a privileged "first" archive is the
+single-ZIP assumption in disguise. `--defer-zip` defers the whole archive set, since
+a record must not enter community review holding a fraction of its days.
+`get_recording_dates` spans every archive, so the record's date interval covers the
+campaign rather than one day, and it now calls `wav_day_key` instead of
+re-implementing the parse — keeping its `try/except`, because `wav_day_key` does no
+calendar validation by design and `strptime` is what rejects an impossible date. The
+100-file cap is re-checked against the ACTUAL file set before any network work
+(prep can only budget for planned companions; the manifest is a directory scan).
+`save_result`'s `zip_file` parameter was dead — never read, no such field on
+`PersistedResult` — and is deleted rather than reshaped.
+
+**Guards, not support, for the recovery tools.** Per-day support for the conversion
+tools is a later phase; until then each refuses loudly. The important one is
+`file_by_file_upload.py`, which failed **open**: `required_files` classifies a day
+archive as a *companion*, so once every archive was committed the companion test in
+`only_zip_missing_from_entries` passed vacuously and it returned
+`ESID_NNN.zip not in committed` — True for a name a per-day record never had. A
+complete, healthy record read as "only the ZIP is missing" and would have authorised
+the one-way switch its own docstring warns about; had it fired, it would have
+uploaded the day archives as companions *plus* every raw WAV, double-carrying the
+audio and blowing the file cap. Guarded at `only_zip_missing` (the choke point both
+`finish_stuck_uploads.py` call sites go through) and at `run_file_by_file`.
+`new_version_upload.py` needed a real layout check, not its existing count check:
+a single-day per-day folder holds exactly one archive and sailed through
+`len(zips) != 1`. `finish_zip_only_drafts.py` gained an `UNSUPPORTED_ZIP_LAYOUT`
+verdict — the suite's "every verdict has a recommended action" invariant caught the
+missing entry. `refresh_readme.py` already skipped per-day folders; it reported "no
+ZIP", which is untrue and sends an operator hunting, so it now names the layout.
+`finish_stuck_uploads.py` needed nothing: its ZIP path shells out to
+`standalone_tasks.py` and inherits this work.
+
+**On the test suite.** No assertion was weakened. All 21 tests in
+`tests/test_upload_integrity.py` keep their predicates verbatim and the file is
+relabelled as the permanent `--single-zip` regression pin — only the call shape
+changed (the gate takes a folder) and `digests_out` is addressed by archive
+basename. Elsewhere the edits are call-shape adaptations to renames and reshapes:
+`zip_filename` → `priority_files`, scalar `zip_file` → `archives`, pair → triple in
+`create_upload_data`, `get_recording_dates` taking a list. The one that mattered to
+get right was `tests/test_req9_skip.py`, which asserts the file-by-file guard runs
+BEFORE the integrity gate via `gate.assert_not_called()` — keeping the gate's NAME
+means that pin still bites; had the function been renamed the assertion would have
+passed vacuously against an unused name.
+
+`tests/test_per_day_prep_to_upload.py` is the one worth knowing about: it runs the
+REAL prep CLI in a hermetic tree and drives its genuine output through the real
+discovery, integrity and upload wiring with only the HTTP boundary mocked. Every
+other per-day test builds its staging folder by hand and so shares one blind spot —
+if prep's output drifts from what those fixtures imitate they keep passing while
+production breaks. It asserts one record receives every day archive, archives last
+in day order, no archive among the companions, the version reading `2024.1.0A`, the
+folder moved exactly once, and the legacy `--single-zip` path still working through
+the same wiring.
+
+Two footguns were found by the tests and closed in the code rather than worked
+around: `get_recording_dates([...])` given a bare string iterated it character by
+character and failed with `missing ZIP file: v`, and `verify_dataset_integrity`
+given an archive path would have reported a confusing "no sentinel". Both now raise
+a message naming the mistake.
+
+Suite: 56 tests added (941 total), docstring audit 0 gaps.
+
 ## July 2026 — five defects in the per-day prep, found by an adversarial audit
 
 A five-lens adversarial review of the just-committed per-day workflow (each

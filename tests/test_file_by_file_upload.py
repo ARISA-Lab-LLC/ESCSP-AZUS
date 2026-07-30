@@ -255,8 +255,9 @@ class TestHappyPath(_FixtureCase):
         # publish OFF on the upload call (this module owns the gate).
         self.assertFalse(api["upload_to_zenodo"].call_args.kwargs["auto_publish"])
         self.assertFalse(api["upload_to_zenodo"].call_args.kwargs["submit_review"])
-        # upload_attempts applies to EVERY file: no ZIP on this path.
-        self.assertIsNone(api["upload_to_zenodo"].call_args.kwargs["zip_filename"])
+        # upload_attempts applies to EVERY file: no archive on this path.
+        self.assertIsNone(
+            api["upload_to_zenodo"].call_args.kwargs["priority_files"])
 
         # THE CONTRACT: nothing left draft state, and the folder stayed put
         # so the recovery tools can still see it.
@@ -279,7 +280,7 @@ class TestHappyPath(_FixtureCase):
         self.assertTrue(self._run(upload_attempts=2))
         kwargs = api["upload_to_zenodo"].call_args.kwargs
         self.assertEqual(kwargs["upload_attempts"], 2)
-        self.assertIsNone(kwargs["zip_filename"])
+        self.assertIsNone(kwargs["priority_files"])
 
         # file_list.csv rewritten without the ZIP row; mode marked.
         rows = list(csv.DictReader(

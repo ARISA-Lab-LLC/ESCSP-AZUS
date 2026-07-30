@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import tempfile
+import pathlib
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -230,9 +231,13 @@ class _Case(unittest.TestCase):
         if draft_files is _UNSET:
             draft_files = self.committed_package()
 
-        def fake_integrity(zip_file, verify_zip_hash=True, digests_out=None):
+        def fake_integrity(staging_folder, esid, archives=None,
+                           verify_zip_hash=True, digests_out=None):
             if digests_out is not None and verify_zip_hash:
-                digests_out.update({"md5": "deadbeef", "sha512": "cafe"})
+                for archive in archives or []:
+                    digests_out[pathlib.Path(archive).name] = {
+                        "md5": "deadbeef", "sha512": "cafe",
+                    }
             return list(integrity)
 
         # The fresh path calls list_draft_files twice — emptiness check,

@@ -213,7 +213,8 @@ class TestTeeThroughProcessOneDataset(_TeeTestCase):
         data = UploadData(
             esid=esid,
             data_collector=collector,
-            zip_file=str(Path(self._tmp.name) / f"ESID_{esid}.zip"),
+            staging_folder=str(Path(self._tmp.name)),
+            archives=[str(Path(self._tmp.name) / f"ESID_{esid}.zip")],
         )
 
         def fake_upload(**_kwargs):

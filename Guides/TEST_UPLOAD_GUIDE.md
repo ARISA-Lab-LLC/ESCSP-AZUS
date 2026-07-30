@@ -149,12 +149,22 @@ cp /path/to/your/wav/files/*.WAV ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
 ```
 
 **Option B — Create dummy WAV files (testing only, requires ffmpeg):**
+
+Span **two days** so the walkthrough exercises the default per-day layout
+and actually produces more than one archive — a single-day site would
+produce one archive and hide most of what there is to check.
+
 ```bash
 cd ~/AZUS_Test_Workspace/Raw_Data/ESID_999/
 ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_120000.WAV
 ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_120500.WAV
-ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240408_121000.WAV
+ffmpeg -f lavfi -i "sine=frequency=440:duration=5" -ac 1 -ar 16000 20240409_090000.WAV
 ```
+
+Expect `ESID_999_2024_04_08.zip` and `ESID_999_2024_04_09.zip` in the
+staging folder, both attached to a single Zenodo record.  Add
+`--single-zip` to the prep command instead if you are specifically testing
+the legacy one-archive layout, which produces `ESID_999.zip`.
 
 ### Step 2.3: CONFIG.TXT
 

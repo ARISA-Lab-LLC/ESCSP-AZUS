@@ -78,10 +78,12 @@ class TestSkipDateCheckFallback(unittest.TestCase):
 
     def _upload(self, wav_names, skip_date_check, collector=None):
         collector = collector or make_collector()
+        staged = self._staged_zip(collector.esid, wav_names)
         data = UploadData(
             esid=collector.esid,
             data_collector=collector,
-            zip_file=self._staged_zip(collector.esid, wav_names),
+            staging_folder=str(Path(staged).parent),
+            archives=[staged],
         )
         with mock.patch.object(tasks, "upload_to_zenodo") as up, \
              mock.patch.object(tasks, "get_draft_config") as cfg, \

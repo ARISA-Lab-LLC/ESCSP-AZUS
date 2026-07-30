@@ -78,10 +78,12 @@ class TestDraftOnlyThreading(unittest.TestCase):
         """Run upload_dataset with mocked network + return the kwargs it
         passed to upload_to_zenodo."""
         collector = make_collector()
+        staged = self._staged_zip(collector.esid)
         data = UploadData(
             esid=collector.esid,
             data_collector=collector,
-            zip_file=self._staged_zip(collector.esid),
+            staging_folder=str(Path(staged).parent),
+            archives=[staged],
         )
         with mock.patch.object(tasks, "upload_to_zenodo") as up, \
              mock.patch.object(tasks, "get_draft_config") as cfg, \

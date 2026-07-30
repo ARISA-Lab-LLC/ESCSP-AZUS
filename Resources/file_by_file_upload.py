@@ -59,7 +59,11 @@ for _p in (str(_PROJECT_ROOT), str(_RESOURCES_DIR)):
 
 import azus_common  # noqa: E402
 import hash_raw_wavs  # noqa: E402
-from prepare_dataset import _FILE_LIST_HEADERS  # noqa: E402
+from prepare_dataset import (  # noqa: E402
+    _FILE_LIST_HEADERS,
+    ZIP_MODE_SINGLE,
+    staging_zip_mode,
+)
 from models.audiomoth import DraftConfig  # noqa: E402
 from requests.exceptions import HTTPError, RequestException  # noqa: E402
 
@@ -241,6 +245,48 @@ def only_zip_missing_from_entries(
     return zip_name not in committed
 
 
+def refuses_per_day_layout(staging_dir: Path, esid: str) -> bool:
+    """Report whether this folder's layout is unsupported here (and log why).
+
+    This tool replaces a single ``ESID_NNN.zip`` with the individual WAVs
+    it would have contained, and its whole vocabulary — ``_zip_name``,
+    :func:`required_files`, :func:`rewrite_file_list_without_zip` — assumes
+    that one archive.  A per-day folder breaks it in a way that FAILS OPEN,
+    which is why this guard exists rather than a best-effort adaptation:
+
+    :func:`required_files` classifies a day archive as a *companion* (it is
+    neither ``ESID_NNN.zip`` nor a raw WAV name).  So once every day
+    archive is committed, :func:`only_zip_missing_from_entries` finds all
+    companions present and returns ``ESID_NNN.zip not in committed`` —
+    which is True for a name a per-day record never had.  A healthy,
+    complete record would read as "only the ZIP is missing" and authorise
+    the one-way door that docstring warns about.
+
+    Per-day support for this tool is a later phase; until then a per-day
+    folder is refused loudly.
+
+    Args:
+        staging_dir: The ESID's staging folder.
+        esid: Canonical ESID string.
+
+    Returns:
+        True when the folder must NOT be processed by this tool.
+    """
+    mode = staging_zip_mode(staging_dir, esid)
+    if mode in (None, ZIP_MODE_SINGLE):
+        return False
+    logger.error(
+        "ESID %s: %s holds a %s ZIP layout, which the file-by-file "
+        "fallback does not support — refusing rather than risking a "
+        "one-way switch on a healthy record. Per-day archives are already "
+        "small enough that the ZIP-timeout problem this fallback exists "
+        "for should not arise; if a single day will not upload, re-run "
+        "standalone_tasks.py for this ESID.",
+        esid, staging_dir.name, mode,
+    )
+    return True
+
+
 def only_zip_missing(
     credentials: Credentials, record_id: str, staging_dir: Path, esid: str
 ) -> bool:
@@ -267,6 +313,8 @@ def only_zip_missing(
         True when only the ZIP is absent from an otherwise-complete set of
         committed companions.
     """
+    if refuses_per_day_layout(staging_dir, esid):
+        return False
     _raw, companion_names = required_files(staging_dir, esid)
     entries = list_draft_files(credentials, record_id)
     return only_zip_missing_from_entries(
@@ -510,6 +558,12 @@ def run_file_by_file(
         failure (nothing is published past an incomplete or unverified set).
     """
     tag = f"[ESID {esid}]"
+
+    # Second guard: only_zip_missing already refuses a per-day folder, but
+    # --force and finish_zip_only_drafts.py can reach this function without
+    # consulting it, and everything below assumes a single ESID_NNN.zip.
+    if refuses_per_day_layout(staging_dir, esid):
+        return False
     zip_name = _zip_name(esid)
     try:
         # 1. Derive the authoritative required set.
@@ -716,10 +770,11 @@ def run_file_by_file(
             title_guard=False,
             auto_publish=False,
             submit_review=False,
-            # zip_filename=None makes upload_attempts apply to EVERY file
-            # rather than just a ZIP — there is no ZIP on this path.
+            # priority_files=None makes upload_attempts apply to EVERY
+            # file rather than just archives — there is no archive on this
+            # path.
             upload_attempts=upload_attempts,
-            zip_filename=None,
+            priority_files=None,
             # md5s harvested from the same size+mtime-validated cache rows as
             # the SHA-512s.  Without this, a restart re-hashes every
             # already-committed WAV to verify it, re-reading the whole

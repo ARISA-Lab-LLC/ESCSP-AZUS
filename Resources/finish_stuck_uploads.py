@@ -4,13 +4,15 @@
 WHAT THIS TOOL DOES
 ===================
 After a batch upload, you may have some ESIDs that started uploading
-but did not finish — typically because the large ZIP exhausted all
-three retry attempts on a flaky connection.  For those ESIDs:
+but did not finish — typically because a large data archive exhausted
+all three retry attempts on a flaky connection.  For those ESIDs:
 
   * The Zenodo draft DOES exist (record_id was assigned).
   * The small files (README, CSVs, data dicts, etc.) were committed
-    before the ZIP attempt.
-  * Only the ZIP (and possibly a couple of late files) are missing.
+    before the archive attempt.
+  * Only the data archive(s) — one legacy ``ESID_NNN.zip``, or some of the
+    per-day ``ESID_NNN_YYYY_MM_DD.zip`` set — and possibly a couple of
+    late files are missing.
   * The ESID folder is still sitting in Staging_Area/ — it was NOT
     renamed to Uploaded_Data/ because the upload never completed.
 
@@ -318,7 +320,7 @@ def run_recovery(
         stuck_esids: Padded ESID strings, e.g. ["007", "012", "073"].
         config_path: Passed through unchanged.
         workers: How many to upload concurrently (1 = sequential).
-        upload_attempts: Total PUT attempts for the data ZIP
+        upload_attempts: Total PUT attempts for each data archive
             (companion files keep the default), forwarded as
             ``--upload-attempts N`` to standalone_tasks.py.  Default 3
             matches standalone_tasks.py's default (historical behavior).
@@ -336,6 +338,11 @@ def run_recovery(
         The exit code of standalone_tasks.py.  0 if all finished
         successfully, 1 if at least one still failed.
     """
+    # The forwarded flag set is deliberate.  NOTE for anyone extending it:
+    # --skip-existing-records must NEVER be added.  Every ESID this tool
+    # handles has an upload_state.json pointing at an existing Zenodo draft
+    # — that is the definition of "stuck" here — so forwarding it would skip
+    # all of them and turn this tool into a silent no-op.
     cmd = [
         sys.executable,
         str(_PROJECT_ROOT / "standalone_tasks.py"),
@@ -403,25 +410,104 @@ def _load_publish_config(config_path: str) -> Tuple[Optional[str], bool, bool]:
     return community_id, reserve_doi, auto_publish
 
 
+def _fallback_applies_to_layout(folder: Path, esid: str) -> bool:
+    """Report whether the file-by-file fallback can apply to this layout.
+
+    Checked BEFORE :func:`file_by_file_upload.only_zip_missing`, for two
+    reasons.  First, ``only_zip_missing`` performs a live
+    ``list_draft_files`` call, which is wasted work for a folder the
+    fallback can never handle.  Second, and more importantly, it makes the
+    intent local: relying on ``only_zip_missing`` to return False *because*
+    of the layout couples this decision to a helper whose name promises
+    something else entirely, and a per-day folder does reach the switch
+    evaluation now that a stale marker no longer diverts it.
+
+    Args:
+        folder: The ESID's staging folder.
+        esid: Canonical padded ESID string.
+
+    Returns:
+        True for the legacy single-archive layout (and for an
+        indeterminate one, leaving the existing gates to report it), False
+        for a per-day or mixed folder.
+    """
+    import prepare_dataset as _prep_contract
+
+    layout = azus_common.staging_layout(folder, esid)
+    return layout is None or layout == _prep_contract.ZIP_MODE_SINGLE
+
+
+def _not_switchable_reason(folder: Path, esid: str) -> str:
+    """Explain why an ESID cannot be switched to the file-by-file fallback.
+
+    ``only_zip_missing`` returns a bare False for two unrelated causes, and
+    reporting the wrong one sends the operator hunting.  Historically the
+    message always blamed a missing companion; since the per-day layout
+    landed, the far more common cause is that the fallback does not support
+    the folder's layout at all — and ``refuses_per_day_layout`` has already
+    logged that, so a companion message here directly contradicts it.
+
+    Args:
+        folder: The ESID's staging folder.
+        esid: Canonical padded ESID string.
+
+    Returns:
+        A sentence naming the actual reason, for interpolation into the
+        caller's log line.
+    """
+    # Lazy, like this module's other cross-tool imports: the layout verdict
+    # and its constants both come from the prep contract, so there is no
+    # second definition of "single" here to drift.
+    import prepare_dataset as _prep_contract
+
+    layout = azus_common.staging_layout(folder, esid)
+    if layout is not None and layout != _prep_contract.ZIP_MODE_SINGLE:
+        return (
+            f"{folder.name} holds a {layout} ZIP layout, which the "
+            "file-by-file fallback does not support. Per-day archives are "
+            "each a fraction of a whole-site archive, so the ZIP-timeout "
+            "problem the fallback exists for should not arise — finish this "
+            "ESID with the ordinary ZIP path."
+        )
+    return (
+        "the ZIP is not the sole missing file (a companion also failed) or "
+        "the ZIP is already complete."
+    )
+
+
 def _run_with_file_by_file(
     stuck: List[Tuple[int, str, Path, str]], args: argparse.Namespace
 ) -> int:
     """Finish stuck ESIDs with the file-by-file fallback enabled.
 
-    ZIP-mode ESIDs are first attempted via the normal ZIP shell-out
-    (Phase A). Then (Phase B) every ESID already in file-by-file mode is
-    continued, and every ZIP-mode ESID still stuck AND meeting the switch
-    condition (``number_of_tries >= --tries-threshold`` AND only the ZIP is
-    missing) is switched to file-by-file — all in this one run.
+    ZIP-mode ESIDs are first attempted via the normal archive shell-out
+    (Phase A), which handles either layout. Then (Phase B) every ESID
+    already in file-by-file mode is continued, and every ZIP-mode ESID
+    still stuck AND meeting the switch condition is switched to
+    file-by-file — all in this one run.
 
-    ``--force`` switches immediately instead: the
-    ``number_of_tries >= --tries-threshold`` condition is NOT applied, and
-    the ESID is taken out of Phase A so the ZIP is not retried (which would
-    only re-hash the whole archive and burn an upload window).  An ESID can
-    therefore be switched on its very first failure.  ``only_zip_missing``
-    still applies — file-by-file replaces the ZIP, so a run where a
-    COMPANION is also missing is not a ZIP-size problem and is left to the
-    normal path.  Being a one-way door, this is opt-in.
+    The switch condition has three parts, checked in this order:
+
+      1. the folder's layout must be the legacy single-archive one
+         (:func:`_fallback_applies_to_layout`) — the fallback replaces ONE
+         whole-site archive with the WAVs it held, so it cannot apply to a
+         per-day folder.  Checked first because the next condition costs a
+         live Zenodo call;
+      2. ``number_of_tries >= --tries-threshold``;
+      3. only the archive is missing (``only_zip_missing``) — a run where a
+         COMPANION also failed is not an archive-size problem.
+
+    A per-day folder therefore never switches, and a per-day folder whose
+    ``upload_state.json`` still carries a file-by-file marker from before
+    the per-day migration is treated as ZIP-mode here (the marker is stale;
+    see ``azus_common.file_by_file_mode_blocks_zip_path``), so Phase A owns
+    it rather than Phase B refusing it.
+
+    ``--force`` drops condition 2 only: conditions 1 and 3 still apply, and
+    the ESID is taken out of Phase A so the archive is not retried (which
+    would only re-hash it and burn an upload window).  An ESID can
+    therefore be switched on its very first failure.  Being a one-way door,
+    this is opt-in.
 
     Args:
         stuck: The discovered ``(sort_key, esid, folder, record_id)`` list
@@ -454,9 +540,14 @@ def _run_with_file_by_file(
         for _, padded, folder in azus_common.find_esid_folders(raw_root)
     }
 
+    # A per-day folder's file-by-file marker is STALE — file-by-file cannot
+    # apply to a multi-archive layout, so such a folder belongs to Phase A
+    # (the ZIP shell-out), not Phase B1 where it would only be refused and
+    # counted as a failure.  The rule lives in azus_common so the ZIP
+    # pipeline's own Requirement-9 guards agree with this classification.
     zip_stuck = [
         t for t in stuck
-        if azus_common.read_upload_mode(t[2]) != azus_common.FILE_BY_FILE_MODE
+        if not azus_common.file_by_file_mode_blocks_zip_path(t[2], t[1])
     ]
     fbf_stuck = [t for t in stuck if t not in zip_stuck]
 
@@ -508,13 +599,14 @@ def _run_with_file_by_file(
     if args.force:
         for entry in zip_stuck:
             _sort, padded, folder, record_id = entry
-            if not fbf.only_zip_missing(credentials, record_id, folder, padded):
+            if (not _fallback_applies_to_layout(folder, padded)
+                    or not fbf.only_zip_missing(
+                        credentials, record_id, folder, padded)):
                 logger.warning(
-                    "[ESID %s] --force NOT applied — the ZIP is not the sole "
-                    "missing file (a companion also failed) or the ZIP is "
-                    "already complete. File-by-file replaces the ZIP, so it "
-                    "is not the fix here. Falling back to the normal ZIP "
-                    "pass.", padded,
+                    "[ESID %s] --force NOT applied — %s File-by-file "
+                    "replaces the single data archive, so it is not the fix "
+                    "here. Falling back to the normal ZIP pass.",
+                    padded, _not_switchable_reason(folder, padded),
                 )
                 continue
             forced.append(entry)
@@ -528,7 +620,9 @@ def _run_with_file_by_file(
                 len(forced), ", ".join(p for _s, p, _f, _r in forced),
             )
 
-    # Phase A: attempt the ZIP finish for ZIP-mode ESIDs (unchanged path).
+    # Phase A: attempt the archive finish via standalone_tasks, which
+    # handles either layout — a per-day folder uploads its remaining day
+    # archives to the same record.  Unchanged path otherwise.
     if zip_stuck:
         logger.info(
             "Phase A: ZIP finish for %d ESID(s) via standalone_tasks...",
@@ -565,16 +659,25 @@ def _run_with_file_by_file(
         if tries < args.tries_threshold:
             logger.info(
                 "[ESID %s] Not switching — number_of_tries=%d < threshold=%d "
-                "(the ZIP will be retried on the next run).",
+                "(the data archive(s) will be retried on the next run).",
                 padded, tries, args.tries_threshold,
+            )
+            failures.append(padded)
+            continue
+        if not _fallback_applies_to_layout(folder, padded):
+            # Never a switch candidate, so "not switching" would be noise —
+            # it is still stuck, and the ZIP path is its only path.
+            logger.info(
+                "[ESID %s] Still unfinished after Phase A. %s "
+                "Re-run to retry.",
+                padded, _not_switchable_reason(folder, padded),
             )
             failures.append(padded)
             continue
         if not fbf.only_zip_missing(credentials, record_id, folder, padded):
             logger.info(
-                "[ESID %s] Not switching — the ZIP is not the sole missing "
-                "file (a companion also failed) or the ZIP is already "
-                "complete.", padded,
+                "[ESID %s] Not switching — %s",
+                padded, _not_switchable_reason(folder, padded),
             )
             failures.append(padded)
             continue
@@ -671,13 +774,18 @@ def main() -> None:
     parser.add_argument(
         "--enable-file-by-file", action="store_true",
         help=(
-            "Enable the file-by-file FALLBACK. For an ESID whose ZIP finish "
-            "still fails with ONLY the ZIP missing after --tries-threshold "
-            "attempts, switch it to uploading the individual WAVs (from "
-            "Raw_Data) + CONFIG.TXT instead of the ZIP; and CONTINUE any ESID "
-            "already in file-by-file mode. Requires --raw-data-dir. Without "
-            "this flag, file-by-file ESIDs are skipped by the ZIP pipeline and "
-            "reported."
+            "Enable the file-by-file FALLBACK. For an ESID whose archive "
+            "finish still fails with ONLY the archive missing after "
+            "--tries-threshold attempts, switch it to uploading the "
+            "individual WAVs (from Raw_Data) + CONFIG.TXT instead; and "
+            "CONTINUE any ESID already in file-by-file mode. Requires "
+            "--raw-data-dir. Applies to the LEGACY single-archive layout "
+            "only: the fallback replaces one whole-site archive, so it "
+            "cannot apply to a per-day folder and will refuse one (per-day "
+            "archives are each a fraction of the size, so the timeout this "
+            "fallback exists for should not arise). Without this flag, "
+            "single-archive file-by-file ESIDs are skipped by the ZIP "
+            "pipeline and reported."
         ),
     )
     parser.add_argument(
@@ -855,9 +963,20 @@ def main() -> None:
     logger.info("")
     logger.info("Found %d stuck upload(s) (numerical order):", len(stuck))
     for _, padded, folder, record_id in stuck:
+        # The layout tells the operator which recovery paths even apply to
+        # this folder, which is the first thing they need when sweeping a
+        # staging area holding both layouts.
+        layout = azus_common.staging_layout(folder, padded) or "no archive"
+        marker = ""
+        if azus_common.read_upload_mode(folder) == azus_common.FILE_BY_FILE_MODE:
+            marker = (
+                "  [file-by-file mode]"
+                if azus_common.file_by_file_mode_blocks_zip_path(folder, padded)
+                else "  [stale file-by-file marker — ZIP path applies]"
+            )
         logger.info(
-            "  ESID %s  →  Zenodo draft %s   (folder: %s)",
-            padded, record_id, folder.name,
+            "  ESID %s  →  Zenodo draft %s   (folder: %s, layout: %s)%s",
+            padded, record_id, folder.name, layout, marker,
         )
     if excluded:
         logger.info(
@@ -884,10 +1003,13 @@ def main() -> None:
         sys.exit(_run_with_file_by_file(stuck, args))
 
     # Warn about any file-by-file ESIDs the ZIP pipeline will SKIP so they
-    # are never silently un-finishable.
+    # are never silently un-finishable.  A per-day folder's marker is stale
+    # and no longer causes a skip, so it must NOT be listed here — pointing
+    # the operator at --enable-file-by-file for one would send them to the
+    # path that refuses it.
     fbf_present = [
         padded for _, padded, folder, _ in stuck
-        if azus_common.read_upload_mode(folder) == azus_common.FILE_BY_FILE_MODE
+        if azus_common.file_by_file_mode_blocks_zip_path(folder, padded)
     ]
     if fbf_present:
         logger.warning(
@@ -895,6 +1017,20 @@ def main() -> None:
             "ZIP pipeline: %s. Re-run with --enable-file-by-file --raw-data-dir "
             "<Raw_Data root> to finish them.",
             len(fbf_present), ", ".join(fbf_present),
+        )
+
+    stale_marker = [
+        padded for _, padded, folder, _ in stuck
+        if azus_common.read_upload_mode(folder) == azus_common.FILE_BY_FILE_MODE
+        and not azus_common.file_by_file_mode_blocks_zip_path(folder, padded)
+    ]
+    if stale_marker:
+        logger.info(
+            "%d ESID(s) carry a file-by-file marker that no longer applies "
+            "(their folders hold per-day archives, which file-by-file cannot "
+            "replace): %s. These are finished by the ordinary ZIP path below "
+            "— no flag needed, and upload_state.json is left untouched.",
+            len(stale_marker), ", ".join(stale_marker),
         )
 
     # --- Delegate to standalone_tasks.py ---

@@ -682,6 +682,74 @@ def read_upload_mode(staging_folder: Path) -> Optional[str]:
     return mode if isinstance(mode, str) else None
 
 
+def staging_layout(staging_folder: Path, esid: str) -> Optional[str]:
+    """Report which ZIP layout a staging folder holds, for tools downstream.
+
+    A thin re-export of ``prepare_dataset.staging_zip_mode`` so the upload
+    and recovery tools can ask about layout without each taking a
+    module-level dependency on the prep module.  The verdict is still the
+    producer's — this only forwards it.
+
+    Args:
+        staging_folder: The staging (or uploaded) folder to inspect.
+        esid: Canonical padded ESID string.  A non-canonical value makes
+            every per-day archive invisible, the same precondition
+            ``staging_zip_mode`` carries.
+
+    Returns:
+        ``"single"``, ``"per_day"``, ``"mixed"``, or None when the folder
+        holds no data archive at all.
+    """
+    # Imported lazily: prepare_dataset imports THIS module at module level,
+    # so a top-level import here would be a cycle.  By call time
+    # prepare_dataset is always importable.
+    import prepare_dataset as _prep_contract
+    return _prep_contract.staging_zip_mode(staging_folder, esid)
+
+
+def file_by_file_mode_blocks_zip_path(
+    staging_folder: Path, esid: str
+) -> bool:
+    """Report whether a file-by-file marker should suppress the ZIP pipeline.
+
+    A refinement of :func:`read_upload_mode`, and the single place the rule
+    lives.  The marker exists so the ZIP pipeline and the file-by-file tool
+    never both work on one Zenodo record.  That contention is only possible
+    in the legacy single-archive layout: file-by-file replaces THE one
+    archive with the individual WAVs it held, so it cannot apply to a
+    per-day folder and ``file_by_file_upload.refuses_per_day_layout``
+    refuses one outright.
+
+    A per-day folder carrying the marker therefore has a STALE marker — no
+    second tool is contending for its record — and suppressing the ZIP
+    pipeline for it would leave the folder finishable by no path at all.
+    So only a non-per-day layout keeps the marker in force.
+
+    Note this reads the marker without rewriting it: reinterpreting a stale
+    marker needs no mutation of ``upload_state.json``, which is the
+    anti-duplicate link between a folder and its draft.
+
+    Args:
+        staging_folder: The ``ESID_NNN_Staging`` folder to inspect.
+        esid: Canonical padded ESID string, needed to resolve the layout.
+
+    Returns:
+        True when the folder is marked file-by-file AND its layout is not
+        per-day — i.e. the ZIP pipeline must leave it alone.  False when
+        there is no marker, or when the marker is stale because the folder
+        holds per-day archives.
+    """
+    if read_upload_mode(staging_folder) != FILE_BY_FILE_MODE:
+        return False
+    # The layout verdict AND the constant both come from the producer, so
+    # there is no second definition of "per_day" to drift.
+    import prepare_dataset as _prep_contract
+    return (
+        staging_layout(staging_folder, esid)
+        != _prep_contract.ZIP_MODE_PER_DAY
+    )
+
+
 def configure_logging(verbose: bool = False) -> None:
     """Set up the standard AZUS log format on stdout.
 

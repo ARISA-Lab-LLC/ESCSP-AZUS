@@ -79,10 +79,20 @@ from models.audiomoth import (
 # Shared helpers live in Resources/ (see azus_common.py).
 sys.path.insert(0, str(Path(__file__).resolve().parent / "Resources"))
 import azus_common  # noqa: E402
+# The ZIP-layout verdict is imported FROM THE PRODUCER: prepare_dataset.py
+# owns the canonical answer to "which layout did prep write?" right next to
+# the code that writes it.  Re-deriving it here is what
+# prepare_dataset.expected_day_zip_names' docstring forbids — a folder must
+# never be grouped one way and read another.  Same convention as
+# Resources/audit_prep_completeness.py.
+import prepare_dataset as _prep_contract  # noqa: E402
 
 from standalone_uploader import (
     upload_to_zenodo,
     get_credentials_from_env,
+    # The same hardened title search the uploader's duplicate guard uses,
+    # so --skip-existing-records and the guard agree about what exists.
+    _search_drafts_by_title,
     _PUT_RETRY_ATTEMPTS as _DEFAULT_UPLOAD_ATTEMPTS,
 )
 
@@ -677,10 +687,125 @@ def _summarize_names(names: List[str]) -> str:
     return shown
 
 
+def resolve_dataset_archives(
+    staging_folder: Path, esid: str
+) -> Tuple[List[Path], Optional[str], List[str]]:
+    """Enumerate a prepared folder's data archives and report its layout.
+
+    The single seam every upload-side consumer goes through to answer
+    "what are this dataset's archives?".  Before this existed the answer
+    was re-derived by ``glob("ESID_*.zip")``, which admits hand-made
+    names like ``ESID_005_backup.zip`` as data archives; routing through
+    ``azus_common.parse_day_zip_name`` applies the same strict grammar
+    prep used to write the names.
+
+    Enumeration follows ``audit_wav_integrity.locate_zips``: the legacy
+    single archive if present, then every per-day archive whose parsed
+    ESID matches exactly.  Name order is day order — the ``YYYY_MM_DD``
+    tail is fixed-width and the ESID prefix is constant.
+
+    Args:
+        staging_folder: The prepared staging (or uploaded) folder.
+        esid: Canonical padded ESID string, e.g. ``"005"``.  A
+            non-canonical value makes every per-day archive invisible,
+            which is the same precondition ``staging_zip_mode`` carries.
+
+    Returns:
+        A ``(archives, mode, problems)`` tuple.  ``mode`` is one of
+        ``prepare_dataset.ZIP_MODE_SINGLE`` / ``ZIP_MODE_PER_DAY`` /
+        ``ZIP_MODE_MIXED``, or None when the folder holds no data
+        archive.  ``problems`` is empty when the folder is coherent and
+        usable; a non-empty list means the caller must refuse the
+        dataset without opening anything.
+    """
+    problems: List[str] = []
+    mode = _prep_contract.staging_zip_mode(staging_folder, esid)
+
+    archives: List[Path] = []
+    single = staging_folder / _prep_contract.SINGLE_ZIP_NAME_TEMPLATE.format(
+        esid=esid
+    )
+    if single.is_file():
+        archives.append(single)
+    try:
+        for entry in sorted(staging_folder.iterdir()):
+            if not entry.is_file():
+                continue
+            parsed = azus_common.parse_day_zip_name(entry.name)
+            if parsed is not None and parsed[0] == esid:
+                archives.append(entry)
+    except OSError as exc:
+        return [], None, [
+            f"Staging folder is unreadable ({type(exc).__name__}: {exc}): "
+            f"{staging_folder.name}"
+        ]
+
+    if mode == _prep_contract.ZIP_MODE_MIXED:
+        problems.append(
+            f"{staging_folder.name} holds BOTH the legacy "
+            f"{single.name} and per-day archives — a mixed layout no prep "
+            "produces. Re-prep the folder, or verify it with "
+            "Resources/audit_prep_completeness.py."
+        )
+    elif mode is None:
+        problems.append(
+            f"No data archive in {staging_folder.name} — neither "
+            f"{single.name} nor any ESID_{esid}_YYYY_MM_DD.zip."
+        )
+
+    return archives, mode, problems
+
+
+def read_staged_version(staging_folder: Path) -> Optional[str]:
+    """Read the dataset version prep recorded in the staging folder.
+
+    Prep writes the site's collector row to the staging folder's own
+    ``total_eclipse_data.csv``, and for the per-day layout it appends
+    ``prepare_dataset.DAY_ZIP_VERSION_SUFFIX`` to the version first, so
+    a per-day dataset is unambiguously marked (``2024.1.0`` ->
+    ``2024.1.0A``).  Reading it here is what carries that marker onto the
+    Zenodo record: ``get_draft_config`` otherwise sources the version
+    from the MASTER collectors spreadsheet, which prep never writes back
+    to.  Prep stays the single authority for the marker; this only
+    consumes what prep already wrote.
+
+    The column name is matched case-tolerantly, the same way prep writes
+    it.
+
+    Args:
+        staging_folder: The prepared folder to read.
+
+    Returns:
+        The recorded version string, or None when the file is absent,
+        unreadable, empty, or has no version column — in which case the
+        caller keeps the collectors-CSV value.
+    """
+    staged_csv = staging_folder / "total_eclipse_data.csv"
+    if not staged_csv.is_file():
+        return None
+    try:
+        with open(staged_csv, "r", encoding="utf-8") as fh:
+            row = next(csv.DictReader(fh), None)
+    except (OSError, csv.Error) as exc:
+        logger.warning(
+            "Could not read %s (%s) — falling back to the collectors CSV "
+            "for the record version.", staged_csv.name, exc,
+        )
+        return None
+    if not row:
+        return None
+    for key, value in row.items():
+        if key and key.strip().casefold() == "version":
+            return (value or "").strip() or None
+    return None
+
+
 def verify_dataset_integrity(
-    zip_file: str,
+    staging_folder: str,
+    esid: str,
+    archives: Optional[List[str]] = None,
     verify_zip_hash: bool = True,
-    digests_out: Optional[Dict[str, str]] = None,
+    digests_out: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[str]:
     """Verify a prepared dataset's integrity BEFORE any upload work.
 
@@ -691,35 +816,73 @@ def verify_dataset_integrity(
 
     1. The ``.prep_complete`` sentinel must exist in the staging folder
        (prepare_dataset.py touches it as its very last action).
-    2. The ZIP must be a readable archive.
-    3. Every WAV listed in the staging folder's ``file_list.csv`` (the
+    2. The layout must be coherent — a folder holding both the legacy
+       archive and per-day archives is refused before anything is opened.
+    3. Every archive must be a readable ZIP.
+    4. Every WAV listed in the staging folder's ``file_list.csv`` (the
        external manifest, which carries per-file sizes and SHA-512
-       hashes) must be present in the ZIP with a matching uncompressed
-       size — and the ZIP must contain no WAVs the manifest doesn't list.
-    4. The ZIP's own SHA-512 must match the hash recorded in the
-       manifest's ZIP row (skippable via ``verify_zip_hash=False`` /
+       hashes) must be present in the archive that OWNS it, with a
+       matching uncompressed size — and no archive may hold a WAV the
+       manifest does not list.  In the per-day layout each archive owns
+       one day, so ownership is re-derived per WAV with
+       ``azus_common.wav_day_key`` -> ``azus_common.day_zip_name``.  The
+       ``Notes`` column also records this mapping, but it is free text
+       for humans and is never parsed.
+    5. Each archive's own SHA-512 must match the hash recorded in its
+       ``file_list.csv`` row (skippable via ``verify_zip_hash=False`` /
        the ``--skip-integrity-hash`` CLI flag; the structural checks
        above always run).
 
+    Both directions are checked, because each catches a different real
+    failure.  A manifest listing WAVs for a day whose archive is absent
+    is how an interrupted prep looks: the old single-archive comparison
+    passed such a folder whenever exactly one day had been written.  An
+    archive present with no manifest row is how a stale archive from an
+    earlier failed prep looks.
+
     Args:
-        zip_file: Path to the dataset ZIP inside its staging folder.
-        verify_zip_hash: When True (default), re-hash the whole ZIP and
-            compare against the manifest.  Costs one full read of the
-            archive (~minutes for a 43 GB ZIP) — small next to the
-            hours-long upload it protects.
+        staging_folder: The prepared folder holding the archives and
+            ``file_list.csv``.  NOT an archive path — the subject of this
+            check has always been the folder.
+        esid: Canonical padded ESID string, needed to derive which
+            archive owns a given WAV.
+        archives: The dataset's archives, normally supplied by
+            ``resolve_dataset_archives`` so the set verified is exactly
+            the set uploaded.  When None they are resolved here.
+        verify_zip_hash: When True (default), re-hash each archive and
+            compare against the manifest.  Costs one full read per
+            archive — small next to the hours-long upload it protects.
         digests_out: Optional dict the caller supplies to receive the
-            digests computed during the hash step (keys ``"sha512"`` and
-            ``"md5"``, filled only when the hash step runs and passes).
-            Both are computed in ONE read of the archive; the md5 lets
-            the uploader skip its own separate full read of the same ZIP.
+            digests computed during the hash step, keyed by archive
+            basename with ``{"sha512": ..., "md5": ...}`` values.  Filled
+            only when the hash step runs and EVERY archive passes; both
+            digests come from one read, and the md5s become the
+            uploader's ``known_md5s`` so it need not re-read the
+            archives.
 
     Returns:
         List of human-readable problem strings.  Empty list = verified.
-        Any problem must fail the dataset — never upload past one.
+        Any problem must fail the dataset — never upload past one.  A bad
+        dataset is REPORTED, not raised: the caller decides, and it fails
+        closed.
+
+    Raises:
+        ValueError: If ``staging_folder`` is a file rather than a
+            directory — i.e. a caller passed an archive path.  This is a
+            programming error, not a bad dataset, so it is raised rather
+            than returned as a problem.
     """
     problems: List[str] = []
-    zip_path = Path(zip_file)
-    staging_dir = zip_path.parent
+    staging_dir = Path(staging_folder)
+
+    # A caller that still passes an archive path would otherwise get a
+    # confusing "no sentinel" problem and look like a legitimately failing
+    # dataset.  Fail loudly instead of silently mis-verifying.
+    if staging_dir.is_file():
+        raise ValueError(
+            "verify_dataset_integrity takes the staging FOLDER, not an "
+            f"archive path (got {staging_dir.name})"
+        )
 
     # --- 1. Prep-completion sentinel ---
     if not (staging_dir / _PREP_SENTINEL_NAME).is_file():
@@ -730,28 +893,53 @@ def verify_dataset_integrity(
             "and back-fill with Resources/audit_prep_completeness.py."
         )
 
-    # --- 2. ZIP must be a readable archive ---
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zip_infos = zf.infolist()
-    except (zipfile.BadZipFile, OSError) as exc:
-        problems.append(
-            f"ZIP is not a readable archive "
-            f"({type(exc).__name__}: {exc}): {zip_path.name}"
+    # --- 2. Layout must be coherent before anything is opened ---
+    if archives is None:
+        resolved, mode, layout_problems = resolve_dataset_archives(
+            staging_dir, esid
         )
-        return problems  # nothing further can be checked
+        archive_paths = resolved
+    else:
+        archive_paths = [Path(a) for a in archives]
+        _, mode, layout_problems = resolve_dataset_archives(staging_dir, esid)
+    if layout_problems:
+        # A mixed or archive-less folder cannot be verified at all, and a
+        # mixed one must never be read: refuse before opening a 43 GB file.
+        return problems + layout_problems
 
-    # WAV entries inside the archive, keyed by basename (entries live
-    # under an ESID_XXX/ subfolder), mapped to uncompressed size.
-    zip_wav_sizes: Dict[str, int] = {}
-    for info in zip_infos:
-        basename = info.filename.rsplit("/", 1)[-1]
-        if basename.lower().endswith(".wav"):
-            zip_wav_sizes[basename] = info.file_size
+    per_day = mode == _prep_contract.ZIP_MODE_PER_DAY
 
-    # --- 3. Cross-check against prep's manifest (file_list.csv) ---
+    # --- 3. Read each archive's WAV entries (basename -> uncompressed size) ---
+    # Entries live under a subfolder inside the archive, so key on basename.
+    archive_wav_sizes: Dict[str, Dict[str, int]] = {}
+    for archive in archive_paths:
+        try:
+            with zipfile.ZipFile(archive, "r") as zf:
+                zip_infos = zf.infolist()
+        except (zipfile.BadZipFile, OSError) as exc:
+            problems.append(
+                f"ZIP is not a readable archive "
+                f"({type(exc).__name__}: {exc}): {archive.name}"
+            )
+            continue  # other archives are still worth checking
+        sizes: Dict[str, int] = {}
+        for info in zip_infos:
+            basename = info.filename.rsplit("/", 1)[-1]
+            if basename.lower().endswith(".wav"):
+                sizes[basename] = info.file_size
+        archive_wav_sizes[archive.name] = sizes
+
+    if not archive_wav_sizes:
+        return problems  # nothing readable — nothing further can be checked
+
+    # --- 4. Cross-check against prep's manifest (file_list.csv) ---
     file_list_path = staging_dir / "file_list.csv"
-    expected_zip_hash: Optional[str] = None
+    # Archive basename -> its recorded SHA-512.  Per-day prep writes one
+    # ZIP row per archive, so this is a plain read rather than a guess.
+    expected_zip_hashes: Dict[str, str] = {}
+    archive_names = {a.name for a in archive_paths}
+    # Day archives the manifest records but that are absent from disk.
+    recorded_missing: set = set()
     if not file_list_path.is_file():
         problems.append(
             f"No file_list.csv in {staging_dir.name} — cannot verify ZIP "
@@ -764,10 +952,16 @@ def verify_dataset_integrity(
             with open(file_list_path, "r", encoding="utf-8") as fh:
                 for row in csv.DictReader(fh):
                     name = (row.get("File Name") or "").strip()
-                    if name == zip_path.name:
-                        expected_zip_hash = (
-                            (row.get("SHA-512 Hash") or "").strip() or None
-                        )
+                    if name in archive_names:
+                        recorded = (row.get("SHA-512 Hash") or "").strip()
+                        if recorded:
+                            expected_zip_hashes[name] = recorded
+                    elif name.lower().endswith(".zip"):
+                        # A ZIP row naming an archive that is not on disk:
+                        # prep recorded it, then the file went missing.
+                        parsed = azus_common.parse_day_zip_name(name)
+                        if parsed is not None and parsed[0] == esid:
+                            recorded_missing.add(name)
                     elif name.lower().endswith(".wav"):
                         listed_wav_sizes[name] = (
                             (row.get("File size (KB)") or "").strip()
@@ -783,21 +977,50 @@ def verify_dataset_integrity(
             listed_wav_sizes = {}
             listed_wav_bytes = {}
 
-        if listed_wav_sizes or expected_zip_hash:
-            missing = sorted(set(listed_wav_sizes) - set(zip_wav_sizes))
-            extra = sorted(set(zip_wav_sizes) - set(listed_wav_sizes))
-            if missing:
-                problems.append(
-                    f"{len(missing)} WAV(s) listed in file_list.csv are "
-                    f"MISSING from the ZIP: {_summarize_names(missing)}"
-                )
-            if extra:
-                problems.append(
-                    f"{len(extra)} WAV(s) in the ZIP are not listed in "
-                    f"file_list.csv: {_summarize_names(extra)}"
+        if listed_wav_sizes or expected_zip_hashes:
+            # Which archive OWNS each listed WAV.  Re-derived from the
+            # filename with the same rule prep grouped by — never from the
+            # free-text Notes column that records the same mapping.
+            owner_of: Dict[str, Optional[str]] = {}
+            for name in listed_wav_sizes:
+                if not per_day:
+                    owner_of[name] = archive_paths[0].name
+                    continue
+                day = azus_common.wav_day_key(name)
+                owner_of[name] = (
+                    azus_common.day_zip_name(esid, day) if day else None
                 )
 
-            def _size_differs(name: str) -> bool:
+            undatable = sorted(n for n, o in owner_of.items() if o is None)
+            if undatable:
+                problems.append(
+                    f"{len(undatable)} WAV(s) in file_list.csv have no "
+                    f"8-digit date prefix, so no day archive can own them: "
+                    f"{_summarize_names(undatable)}"
+                )
+
+            # Forward direction: the manifest expects an archive we do not
+            # have.  This is what an interrupted per-day prep looks like,
+            # and the old whole-folder comparison passed it whenever
+            # exactly one day happened to be present.
+            orphaned_days: Dict[str, int] = {}
+            for name, owner in owner_of.items():
+                if owner is not None and owner not in archive_wav_sizes:
+                    orphaned_days[owner] = orphaned_days.get(owner, 0) + 1
+            for owner in sorted(set(orphaned_days) | recorded_missing):
+                count = orphaned_days.get(owner, 0)
+                recorded = (
+                    "file_list.csv records day archive"
+                    if owner in recorded_missing
+                    else "file_list.csv lists WAVs for day archive"
+                )
+                problems.append(
+                    f"{recorded} {owner} ({count} WAV(s)), which is not "
+                    f"present in {staging_dir.name} — preparation did not "
+                    "complete."
+                )
+
+            def _size_differs(name: str, zip_wav_sizes: Dict[str, int]) -> bool:
                 """True when the WAV's ZIP size disagrees with the manifest."""
                 # Prefer the byte-exact column (written by current prep);
                 # two different sizes can round to the same 2-decimal KB,
@@ -813,60 +1036,95 @@ def verify_dataset_integrity(
                     != listed_wav_sizes[name]
                 )
 
-            size_mismatches = sorted(
-                name
-                for name in set(listed_wav_sizes) & set(zip_wav_sizes)
-                if _size_differs(name)
-            )
-            if size_mismatches:
-                problems.append(
-                    f"{len(size_mismatches)} WAV(s) differ in size between "
-                    f"file_list.csv and the ZIP: "
-                    f"{_summarize_names(size_mismatches)}"
+            # Reverse direction, per archive: each archive must hold exactly
+            # the WAVs the manifest assigns to it.  Scoping per archive is
+            # what catches a day-1 WAV written into day 2's archive, which a
+            # whole-folder comparison cannot see.
+            for archive_name in sorted(archive_wav_sizes):
+                zip_wav_sizes = archive_wav_sizes[archive_name]
+                owned = {
+                    n for n, o in owner_of.items() if o == archive_name
+                }
+                missing = sorted(owned - set(zip_wav_sizes))
+                extra = sorted(set(zip_wav_sizes) - owned)
+                scope = f" ({archive_name})" if per_day else ""
+                if missing:
+                    problems.append(
+                        f"{len(missing)} WAV(s) listed in file_list.csv are "
+                        f"MISSING from the ZIP{scope}: "
+                        f"{_summarize_names(missing)}"
+                    )
+                if extra:
+                    problems.append(
+                        f"{len(extra)} WAV(s) in the ZIP{scope} are not "
+                        f"listed in file_list.csv: {_summarize_names(extra)}"
+                    )
+                size_mismatches = sorted(
+                    name
+                    for name in owned & set(zip_wav_sizes)
+                    if _size_differs(name, zip_wav_sizes)
                 )
-            if expected_zip_hash is None:
-                problems.append(
-                    f"file_list.csv has no row for {zip_path.name} — the "
-                    "external file list was never finalized; preparation "
-                    "did not complete."
-                )
+                if size_mismatches:
+                    problems.append(
+                        f"{len(size_mismatches)} WAV(s) differ in size "
+                        f"between file_list.csv and the ZIP{scope}: "
+                        f"{_summarize_names(size_mismatches)}"
+                    )
+                if archive_name not in expected_zip_hashes:
+                    problems.append(
+                        f"file_list.csv has no row for {archive_name} — the "
+                        "external file list was never finalized; preparation "
+                        "did not complete."
+                    )
         else:
             problems.append(
                 "file_list.csv lists no WAV files and no ZIP row — "
                 "preparation did not complete."
             )
 
-    # --- 4. ZIP hash vs the manifest's recorded hash ---
+    # --- 5. Archive hashes vs the manifest's recorded hashes ---
     # Skipped when structural problems already failed the dataset (no
     # point reading a 43 GB archive we already know is bad).
-    if verify_zip_hash and expected_zip_hash and not problems:
-        logger.info(
-            "Verifying SHA-512 of %s against file_list.csv (md5 computed "
-            "in the same read for the upload step)...",
-            zip_path.name,
-        )
-        digests = azus_common.calculate_digests(
-            str(zip_path), ("sha512", "md5")
-        )
-        actual_hash = digests["sha512"]
-        if actual_hash != expected_zip_hash:
-            problems.append(
-                f"ZIP SHA-512 does not match file_list.csv — the archive "
-                f"changed after preparation. Expected "
-                f"{expected_zip_hash[:16]}..., got {actual_hash[:16]}..."
+    hashed = verify_zip_hash and expected_zip_hashes and not problems
+    if hashed:
+        computed: Dict[str, Dict[str, str]] = {}
+        for archive in archive_paths:
+            expected = expected_zip_hashes.get(archive.name)
+            if not expected:
+                continue
+            logger.info(
+                "Verifying SHA-512 of %s against file_list.csv (md5 computed "
+                "in the same read for the upload step)...",
+                archive.name,
             )
-        elif digests_out is not None:
-            # Only hand the digests back when the archive VERIFIED —
-            # the uploader must never trust hashes of a bad file.
-            digests_out.update(digests)
+            digests = azus_common.calculate_digests(
+                str(archive), ("sha512", "md5")
+            )
+            actual_hash = digests["sha512"]
+            if actual_hash != expected:
+                problems.append(
+                    f"ZIP SHA-512 does not match file_list.csv — the archive "
+                    f"changed after preparation. Expected "
+                    f"{expected[:16]}..., got {actual_hash[:16]}...: "
+                    f"{archive.name}"
+                )
+            else:
+                computed[archive.name] = digests
+        # Only hand the digests back when EVERY archive VERIFIED — the
+        # uploader must never trust hashes from a dataset that failed, and
+        # a dataset with one bad archive never uploads at all.
+        if digests_out is not None and not problems:
+            digests_out.update(computed)
 
     if not problems:
+        total_wavs = sum(len(s) for s in archive_wav_sizes.values())
         logger.info(
-            "Integrity verified for %s: %d WAV file(s) in ZIP match "
-            "file_list.csv; ZIP sha512 %s.",
-            zip_path.name,
-            len(zip_wav_sizes),
-            "OK" if (verify_zip_hash and expected_zip_hash) else "not checked",
+            "Integrity verified for %s: %d WAV file(s) across %d archive(s) "
+            "match file_list.csv; archive sha512 %s.",
+            staging_dir.name,
+            total_wavs,
+            len(archive_wav_sizes),
+            "OK" if hashed else "not checked",
         )
     return problems
 
@@ -1201,7 +1459,8 @@ def read_upload_manifest(
 
 
 def find_dataset_files(
-    zip_file_path: str,
+    staging_folder: str,
+    esid: str,
     required_files: Optional[List[str]] = None,
     project_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Optional[str]]:
@@ -1211,8 +1470,15 @@ def find_dataset_files(
     uses that to determine files.  Otherwise falls back to the default
     required file list from project configuration.
 
+    Note that the manifest is a directory scan (see
+    ``prepare_dataset.create_upload_manifest``), so in the per-day layout
+    it lists every day archive.  Callers must exclude the archives they
+    handle explicitly rather than assuming the manifest holds only
+    companions.
+
     Args:
-        zip_file_path: Path to the main ZIP file.
+        staging_folder: The prepared folder to discover files in.
+        esid: Canonical padded ESID string, used to name the manifest.
         required_files: Override list of filenames to look for.
         project_config: Parsed project_config.json.
 
@@ -1220,19 +1486,14 @@ def find_dataset_files(
         Dictionary mapping filenames to their full paths (None if missing).
 
     Raises:
-        FileNotFoundError: If ``zip_file_path`` does not exist.
-        ValueError: If ``zip_file_path`` exists but is not a regular file.
+        FileNotFoundError: If ``staging_folder`` does not exist.
+        ValueError: If ``staging_folder`` exists but is not a directory.
     """
-    zip_path = Path(zip_file_path)
-    if not zip_path.exists():
-        raise FileNotFoundError(f"ZIP file not found: {zip_file_path}")
-    if not zip_path.is_file():
-        raise ValueError(f"Path is not a file: {zip_file_path}")
-
-    dataset_dir = zip_path.parent
-
-    # Extract ESID from ZIP filename (e.g., "ESID_005.zip" → "005")
-    esid = azus_common.parse_esid(zip_path.name)
+    dataset_dir = Path(staging_folder)
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Staging folder not found: {staging_folder}")
+    if not dataset_dir.is_dir():
+        raise ValueError(f"Path is not a directory: {staging_folder}")
 
     # --- Try upload manifest first ---
     if esid:
@@ -1350,46 +1611,73 @@ def get_esid_file_pairs(files: List[str]) -> List[Tuple[str, str]]:
 # ===================================================================
 
 def get_recording_dates(
-    zip_file: str,
+    archives: List[str],
     project_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
-    """Extract the earliest and latest recording dates from a ZIP archive.
+    """Extract the earliest and latest recording dates from the archives.
 
-    Reads WAV filenames inside the ZIP (without extracting) and parses
-    dates from the ``YYYYMMDD_HHMMSS`` naming convention.
+    Reads WAV filenames inside every archive (without extracting) and
+    parses the day from the ``YYYYMMDD_HHMMSS`` naming convention via
+    ``azus_common.wav_day_key``, the same rule prep grouped by.  Spanning
+    all archives matters in the per-day layout: each archive holds one
+    day, so reading a single one would date the record to that day
+    instead of the whole campaign.
 
     Args:
-        zip_file: Path to the dataset ZIP file.
+        archives: Data archive paths for one dataset.
         project_config: Project config (for minimum_recording_year).
 
     Returns:
         Tuple of (start_date, end_date) in YYYY-MM-DD format.
 
     Raises:
-        ValueError: If no valid dates are found.
+        ValueError: If ``archives`` is a single path rather than a list
+            (a bare string would otherwise be iterated character by
+            character), if it is empty, if any archive is missing, or if
+            no valid dates are found.
     """
-    if not zip_file or not os.path.exists(zip_file):
-        raise ValueError(f"Invalid or missing ZIP file: {zip_file}")
+    # A bare string is iterable, so it would silently be read as a list of
+    # single characters and fail with a baffling "missing ZIP file: v".
+    if isinstance(archives, (str, Path)):
+        raise ValueError(
+            "get_recording_dates takes a LIST of archive paths, not a "
+            f"single path (got {archives!r})"
+        )
+    if not archives:
+        raise ValueError("No archives supplied — cannot derive recording dates.")
+    for archive in archives:
+        if not archive or not os.path.exists(archive):
+            raise ValueError(f"Invalid or missing ZIP file: {archive}")
 
     if project_config is None:
         project_config = load_project_config()
 
     minimum_year = project_config.get("minimum_recording_year", 2000)
 
-    with zipfile.ZipFile(zip_file, "r") as zf:
-        wav_stems = [
-            Path(name).stem
-            for name in zf.namelist()
-            if name.lower().endswith(".wav")
-        ]
+    wav_names = set()
+    for archive in archives:
+        with zipfile.ZipFile(archive, "r") as zf:
+            wav_names.update(
+                Path(name).name
+                for name in zf.namelist()
+                if name.lower().endswith(".wav")
+            )
 
     from datetime import datetime as _dt
 
     dates = []
-    for stem in wav_stems:
+    for name in wav_names:
+        # wav_day_key does no calendar validation by design (prep must not
+        # reject an odd filename), so strptime is what rejects an
+        # impossible date like 20241332 — keep the guard.
         try:
-            date_str = stem.split("_")[0]
-            parsed = _dt.strptime(date_str, "%Y%m%d").date()
+            day = azus_common.wav_day_key(name)
+            if day is None:
+                continue
+            parsed = _dt.strptime(day, "%Y_%m_%d").date()
+            # Unset-AudioMoth-clock files (1970) are deliberately kept by
+            # prep but must not date the record; --skip-date-check covers
+            # the case where they are all a site has.
             if parsed.year >= minimum_year:
                 dates.append(parsed)
         except (ValueError, IndexError):
@@ -1409,15 +1697,19 @@ def get_recording_dates(
 # ===================================================================
 
 def create_upload_data(
-    esid_file_pairs: List[Tuple[str, str]],
+    esid_folder_archives: List[Tuple[str, str, List[str]]],
     data_collectors: List[DataCollector],
     project_config: Optional[Dict[str, Any]] = None,
     failure_results_file: Optional[str] = None,
 ) -> Tuple[List[UploadData], List[str]]:
-    """Combine ESID/file pairs with collector metadata into UploadData objects.
+    """Combine dataset folders with collector metadata into UploadData objects.
 
     Args:
-        esid_file_pairs: List of (ESID, zip_file) tuples.
+        esid_folder_archives: List of (ESID, staging_folder, archives)
+            triples — one per prepared folder, so one per Zenodo record.
+            The archives are the set resolved by
+            :func:`resolve_dataset_archives`, so the set verified and
+            uploaded is the same set discovery found.
         data_collectors: List of DataCollector models.
         project_config: Project config (for file discovery).
         failure_results_file: Optional CSV path; when given, an ESID whose
@@ -1425,7 +1717,11 @@ def create_upload_data(
             exception aborting the whole batch.
 
     Returns:
-        Tuple of (upload_data_list, unmatched_esid_list).
+        Tuple of (upload_data_list, unmatched_esid_list).  Each dataset's
+        collector is a COPY whose version may be overridden from the
+        staging folder's ``total_eclipse_data.csv`` (see
+        :func:`read_staged_version`), so the per-day version marker reaches
+        the record and the shared collector object is never mutated.
     """
     # Both sides of this join are canonical ESIDs (the CSV side via the
     # DataCollector validator, the folder side via parse_esid); the join
@@ -1435,7 +1731,7 @@ def create_upload_data(
     upload_data: List[UploadData] = []
     unmatched_ids: List[str] = []
 
-    for esid, zip_file in esid_file_pairs:
+    for esid, staging_folder, archives in esid_folder_archives:
         if esid.casefold() not in collector_dict:
             logger.warning("No collector info found for ESID: %s", esid)
             unmatched_ids.append(esid)
@@ -1446,7 +1742,7 @@ def create_upload_data(
         # in the batch.  Isolate it: record the failure, keep going.
         try:
             dataset_files = find_dataset_files(
-                zip_file, project_config=project_config
+                staging_folder, esid, project_config=project_config
             )
         except (FileNotFoundError, ValueError) as exc:
             logger.error(
@@ -1468,36 +1764,61 @@ def create_upload_data(
         # field, it is not uploaded as a file).  Resolve README.html and
         # README.md directly from the ESID staging directory so they are
         # always found regardless of what the manifest contains.
-        esid_staging_dir = Path(zip_file).parent
+        esid_staging_dir = Path(staging_folder)
         readme_html_path = esid_staging_dir / "README.html"
         readme_md_path   = esid_staging_dir / "README.md"
 
         # Exclude files that are handled via dedicated UploadData fields:
         #   README.html  — content becomes the Zenodo description; not uploaded as a file
         #   README.md    — added explicitly via UploadData.readme_md
-        #   ESID_XXX.zip — added explicitly via UploadData.zip_file
-        # Without this exclusion the ZIP would appear twice in all_files
-        # (once here, once from zip_file), causing a 400 "already exists" error
-        # on the second upload attempt.
-        zip_filename = Path(zip_file).name
-        excluded = {"README.html", "README.md", zip_filename}
+        #   the archives  — added explicitly via UploadData.archives
+        # Without this exclusion an archive would appear twice in all_files
+        # (once here, once from archives), causing a 400 "already exists"
+        # error on the second upload attempt.  EVERY archive must be
+        # excluded, not just one: the manifest is a directory scan, so in
+        # the per-day layout it lists them all, and any archive left in
+        # additional_files would upload as a "companion" — with the default
+        # retry budget instead of --upload-attempts.
+        excluded = {"README.html", "README.md"} | {
+            Path(a).name for a in archives
+        }
         additional_files = [
             path for filename, path in dataset_files.items()
             if path and filename not in excluded
         ]
 
+        # Prep marks the per-day layout by appending DAY_ZIP_VERSION_SUFFIX
+        # to the version in the staging folder's own total_eclipse_data.csv,
+        # but get_draft_config sources version from the MASTER collectors
+        # spreadsheet, which prep never writes back to.  Read the staged
+        # value so the record carries the marker prep assigned it.  Copy
+        # the collector rather than mutating the shared instance.
+        collector = collector_dict[esid.casefold()]
+        staged_version = read_staged_version(esid_staging_dir)
+        if staged_version and staged_version != collector.version:
+            logger.info(
+                "ESID %s: version from staged total_eclipse_data.csv: "
+                "%s (collectors CSV says %s)",
+                esid, staged_version, collector.version or "(empty)",
+            )
+            collector = collector.model_copy(
+                update={"version": staged_version}
+            )
+
         data = UploadData(
             esid=esid,
-            data_collector=collector_dict[esid.casefold()],
-            zip_file=zip_file,
+            data_collector=collector,
+            staging_folder=str(esid_staging_dir),
+            archives=list(archives),
             readme_html=str(readme_html_path) if readme_html_path.exists() else None,
             readme_md=str(readme_md_path) if readme_md_path.exists() else None,
             additional_files=additional_files,
         )
 
         logger.info(
-            "Prepared ESID %s: ZIP + %d additional files = %d total",
-            esid, len(additional_files), len(data.all_files),
+            "Prepared ESID %s: %d archive(s) + %d additional files = "
+            "%d total", esid, len(data.archives), len(additional_files),
+            len(data.all_files),
         )
 
         if not data.readme_html:
@@ -1511,6 +1832,99 @@ def create_upload_data(
 # ===================================================================
 #  Draft record configuration builder
 # ===================================================================
+
+def build_record_title(
+    data_collector: DataCollector,
+    project_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render the Zenodo record title for one site from the config template.
+
+    Extracted so that everything asking "what is this dataset's title?"
+    asks ONE function.  The title is the key the duplicate guard and
+    ``--skip-existing-records`` search Zenodo by, so a second copy of this
+    rule would mean searching for a title the record does not actually
+    carry — the search would find nothing and both protections would
+    silently pass.
+
+    Args:
+        data_collector: Collector metadata for this site.
+        project_config: Parsed project_config.json; ``title_template``
+            defaults to ``"$esid"`` when absent.
+
+    Returns:
+        The rendered title.  ``safe_substitute`` is used deliberately, so
+        an unknown placeholder in the template survives verbatim rather
+        than raising mid-run.
+    """
+    if project_config is None:
+        project_config = load_project_config()
+    title_template = Template(
+        project_config.get("title_template", "$esid")
+    )
+    # The ESID renders in its display form: underscores become spaces
+    # ("122_Part_1_of_2" -> "ESID#122 Part 1 of 2").  Plain 3-digit
+    # ESIDs are unaffected, so existing record titles do not change.
+    return title_template.safe_substitute(
+        esid=azus_common.esid_display(data_collector.esid),
+        eclipse_date=data_collector.eclipse_date,
+        eclipse_label=data_collector.eclipse_label(),
+    )
+
+
+def find_existing_zenodo_record(
+    data: UploadData,
+    project_config: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Ask Zenodo whether this dataset's record already exists.
+
+    The authoritative check behind ``--skip-existing-records``: it queries
+    the account by the dataset's intended title rather than trusting the
+    staging folder's ``upload_state.json``, so a folder whose state file
+    was lost or hand-deleted is still recognised.  That is the case where
+    proceeding would create a duplicate.
+
+    Both drafts and published records count as "already exists".  A
+    published record means the site is finished; an unfinished draft is
+    finished with ``Resources/finish_stuck_uploads.py``, not by this run.
+
+    Costs one search per dataset.  It does not replace the duplicate guard
+    inside :func:`upload_to_zenodo`, which searches again immediately
+    before creating a draft — that second search is what closes the window
+    between this check and draft creation.
+
+    Args:
+        data: The dataset being considered.
+        project_config: Parsed project_config.json (for the title template).
+
+    Returns:
+        A human-readable description of what was found, suitable for a log
+        line and a skip reason, or None when Zenodo holds no record with
+        this title.
+
+    Raises:
+        Exception: Whatever the search raises (network, auth, or an
+            unrecognized response body — the search itself fails closed on
+            those).  The caller must treat an undeterminable answer as a
+            failure rather than uploading blindly.
+    """
+    title = build_record_title(data.data_collector, project_config)
+    if not title:
+        return None
+    credentials = get_credentials_from_env()
+    drafts, published = _search_drafts_by_title(
+        credentials, title, "--skip-existing-records pre-check",
+    )
+    if published:
+        ids = ", ".join(str(hit.get("id")) for hit in published)
+        return f"already PUBLISHED on Zenodo as record {ids}"
+    if drafts:
+        ids = ", ".join(str(hit.get("id")) for hit in drafts)
+        return (
+            f"already has a draft on Zenodo (record {ids}) — finish it with "
+            "Resources/finish_stuck_uploads.py"
+        )
+    return None
+
 
 def get_draft_config(
     data_collector: DataCollector,
@@ -1630,17 +2044,7 @@ def get_draft_config(
     references = read_references_from_csv(references_csv)
 
     # --- Build title from template ---
-    title_template = Template(
-        project_config.get("title_template", "$esid")
-    )
-    # The ESID renders in its display form: underscores become spaces
-    # ("122_Part_1_of_2" -> "ESID#122 Part 1 of 2").  Plain 3-digit
-    # ESIDs are unaffected, so existing record titles do not change.
-    title = title_template.safe_substitute(
-        esid=azus_common.esid_display(data_collector.esid),
-        eclipse_date=data_collector.eclipse_date,
-        eclipse_label=data_collector.eclipse_label(),
-    )
+    title = build_record_title(data_collector, project_config)
 
     # --- Assemble Metadata ---
     metadata = Metadata(
@@ -1811,7 +2215,6 @@ class UploadTracker:
 
 def save_result(
     esid: str,
-    zip_file: str,
     success: bool,
     success_file: str,
     failure_file: str,
@@ -1825,7 +2228,6 @@ def save_result(
 
     Args:
         esid: Dataset identifier.
-        zip_file: Path to the uploaded ZIP file.
         success: Whether the upload succeeded.
         success_file: CSV path for successful results.
         failure_file: CSV path for failed results.
@@ -1984,7 +2386,7 @@ def upload_dataset(
     draft_only: bool = False,
     upload_attempts: int = _DEFAULT_UPLOAD_ATTEMPTS,
     title_guard: bool = True,
-    zip_md5: Optional[str] = None,
+    archive_md5s: Optional[Dict[str, str]] = None,
     skip_date_check: bool = False,
 ) -> Dict[str, Any]:
     """Upload a single dataset to Zenodo.
@@ -2004,20 +2406,23 @@ def upload_dataset(
             Overridden by a per-record file in the ESID staging directory
             if one exists.
         project_config: Parsed project_config.json.
-        defer_zip: If True, upload everything EXCEPT the data ZIP archive
-            and skip the community-review submission.  The record (and its
-            reserved DOI) is created on Zenodo, and upload_state.json is
-            left in the staging folder — exactly the state a "stuck" upload
-            leaves behind — so Resources/finish_stuck_uploads.py can upload
-            the ZIP and submit the record for review later.
-        draft_only: If True, upload everything INCLUDING the data ZIP but
+        defer_zip: If True, upload everything EXCEPT the data archives
+            and skip the community-review submission.  In the per-day
+            layout that defers every day archive, not just one — a record
+            must never enter community review holding a fraction of its
+            recording days.  The record (and its reserved DOI) is created
+            on Zenodo, and upload_state.json is left in the staging
+            folder — exactly the state a "stuck" upload leaves behind —
+            so Resources/finish_stuck_uploads.py can upload the archives
+            and submit the record for review later.
+        draft_only: If True, upload everything INCLUDING the data archives but
             leave the record as a plain, editable draft — skip BOTH the
             community-review submission and publishing (auto_publish is
             forced off).  For reviewing a fully uploaded record on Zenodo
             before submitting or publishing it yourself.  Mutually
             exclusive with ``defer_zip``.
-        upload_attempts: Total number of PUT attempts for the data
-            ZIP (companion files always keep the default).  Defaults
+        upload_attempts: Total number of PUT attempts for each data
+            archive (companion files always keep the default).  Defaults
             to the historical value (3).  Forwarded to
             :func:`upload_to_zenodo`.
         title_guard: When True (default), the uploader searches the
@@ -2025,10 +2430,11 @@ def upload_dataset(
             creating a fresh draft — the last line of defense against
             duplicate records when a folder's upload_state.json link was
             lost.  Forwarded to :func:`upload_to_zenodo`.
-        zip_md5: Pre-computed MD5 of the data ZIP (produced during
-            integrity verification), passed through as the uploader's
-            ``known_md5s`` for that archive so it can skip re-reading the
-            file to hash it.  None when no digest was carried over.
+        archive_md5s: Pre-computed MD5s of the data archives, keyed by
+            basename (produced during integrity verification), passed
+            through as the uploader's ``known_md5s`` so it can skip
+            re-reading the files to hash them.  None when no digests were
+            carried over.
         skip_date_check: When True, a dataset whose WAV names carry no
             valid recording dates is uploaded anyway with its recording
             dates recorded as not available — the record's
@@ -2045,12 +2451,16 @@ def upload_dataset(
         Dictionary with keys: 'successful' (bool), 'api_response', 'error'.
     """
     logger.info("Starting upload for ESID %s", data.esid)
-    logger.info("  ZIP file: %s", Path(data.zip_file).name)
+    logger.info(
+        "  Data archive(s): %d — %s",
+        len(data.archives),
+        ", ".join(Path(a).name for a in data.archives),
+    )
     logger.info("  Total files: %d", len(data.all_files))
 
     import traceback
 
-    esid_dir = Path(data.zip_file).parent
+    esid_dir = Path(data.staging_folder)
 
     # ------------------------------------------------------------------
     # Phase 1: Build the Zenodo draft configuration.
@@ -2068,7 +2478,7 @@ def upload_dataset(
         # Collected-dates metadata entry is omitted).
         try:
             start_date, end_date = get_recording_dates(
-                zip_file=data.zip_file, project_config=project_config
+                archives=data.archives, project_config=project_config
             )
         except ValueError as date_exc:
             if not skip_date_check:
@@ -2184,10 +2594,16 @@ def upload_dataset(
     # it, and published records cannot accept new files.
     files_to_upload = data.all_files
     if defer_zip:
-        files_to_upload = [f for f in data.all_files if f != data.zip_file]
+        # Defer EVERY archive, not one: a per-day record holding a fraction
+        # of its recording days must not proceed to community review.
+        deferred = set(data.archives)
+        files_to_upload = [f for f in data.all_files if f not in deferred]
         logger.info(
-            "  --defer-zip: skipping %s this run (%d of %d files will upload)",
-            Path(data.zip_file).name, len(files_to_upload), len(data.all_files),
+            "  --defer-zip: skipping %d archive(s) this run — %s "
+            "(%d of %d files will upload)",
+            len(deferred),
+            ", ".join(sorted(Path(a).name for a in deferred)),
+            len(files_to_upload), len(data.all_files),
         )
 
     try:
@@ -2210,12 +2626,11 @@ def upload_dataset(
             upload_attempts=upload_attempts,
             title_guard=title_guard,
             abort_event=_ABORT_EVENT,
-            known_md5s=(
-                {Path(data.zip_file).name: zip_md5} if zip_md5 else None
-            ),
-            # Scope --upload-attempts to the data ZIP; companion files
-            # always keep the uploader's default retry behavior.
-            zip_filename=Path(data.zip_file).name,
+            known_md5s=archive_md5s or None,
+            # Scope --upload-attempts to the data archives; companion files
+            # always keep the uploader's default retry behavior.  EVERY
+            # archive is named, so no day silently gets the smaller budget.
+            priority_files={Path(a).name for a in data.archives},
         )
         return result
 
@@ -2323,27 +2738,32 @@ def get_upload_data(
     )
     logger.info("Loaded %d data collector records", len(data_collectors))
 
-    # Discover ZIP files in ESID subdirectories
+    # Discover prepared dataset folders.  One folder is one dataset is one
+    # Zenodo record, whatever ZIP layout it holds — the archives inside are
+    # resolved per folder rather than each becoming its own work item.
     logger.info("Scanning directory: %s", data_dir)
     data_path = Path(data_dir)
-    dir_files: List[str] = []
+    folder_items: List[Tuple[str, str, List[str]]] = []
 
     for subdir in data_path.iterdir():
         if subdir.is_dir() and (
             subdir.name.startswith("ESID_") or subdir.name.startswith("ESID#")
         ):
-            # Apply ESID filter before adding to the work list.
             # Shared parser — tolerant of folder names like "ESID_073",
             # "ESID_073_Staging" (prepare_dataset.py's name), "ESID#73".
+            # Resolved once here: it is both the filter key and the ESID
+            # the archives are resolved against below.
+            folder_esid = azus_common.parse_esid(subdir.name)
+            if folder_esid is None:
+                logger.debug(
+                    "  Skipping %s (no ESID number in folder name)",
+                    subdir.name,
+                )
+                continue
+
+            # Apply ESID filter before adding to the work list.
             if normalized_filter is not None:
-                folder_esid_normalized = azus_common.parse_esid(subdir.name)
-                if folder_esid_normalized is None:
-                    logger.debug(
-                        "  Skipping %s (no ESID number in folder name)",
-                        subdir.name,
-                    )
-                    continue
-                if folder_esid_normalized.casefold() not in normalized_filter:
+                if folder_esid.casefold() not in normalized_filter:
                     logger.debug(
                         "  Skipping %s (not in --esid filter)", subdir.name
                     )
@@ -2355,7 +2775,12 @@ def get_upload_data(
             # it, so the two never fight over the same Zenodo record. Skip
             # CLEANLY here (before the no-ZIP failure-row path below), so a
             # file-by-file folder is not logged as a failure every run.
-            if azus_common.read_upload_mode(subdir) == azus_common.FILE_BY_FILE_MODE:
+            # A per-day folder's marker is STALE — file-by-file cannot apply
+            # to it, so nothing else is contending for its record and
+            # skipping would leave it finishable by no path at all.
+            if azus_common.file_by_file_mode_blocks_zip_path(
+                subdir, folder_esid
+            ):
                 logger.info(
                     "  Skipping %s — upload_state.json marks it file-by-file "
                     "mode (finish with finish_stuck_uploads.py "
@@ -2363,50 +2788,61 @@ def get_upload_data(
                 )
                 continue
 
-            # A staging folder with no ZIP cannot be uploaded.  This used
-            # to be skipped with NO logging at all — a mis-staged dataset
-            # simply vanished from the run.  Now it is loud and recorded.
-            subdir_zips = sorted(subdir.glob("ESID_*.zip"))
-            if not subdir_zips:
-                logger.warning(
-                    "ESID folder has no ZIP — skipping: %s", subdir.name
-                )
-                folder_esid = azus_common.parse_esid(subdir.name)
+            # A staging folder with no usable archive cannot be uploaded.
+            # This used to be skipped with NO logging at all — a mis-staged
+            # dataset simply vanished from the run.  Now it is loud and
+            # recorded.  A mixed-layout folder is refused here too, with
+            # the resolver's own explanation.
+            archives, _mode, layout_problems = resolve_dataset_archives(
+                subdir, folder_esid
+            )
+            if layout_problems:
+                for problem in layout_problems:
+                    logger.warning("ESID folder unusable — skipping: %s", problem)
                 save_result_csv(
                     file=failure_results_file,
                     result=PersistedResult(
-                        esid=folder_esid if folder_esid else subdir.name,
-                        error_message="No ZIP file found in staging folder",
+                        esid=folder_esid,
+                        error_message="; ".join(layout_problems),
                     ),
                 )
                 continue
-            for zip_file in subdir_zips:
-                dir_files.append(str(zip_file))
+            folder_items.append(
+                (folder_esid, str(subdir), [str(a) for a in archives])
+            )
 
-    logger.info("Found %d ZIP file(s) matching criteria", len(dir_files))
+    logger.info(
+        "Found %d dataset folder(s) matching criteria (%d archive(s) total)",
+        len(folder_items), sum(len(a) for _, _, a in folder_items),
+    )
 
-    # Skip already-uploaded files.  Each skip is named individually so a
-    # dataset silently dropped by a stale tracker entry is visible, and
-    # the count feeds the shared stats so the run summary shows it.
-    original_count = len(dir_files)
-    for f in dir_files:
-        if tracker.is_uploaded(f):
-            logger.info("Tracker skip (already uploaded): %s", Path(f).name)
-    dir_files = [f for f in dir_files if not tracker.is_uploaded(f)]
-    skipped = original_count - len(dir_files)
+    # Skip already-uploaded datasets.  The tracker records archive paths, so
+    # a dataset counts as done only when EVERY archive is recorded — a
+    # partially recorded folder re-enters the pipeline, where the uploader's
+    # name+size+md5 check skips the archives already committed remotely.
+    original_count = len(folder_items)
+    remaining: List[Tuple[str, str, List[str]]] = []
+    for esid, folder, archives in folder_items:
+        if archives and all(tracker.is_uploaded(a) for a in archives):
+            logger.info(
+                "Tracker skip (already uploaded): %s (%d archive(s))",
+                Path(folder).name, len(archives),
+            )
+            continue
+        remaining.append((esid, folder, archives))
+    folder_items = remaining
+    skipped = original_count - len(folder_items)
     if skipped:
-        logger.info("Skipped %d already-uploaded file(s)", skipped)
+        logger.info("Skipped %d already-uploaded dataset(s)", skipped)
         if stats is not None:
             stats["skipped"] += skipped
 
-    if not dir_files:
-        logger.warning("No new files to upload")
+    if not folder_items:
+        logger.warning("No new datasets to upload")
         return []
 
-    esid_file_pairs = get_esid_file_pairs(files=dir_files)
-
     upload_data, unmatched_ids = create_upload_data(
-        esid_file_pairs=esid_file_pairs,
+        esid_folder_archives=folder_items,
         data_collectors=data_collectors,
         project_config=project_config,
         failure_results_file=failure_results_file,
@@ -2498,6 +2934,7 @@ def _process_one_dataset_inner(
     title_guard: bool = True,
     verify_zip_hash: bool = True,
     skip_date_check: bool = False,
+    skip_existing_records: bool = False,
 ) -> None:
     """Upload one ESID dataset end-to-end and record the result.
 
@@ -2539,6 +2976,12 @@ def _process_one_dataset_inner(
     requires no coordination: the Zenodo draft (different record_id per
     ESID), the staging folder (different path per ESID), and
     ``upload_state.json`` (lives inside the per-ESID staging folder).
+    What makes those per-ESID claims hold is that
+    :func:`get_upload_data` emits at most ONE :class:`UploadData` per
+    staging folder — a dataset is a folder, not an archive.  Were one
+    folder to produce several work items, two threads could share a
+    staging folder, a draft and an ``upload_state.json``, and the first
+    to finish would move the folder out from under the others.
     The Python ``logging`` module is already thread-safe by design, so
     log lines from different ESIDs may interleave but never garble — use
     the ``[ESID XXX]`` prefix on the key log messages below to follow
@@ -2564,12 +3007,14 @@ def _process_one_dataset_inner(
         results_lock: Lock that guards both result CSV writes.
         stats: Shared statistics dict (modified in place).
         stats_lock: Lock that guards stat increments.
-        defer_zip: If True (the ``--defer-zip`` flag), the data ZIP is NOT
-            uploaded and the record is NOT submitted for community review.
-            On success the run is counted as "deferred" — the staging
-            folder stays in ``Staging_Area/`` with its ``upload_state.json``
-            so ``Resources/finish_stuck_uploads.py`` can upload the ZIP and
-            finish the record later.  Nothing is written to the success CSV
+        defer_zip: If True (the ``--defer-zip`` flag), the data archives
+            are NOT uploaded and the record is NOT submitted for community
+            review.  Every archive is held back, not just one: a record
+            must never enter review holding a fraction of its recording
+            days.  On success the run is counted as "deferred" — the
+            staging folder stays in ``Staging_Area/`` with its
+            ``upload_state.json`` so ``Resources/finish_stuck_uploads.py``
+            can upload the archives and finish the record later.  Nothing is written to the success CSV
             or the upload tracker, because the record is not complete yet.
         draft_only: If True (the ``--draft-only`` flag), upload everything
             INCLUDING the ZIP but leave the record a plain editable draft —
@@ -2581,6 +3026,13 @@ def _process_one_dataset_inner(
         title_guard: Duplicate-record guard (default True; disabled by the
             ``--skip-title-guard`` CLI flag).  Forwarded to
             :func:`upload_dataset`.
+        skip_existing_records: When True (the ``--skip-existing-records``
+            flag), ask Zenodo whether a record with this dataset's title
+            already exists BEFORE the integrity gate, and skip the dataset
+            if one does — counted as skipped, not failed, with the staging
+            folder left exactly where it is.  Both drafts and published
+            records count.  A search that cannot be completed fails the
+            dataset rather than falling through to an upload.
         verify_zip_hash: When True (default), the pre-upload integrity
             gate re-hashes the ZIP and compares against ``file_list.csv``
             (``--skip-integrity-hash`` disables just this step; the
@@ -2613,8 +3065,10 @@ def _process_one_dataset_inner(
     # direct caller of this function could still arrive here — and this must
     # precede the ZIP integrity gate below, which would otherwise open a
     # stale or absent ZIP.
-    staging_folder = Path(data.zip_file).resolve().parent
-    if azus_common.read_upload_mode(staging_folder) == azus_common.FILE_BY_FILE_MODE:
+    staging_folder = Path(data.staging_folder).resolve()
+    if azus_common.file_by_file_mode_blocks_zip_path(
+        staging_folder, data.esid
+    ):
         logger.info(
             "%s Skipped — file-by-file mode (finish with "
             "finish_stuck_uploads.py --enable-file-by-file).", tag,
@@ -2625,20 +3079,83 @@ def _process_one_dataset_inner(
 
     logger.info("%s Starting (dataset %d of %d)", tag, index, total)
 
+    # --- Optional pre-check: is this record already on Zenodo? ---
+    # Deliberately BEFORE the integrity gate, which re-hashes every archive:
+    # skipping here costs one search instead of a multi-GB read.  A search
+    # that cannot be completed fails the dataset rather than falling through
+    # to an upload — the same fail-closed stance the integrity gate takes,
+    # because the whole point of the flag is not to touch what already
+    # exists.
+    if skip_existing_records:
+        try:
+            existing = find_existing_zenodo_record(data, project_config)
+        except Exception as exc:
+            logger.error(
+                "%s Could not determine whether this record already exists "
+                "(%s: %s) — failing the dataset rather than risking a "
+                "duplicate. Re-run without --skip-existing-records to upload "
+                "anyway (the duplicate guard still protects the record).",
+                tag, type(exc).__name__, exc,
+            )
+            with stats_lock:
+                stats["total_processed"] += 1
+                stats["failed"] += 1
+            with results_lock:
+                save_result(
+                    esid=data.esid,
+                    success=False,
+                    success_file=successful_results_file,
+                    failure_file=failure_results_file,
+                    error_type="ExistingRecordCheckFailed",
+                    error_message=(
+                        f"--skip-existing-records search failed "
+                        f"({type(exc).__name__}: {exc})"
+                    ),
+                )
+            logger.error("%s DONE (existing-record check failed)", tag)
+            return
+        if existing:
+            logger.info(
+                "%s Skipped — %s (--skip-existing-records).", tag, existing
+            )
+            with stats_lock:
+                stats["skipped"] = stats.get("skipped", 0) + 1
+            return
+
     # --- Step 0: integrity gate — nothing uploads past a problem ---
     # Runs entirely locally (no network).  A broken or unverifiable
     # dataset is marked FAILED here so an incomplete ZIP can never
     # reach Zenodo, no matter how it ended up in the staging area.
-    integrity_digests: Dict[str, str] = {}
+    integrity_digests: Dict[str, Dict[str, str]] = {}
     try:
         integrity_problems = verify_dataset_integrity(
-            zip_file=data.zip_file, verify_zip_hash=verify_zip_hash,
+            staging_folder=str(staging_folder),
+            esid=data.esid,
+            archives=data.archives,
+            verify_zip_hash=verify_zip_hash,
             digests_out=integrity_digests,
         )
     except Exception as exc:  # a gate crash must fail closed, not open
         integrity_problems = [
             f"Integrity check itself failed ({type(exc).__name__}: {exc})"
         ]
+
+    # Zenodo caps a record's file count.  Prep budgets for it before
+    # writing archives, but the upload manifest is a directory scan, so an
+    # extra file dropped into the folder afterwards can push the real set
+    # over.  Refuse here, before any network work, rather than uploading
+    # for hours and taking a 400 on the last file.
+    if len(data.all_files) > azus_common.ZENODO_MAX_FILES_PER_RECORD:
+        companions = len(data.all_files) - len(data.archives)
+        integrity_problems.append(
+            f"{len(data.all_files)} file(s) ({len(data.archives)} archive(s) "
+            f"+ {companions} companion(s)) exceeds Zenodo's "
+            f"{azus_common.ZENODO_MAX_FILES_PER_RECORD}-file limit per "
+            "record — split the site with "
+            "Resources/split_oversized_raw_folders.py, or re-prep with "
+            "--single-zip."
+        )
+
     if integrity_problems:
         for problem in integrity_problems:
             logger.error("%s INTEGRITY CHECK FAILED: %s", tag, problem)
@@ -2652,7 +3169,6 @@ def _process_one_dataset_inner(
         with results_lock:
             save_result(
                 esid=data.esid,
-                zip_file=data.zip_file,
                 success=False,
                 success_file=successful_results_file,
                 failure_file=failure_results_file,
@@ -2680,9 +3196,13 @@ def _process_one_dataset_inner(
             draft_only=draft_only,
             upload_attempts=upload_attempts,
             title_guard=title_guard,
-            # md5 from the integrity gate's combined digest pass — saves
-            # the uploader a second full read of the (verified) ZIP.
-            zip_md5=integrity_digests.get("md5"),
+            # md5s from the integrity gate's combined digest pass — saves
+            # the uploader a second full read of each (verified) archive.
+            archive_md5s={
+                name: digests["md5"]
+                for name, digests in integrity_digests.items()
+                if digests.get("md5")
+            },
             skip_date_check=skip_date_check,
         )
     except Exception as exc:
@@ -2704,7 +3224,7 @@ def _process_one_dataset_inner(
 
     if result["successful"] and defer_zip:
         # Deferred success: the record and its reserved DOI exist on Zenodo
-        # with every file EXCEPT the data ZIP, and community review has NOT
+        # with every file EXCEPT the data archives, and community review has NOT
         # been submitted.  Deliberately skip the tracker append, the move to
         # Uploaded_Data/, and the success-CSV row — the record is not
         # complete.  The staging folder (with upload_state.json inside) is
@@ -2727,22 +3247,22 @@ def _process_one_dataset_inner(
         # Mark the ZIP as uploaded so future runs skip it.  The tracker
         # appends one line to ``Records/uploaded_files.txt``; the lock
         # ensures two threads don't write to that file at the same time.
+        # Record every archive: a dataset counts as uploaded only when all
+        # of them are, so a partial folder re-enters the pipeline next run.
         with tracker_lock:
-            tracker.mark_uploaded(data.zip_file)
+            for archive in data.archives:
+                tracker.mark_uploaded(archive)
 
         # Archive the staging folder into Uploaded_Data/ESID_XXX_Uploaded/.
         # Per-ESID file I/O on a unique path (no two threads touch the same
         # folder), so no lock is needed. Failures are logged, not fatal —
         # a local move problem must not undo the successful Zenodo upload.
-        archive_staging_to_uploaded(
-            Path(data.zip_file).resolve().parent, data.esid, tag,
-        )
+        archive_staging_to_uploaded(staging_folder, data.esid, tag)
 
         # Append the success row to successful_results.csv (lock-guarded).
         with results_lock:
             save_result(
                 esid=data.esid,
-                zip_file=data.zip_file,
                 success=True,
                 success_file=successful_results_file,
                 failure_file=failure_results_file,
@@ -2756,7 +3276,6 @@ def _process_one_dataset_inner(
         with results_lock:
             save_result(
                 esid=data.esid,
-                zip_file=data.zip_file,
                 success=False,
                 success_file=successful_results_file,
                 failure_file=failure_results_file,
@@ -2824,6 +3343,7 @@ def upload_datasets(
     title_guard: bool = True,
     verify_zip_hash: bool = True,
     skip_date_check: bool = False,
+    skip_existing_records: bool = False,
 ) -> Dict[str, int]:
     """Upload configured datasets to Zenodo.
 
@@ -2888,6 +3408,11 @@ def upload_datasets(
             is resumed instead, an existing published record makes the
             dataset fail rather than duplicate.  Disable with
             ``--skip-title-guard``.
+        skip_existing_records: When True (the ``--skip-existing-records``
+            flag), each dataset is checked against Zenodo by title before
+            any local hashing, and one that already exists there — as a
+            draft or as a published record — is skipped and counted as
+            skipped rather than uploaded.
         verify_zip_hash: When True (default), each dataset's pre-upload
             integrity gate re-hashes its ZIP against ``file_list.csv``.
             ``--skip-integrity-hash`` disables just the hash step; the
@@ -3006,6 +3531,7 @@ def upload_datasets(
             title_guard=title_guard,
             verify_zip_hash=verify_zip_hash,
             skip_date_check=skip_date_check,
+            skip_existing_records=skip_existing_records,
         )
 
         if workers == 1:
@@ -3109,6 +3635,22 @@ def main() -> None:
     parser.add_argument(
         "--config", type=str, default="Resources/config.json",
         help="Path to configuration file (default: Resources/config.json)",
+    )
+    parser.add_argument(
+        "--skip-existing-records", action="store_true",
+        help=(
+            "Before uploading anything, ask Zenodo whether a record with "
+            "this ESID's title already exists; if one does, skip the folder "
+            "and move on to the next ESID. Both an unfinished DRAFT and an "
+            "already PUBLISHED record count as existing. Skipped folders are "
+            "counted as skipped (not failed) and are left untouched in the "
+            "staging area. The check runs BEFORE the integrity gate, so a "
+            "skipped folder costs one API search instead of re-hashing every "
+            "archive. It queries Zenodo rather than reading "
+            "upload_state.json, so a folder whose state file was lost is "
+            "still recognised. Finish an existing draft with "
+            "Resources/finish_stuck_uploads.py."
+        ),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -3245,8 +3787,8 @@ def main() -> None:
     parser.add_argument(
         "--draft-only", action="store_true",
         help=(
-            "Upload everything INCLUDING the data ZIP, but leave each record "
-            "a plain, editable Zenodo draft: do NOT submit it to the "
+            "Upload everything INCLUDING the data archives, but leave each "
+            "record a plain, editable Zenodo draft: do NOT submit it to the "
             "community review queue and do NOT publish it (this overrides "
             "auto_publish in the config). Use it to review a fully uploaded "
             "record on Zenodo, then submit or publish it yourself. Cannot be "
@@ -3501,6 +4043,7 @@ def main() -> None:
             upload_attempts=args.upload_attempts,
             title_guard=not args.skip_title_guard,
             verify_zip_hash=not args.skip_integrity_hash,
+            skip_existing_records=args.skip_existing_records,
             skip_date_check=args.skip_date_check,
         )
 

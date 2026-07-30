@@ -142,7 +142,6 @@ class TestSaveResultCsv(_TmpDirTestCase):
     def test_success_routes_row_to_success_csv_only(self):
         tasks.save_result(
             esid="005",
-            zip_file="/data/ESID_005.zip",
             success=True,
             success_file=self.success_file,
             failure_file=self.failure_file,
@@ -164,7 +163,6 @@ class TestSaveResultCsv(_TmpDirTestCase):
     def test_failure_routes_row_to_failure_csv_with_error_fields(self):
         tasks.save_result(
             esid="007",
-            zip_file="/data/ESID_007.zip",
             success=False,
             success_file=self.success_file,
             failure_file=self.failure_file,
@@ -183,7 +181,6 @@ class TestSaveResultCsv(_TmpDirTestCase):
         # column — the CSVs are the operator's audit trail.
         tasks.save_result(
             esid="008",
-            zip_file="/data/ESID_008.zip",
             success=False,
             success_file=self.success_file,
             failure_file=self.failure_file,

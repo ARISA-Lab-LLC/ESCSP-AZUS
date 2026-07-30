@@ -202,10 +202,20 @@ class DataCollector(BaseModel):
 class UploadData(BaseModel):
     """Bundle of files and metadata for uploading one dataset to Zenodo.
 
+    One instance is exactly one prepared staging folder, which becomes
+    exactly one Zenodo record.  A dataset holds one data archive in the
+    legacy single-ZIP layout and one per recording day in the per-day
+    layout, so ``archives`` is a list in both cases — there is
+    deliberately no scalar "the ZIP" field.  No day is privileged, and a
+    scalar would reintroduce the "which archive is special?" question
+    that produced the companion-leak and deferred-upload bugs.
+
     Attributes:
         esid: Unique dataset identifier.
         data_collector: Collector metadata for this site.
-        zip_file: Path to the main ZIP archive.
+        staging_folder: The prepared folder holding every file below.
+        archives: Data archive paths in ascending day order (one element
+            in the legacy layout).
         readme_html: Path to README.html (content used as Zenodo description).
         readme_md: Path to README.md (uploaded as a file).
         additional_files: Paths to supporting files (data dicts, license, etc.).
@@ -213,7 +223,8 @@ class UploadData(BaseModel):
 
     esid: str
     data_collector: DataCollector
-    zip_file: str
+    staging_folder: str
+    archives: List[str] = Field(min_length=1)
     readme_html: Optional[str] = None
     readme_md: Optional[str] = None
     additional_files: List[str] = []
@@ -222,20 +233,28 @@ class UploadData(BaseModel):
     def all_files(self) -> List[str]:
         """Assemble the complete list of files to upload.
 
-        Order: README.md (if present), then additional metadata files, then the
-        ZIP archive last.  Uploading small files first keeps early failures cheap
-        and ensures Zenodo has full metadata context before the large binary
-        transfer begins.  README.html is NOT included — its content becomes the
-        Zenodo description field, it is not uploaded as a file.
+        Order: README.md (if present), then additional metadata files, then
+        the data archives last, in ascending day order.  Uploading small
+        files first keeps early failures cheap and ensures Zenodo has full
+        metadata context before the large binary transfers begin; keeping
+        the archives in day order means an interrupted record holds a
+        contiguous run of recording days rather than an arbitrary subset.
+        README.html is NOT included — its content becomes the Zenodo
+        description field, it is not uploaded as a file.
+
+        ``additional_files`` never contains an archive: the caller that
+        builds it excludes every archive name, because prep's upload
+        manifest is a directory scan and therefore lists them all.
 
         Returns:
-            Complete list of file paths to upload, ZIP last.
+            Complete list of file paths to upload, archives last.
         """
         files: List[str] = []
         if self.readme_md:
             files.append(self.readme_md)
         files.extend(self.additional_files)
-        files.append(self.zip_file)  # ZIP last — largest file uploads after metadata
+        # Archives last — the largest files upload after the metadata.
+        files.extend(self.archives)
         return files
 
 

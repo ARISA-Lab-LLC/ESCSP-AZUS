@@ -139,10 +139,13 @@ python standalone_tasks.py
 # Output shows real-time progress:
 📦 Processing 1/30: ESID 004
 🚀 Starting upload for ESID 004
-  [1/12] Uploading ESID_004.zip (245.3 MB)...
-  ✅ Uploaded in 45.2s
-  [2/12] Uploading README.md (0.05 MB)...
+  [1/14] Uploading README.md (0.05 MB)...
   ✅ Uploaded in 1.2s
+  # ...companions first, then the data archive(s) LAST — small files first
+  # keeps an early failure cheap.  A per-day site has one archive per
+  # recording day, in ascending day order.
+  [12/14] Uploading ESID_004_2024_04_08.zip (245.3 MB)...
+  ✅ Uploaded in 45.2s
 
 # Monitor log file in another terminal
 tail -f azus_upload.log

@@ -380,7 +380,7 @@ class TestZipScopedUploadAttempts(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _run(self, upload_attempts, zip_filename):
+    def _run(self, upload_attempts, priority_files):
         zip_path = self.tmp / "ESID_005.zip"
         readme_path = self.tmp / "README.md"
         zip_path.write_bytes(b"z" * 32)
@@ -406,7 +406,7 @@ class TestZipScopedUploadAttempts(unittest.TestCase):
                 config=DraftConfig(),
                 existing_draft_id=self.DRAFT_ID,
                 upload_attempts=upload_attempts,
-                zip_filename=zip_filename,
+                priority_files=priority_files,
             )
         self.assertTrue(result["successful"], result)
         return {
@@ -416,22 +416,22 @@ class TestZipScopedUploadAttempts(unittest.TestCase):
         }
 
     def test_attempts_apply_to_zip_only(self):
-        attempts = self._run(upload_attempts=1, zip_filename="ESID_005.zip")
+        attempts = self._run(upload_attempts=1, priority_files={"ESID_005.zip"})
         by_name = {Path(p).name: a for p, a in attempts.items()}
         self.assertEqual(by_name["ESID_005.zip"], 1)
         self.assertEqual(
             by_name["README.md"], uploader._PUT_RETRY_ATTEMPTS
         )
 
-    def test_no_zip_filename_keeps_apply_to_all_behavior(self):
-        attempts = self._run(upload_attempts=1, zip_filename=None)
+    def test_no_priority_files_keeps_apply_to_all_behavior(self):
+        attempts = self._run(upload_attempts=1, priority_files=None)
         self.assertEqual(set(attempts.values()), {1})
 
 
 class TestUploadDatasetWiring(unittest.TestCase):
-    """upload_dataset passes the ZIP's basename to upload_to_zenodo."""
+    """upload_dataset passes every archive basename to upload_to_zenodo."""
 
-    def test_zip_filename_is_forwarded(self):
+    def test_archive_names_are_forwarded(self):
         import zipfile
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "ESID_005_Staging"
@@ -455,7 +455,7 @@ class TestUploadDatasetWiring(unittest.TestCase):
             })
             data = UploadData(
                 esid="005", data_collector=collector,
-                zip_file=str(zip_path),
+                staging_folder=str(folder), archives=[str(zip_path)],
             )
             with mock.patch.object(tasks, "upload_to_zenodo") as up, \
                  mock.patch.object(tasks, "get_draft_config",
@@ -469,7 +469,7 @@ class TestUploadDatasetWiring(unittest.TestCase):
                 )
         self.assertTrue(result["successful"])
         self.assertEqual(
-            up.call_args.kwargs["zip_filename"], "ESID_005.zip"
+            up.call_args.kwargs["priority_files"], {"ESID_005.zip"}
         )
 
 

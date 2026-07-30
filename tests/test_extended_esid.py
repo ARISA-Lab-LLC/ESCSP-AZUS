@@ -207,7 +207,9 @@ class TestCollectorJoinAndTitle(unittest.TestCase):
         # Folder says ESID_120a, CSV says 120A — the dataset must match.
         collector = self._collector("120A")
         upload_data, unmatched = tasks.create_upload_data(
-            esid_file_pairs=[("120a", "/nonexistent/ESID_120a.zip")],
+            esid_folder_archives=[
+                ("120a", "/nonexistent", ["/nonexistent/ESID_120a.zip"])
+            ],
             data_collectors=[collector],
             project_config={},
         )

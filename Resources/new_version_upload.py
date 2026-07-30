@@ -108,7 +108,11 @@ import azus_common
 # The per-day prep marks dataset versions with a trailing suffix
 # ("2024.1.0A"); bump_version_label must recognize it, and importing the
 # constant from its owner means the two modules cannot drift.
-from prepare_dataset import DAY_ZIP_VERSION_SUFFIX
+from prepare_dataset import (
+    DAY_ZIP_VERSION_SUFFIX,
+    ZIP_MODE_SINGLE,
+    staging_zip_mode,
+)
 
 # The pipeline modules live at the project root, one level up.
 _PROJECT_ROOT = azus_common.PROJECT_ROOT
@@ -722,15 +726,32 @@ def preflight(
     if problems:
         return refuse(ZIP_AMBIGUOUS, "; ".join(problems[:4]))
 
-    digests: Dict[str, str] = {}
+    # _package_files only counts archives, and a SINGLE-DAY per-day folder
+    # holds exactly one — so it would slip through a count check straight
+    # into a model that assumes "replace THE zip".  Check the layout.
+    layout = staging_zip_mode(staging, esid)
+    if layout is not None and layout != ZIP_MODE_SINGLE:
+        return refuse(ZIP_AMBIGUOUS, (
+            f"{staging.name} holds a {layout} ZIP layout; new-version "
+            "upload supports the single-archive layout only (per-day is a "
+            "later phase)"
+        ))
+
+    # The gate takes the staging FOLDER and resolves the archives itself;
+    # this tool still handles exactly one archive (see _package_files).
+    digests: Dict[str, Dict[str, str]] = {}
     integrity = verify_dataset_integrity(
-        str(zip_path),
+        str(staging),
+        esid,
+        archives=[str(zip_path)],
         verify_zip_hash=not args.skip_integrity_hash,
         digests_out=digests,
     )
     if integrity:
         return refuse(INTEGRITY_FAILED, "; ".join(integrity[:4]))
-    known_md5s = {zip_path.name: digests["md5"]} if digests.get("md5") else {}
+    known_md5s = {
+        name: d["md5"] for name, d in digests.items() if d.get("md5")
+    }
 
     # --- Rebuild the metadata BEFORE any mutation ----------------------
     try:
@@ -1143,7 +1164,7 @@ def execute(
         request_log_path=None,
         upload_attempts=args.upload_attempts,
         known_md5s=plan.known_md5s,
-        zip_filename=plan.zip_path.name,
+        priority_files={plan.zip_path.name},
     )
     if not result.get("successful"):
         row["Verdict"] = UPLOAD_FAILED

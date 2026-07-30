@@ -429,13 +429,24 @@ printed and the upload is aborted cleanly.
 **What happens during upload:**
 1. Credentials loaded from environment variables
 2. Zenodo connectivity and write-permission verified
-3. Each `ESID_XXX/` subdirectory in `dataset_dir` is discovered
+3. Each `ESID_XXX/` subdirectory in `dataset_dir` is discovered — **one
+   prepared folder is one dataset is one Zenodo record**, whether it holds
+   the legacy `ESID_NNN.zip` or N per-day `ESID_NNN_YYYY_MM_DD.zip` archives.
+   A folder holding BOTH layouts is refused as incoherent.
 4. `ESID_XXX_to_upload.csv` manifest is read for each dataset
-5. All listed files are verified present before any upload begins
+5. All listed files are verified present before any upload begins, and the
+   integrity gate cross-checks every archive against `file_list.csv` —
+   per-day archives are checked against the WAV rows that belong to THEIR
+   day, so a WAV filed under the wrong day is caught
 6. Draft record created on Zenodo with full metadata
-7. Files uploaded one by one
+7. Files uploaded one by one: companions first, then the data archives in
+   ascending day order, so an interrupted record holds a contiguous run of
+   days.  `--upload-attempts` applies to every archive
 8. Results saved to `Records/successful_results.csv` or `failed_results.csv`
-9. Uploaded ZIPs tracked in `Records/uploaded_files.txt` to prevent re-uploads on re-runs
+9. Uploaded archives tracked in `Records/uploaded_files.txt` to prevent
+   re-uploads on re-runs; a dataset counts as done only when EVERY archive
+   is recorded, so a partly-uploaded site re-enters the pipeline and the
+   uploader skips the archives already committed remotely
 
 ---
 
