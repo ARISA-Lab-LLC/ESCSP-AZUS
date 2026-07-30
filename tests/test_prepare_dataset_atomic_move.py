@@ -286,18 +286,21 @@ class TestEndToEndReprep(unittest.TestCase):
         )
         return collectors
 
-    def _run_prep(self, fake_root: Path, source: Path, collectors: Path):
+    def _run_prep(self, fake_root: Path, source: Path, collectors: Path,
+                  *extra: str):
         return subprocess.run(
             [
                 sys.executable,
                 str(fake_root / "Resources" / "prepare_dataset.py"),
                 str(source),
                 "--collector-csv", str(collectors),
+                *extra,
             ],
             capture_output=True, text=True, cwd=fake_root,
         )
 
     def test_reprep_round_trips_upload_state_through_the_stash(self):
+        """The legacy (--single-zip) layout end to end, twice."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_root = self._build_fake_project(root)
@@ -311,7 +314,8 @@ class TestEndToEndReprep(unittest.TestCase):
             build_dir = source.parent / "ESID_005_Staging"
 
             # --- First prep: raw folder -> completed staging folder ---
-            result = self._run_prep(fake_root, source, collectors)
+            result = self._run_prep(fake_root, source, collectors,
+                                    "--single-zip")
             self.assertEqual(
                 result.returncode, 0, result.stdout + result.stderr
             )
@@ -343,7 +347,8 @@ class TestEndToEndReprep(unittest.TestCase):
             )
 
             # --- Second prep (re-prep): rmtree + rebuild + move ---
-            result = self._run_prep(fake_root, source, collectors)
+            result = self._run_prep(fake_root, source, collectors,
+                                    "--single-zip")
             self.assertEqual(
                 result.returncode, 0, result.stdout + result.stderr
             )
@@ -372,6 +377,58 @@ class TestEndToEndReprep(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertNotIn(_STATE_NAME, manifest)
+
+    def test_per_day_prep_moves_atomically_and_stashes_too(self):
+        """The default (per-day) layout through the same atomic-move path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_root = self._build_fake_project(root)
+            source = self._make_raw_esid(root)
+            # A second recording day, so the prep yields two archives.
+            write_wav(source / "20240409_090000.WAV", 5000)
+            collectors = self._make_collectors_csv(root)
+
+            staging_area = fake_root / "Staging_Area"
+            staged = staging_area / "ESID_005_Staging"
+            partial = staging_area / ".ESID_005_Staging.partial"
+            stash = staging_area / ".ESID_005_Staging.artifact_stash"
+
+            result = self._run_prep(fake_root, source, collectors)
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr
+            )
+            self.assertTrue((staged / ".prep_complete").exists())
+            for produced in (
+                "ESID_005_2024_04_08.zip",
+                "ESID_005_2024_04_09.zip",
+                "ESID_005_to_upload.csv",
+                "README.html",
+                "README.md",
+                "file_list.csv",
+                "total_eclipse_data.csv",
+            ):
+                self.assertTrue(
+                    (staged / produced).exists(), f"missing {produced}"
+                )
+            # The legacy single ZIP is NOT produced in this layout.
+            self.assertFalse((staged / "ESID_005.zip").exists())
+            self.assertFalse(partial.exists())
+            self.assertFalse(stash.exists())
+
+            # Re-prep round-trips the draft pointer exactly as in the
+            # legacy layout — the stash mechanism is layout-agnostic.
+            (staged / _STATE_NAME).write_text(
+                json.dumps(_STATE_PAYLOAD), encoding="utf-8"
+            )
+            result = self._run_prep(fake_root, source, collectors)
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr
+            )
+            state = json.loads(
+                (staged / _STATE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(state.get("record_id"), "424242")
+            self.assertFalse(stash.exists())
 
 
 if __name__ == "__main__":

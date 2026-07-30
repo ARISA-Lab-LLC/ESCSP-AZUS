@@ -125,13 +125,37 @@ _RESERVED_NAME_TAILS = (
     "_staging", "_uploaded", "_to_upload", "_metadata", "_request_log",
 )
 
+# The recording-day tail of a per-day ZIP name (ESID_073_2024_04_08.zip).
+# Anchored at the END so a Part suffix — itself digits and underscores —
+# is never mistaken for part of the day: ESID_122_Part_1_of_2_2024_04_08
+# splits after "_of_2", not inside the Part suffix.  Stripped like a
+# reserved tail before ESID parsing, because "_2024_04_08" is otherwise
+# legal ESID-suffix syntax and would poison the parse into the nonsense
+# ESID "073_2024_04_08".
+_DAY_NAME_TAIL_RE = re.compile(r"_(\d{4}_\d{2}_\d{2})$")
+
+# The LITERAL 8-digit day prefix of an AudioMoth WAV name
+# (20240408_120000.WAV).  Deliberately no calendar validation: an unset
+# AudioMoth clock stamps 1970 dates, and the per-day prep groups by
+# whatever the filename says rather than blocking on it — so 19700101
+# must parse, and a name with no 8-digit prefix must not.
+_WAV_DAY_PREFIX_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})")
+
+# Zenodo accepts at most 100 files per record:
+#   https://help.zenodo.org/docs/deposit/manage-files/
+# Shared by the file-by-file fallback (whose per-file set must fit) and
+# the per-day prep (whose day-ZIP count + companions must fit).
+ZENODO_MAX_FILES_PER_RECORD = 100
+
 
 def parse_esid(name: str) -> Optional[str]:
     """Extract the canonical ESID from a folder/file name.
 
     Accepts every naming variant the pipeline produces: ``ESID_073``,
     ``ESID#73``, ``ESID_4``, ``ESID_073_Staging``, ``ESID_073.zip``,
-    and suffixed ESIDs such as ``ESID_120A`` or
+    per-day ZIPs such as ``ESID_073_2024_04_08.zip`` (the date tail is
+    stripped like a reserved tail — it is never part of the ESID), and
+    suffixed ESIDs such as ``ESID_120A`` or
     ``ESID_122_Part_1_of_2_Staging``.  The grammar is enforced strictly:
     a digit run longer than three (``ESID_0733``) is malformed, and a
     suffixed ESID must start with the full three digits (``ESID_12A``
@@ -152,6 +176,10 @@ def parse_esid(name: str) -> Optional[str]:
         if lowered.endswith(tail):
             stem = stem[: -len(tail)]
             break
+    # A per-day ZIP's date tail is a name-template tail too, not ESID
+    # suffix: without this, ESID_073_2024_04_08 would parse as the
+    # nonsense ESID "073_2024_04_08".  (July 2026, per-day prep.)
+    stem = _DAY_NAME_TAIL_RE.sub("", stem)
     m = _ESID_NAME_RE.match(stem)
     if m is None:
         return None
@@ -159,6 +187,78 @@ def parse_esid(name: str) -> Optional[str]:
     if suffix and len(digits) != 3:
         return None
     return f"{int(digits):03d}{suffix}"
+
+
+def wav_day_key(filename: str) -> Optional[str]:
+    """Return a WAV's recording day, read LITERALLY from its filename.
+
+    AudioMoth firmware names recordings ``YYYYMMDD_HHMMSS.WAV``, so the
+    first 8 digits are the recording day.  This is THE grouping rule for
+    the per-day prep workflow — prep, verification, and the audits all
+    call this one function, so a file can never be grouped one way and
+    audited another.
+
+    Deliberately NO calendar validation: an unset AudioMoth clock stamps
+    1970 dates, and the workflow groups by whatever the filename says
+    (``19700101_000000.WAV`` → ``"1970_01_01"``) rather than blocking.
+    Only a name with no 8-digit prefix at all has nothing to group by.
+
+    Args:
+        filename: A WAV file basename (not a full path).
+
+    Returns:
+        The day as ``"YYYY_MM_DD"`` — the underscored form used in
+        per-day ZIP names — or None when the name does not start with
+        8 digits.
+    """
+    m = _WAV_DAY_PREFIX_RE.match(filename.strip())
+    if m is None:
+        return None
+    return f"{m.group(1)}_{m.group(2)}_{m.group(3)}"
+
+
+def day_zip_name(esid: str, day: str) -> str:
+    """Build a per-day ZIP file name.
+
+    Args:
+        esid: Canonical ESID string (``"073"``, ``"120A"``,
+            ``"122_Part_1_of_2"``).
+        day: Recording day as ``"YYYY_MM_DD"`` (from
+            :func:`wav_day_key`).
+
+    Returns:
+        The ZIP file name, e.g. ``"ESID_073_2024_04_08.zip"`` or
+        ``"ESID_122_Part_1_of_2_2024_04_08.zip"``.
+    """
+    return f"ESID_{esid}_{day}.zip"
+
+
+def parse_day_zip_name(name: str) -> Optional[Tuple[str, str]]:
+    """Split a per-day ZIP name into its ESID and recording day.
+
+    The inverse of :func:`day_zip_name`:
+    ``parse_day_zip_name(day_zip_name(esid, day)) == (esid, day)``.
+    The date tail is matched at the END of the stem, so a Part suffix —
+    itself digits and underscores — is handled correctly:
+    ``ESID_122_Part_1_of_2_2024_04_08.zip`` yields
+    ``("122_Part_1_of_2", "2024_04_08")``.
+
+    Args:
+        name: A file basename (not a full path).
+
+    Returns:
+        A ``(canonical_esid, day)`` tuple, or None when the name is not
+        a per-day ZIP name (no date tail, or no valid ESID before it) —
+        a legacy ``ESID_073.zip`` returns None here, not a half-parse.
+    """
+    stem = _NAME_EXTENSION_RE.sub("", name.strip())
+    m = _DAY_NAME_TAIL_RE.search(stem)
+    if m is None:
+        return None
+    esid = parse_esid(stem[: m.start()])
+    if esid is None:
+        return None
+    return esid, m.group(1)
 
 
 def normalize_esid(raw: object) -> str:

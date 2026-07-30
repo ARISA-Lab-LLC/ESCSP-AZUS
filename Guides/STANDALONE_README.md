@@ -71,10 +71,26 @@ python standalone_tasks.py
 These are convenience wrappers around the main code path:
 
 - **Resources/prepare_dataset.py** — prepare ONE raw ESID folder into a
-  Zenodo-ready staging package (generates README, ZIP, manifests, metadata).
+  Zenodo-ready staging package (generates README, ZIPs, manifests, metadata).
+  **Default layout (July 2026): one ZIP per recording day** —
+  `ESID_NNN_YYYY_MM_DD.zip`, day taken literally from the WAV filename
+  prefix (an unset-clock `19700101_…` file groups under `1970_01_01` rather
+  than blocking; only a WAV with no 8-digit prefix refuses the prep). Each
+  day ZIP holds that day's WAVs + a copy of CONFIG.TXT and nothing else;
+  the metadata companions stay standalone on the record; `file_list.csv`
+  carries one ZIP row per archive and each WAV row names its archive. The
+  dataset version is marked with a trailing `A` (`2024.1.0` → `2024.1.0A`)
+  so per-day records are unambiguous. A site whose day count would exceed
+  Zenodo's 100-files-per-record cap (~85 days with the standard
+  companions) is refused before the first ZIP byte. `--single-zip`
+  preserves the legacy one-archive layout with metadata appended inside.
+  ⚠️ **The upload pipeline does not handle per-day folders yet** — do not
+  feed them to `standalone_tasks.py` until that phase lands.
 - **Resources/prep_all_datasets.py** — batch-prepare every ESID under a
   top-level raw-data folder, in numerical order, skipping any ESID
   already prepared (folder exists in `Staging_Area/` or `Uploaded_Data/`).
+  Preps in the per-day layout by default; `--single-zip` is forwarded to
+  `prepare_dataset.py` for the legacy layout.
 - **Resources/finish_stuck_uploads.py** — scan `Staging_Area/` for ESIDs
   with `upload_state.json` (interrupted uploads) and finish them via
   `standalone_tasks.py --esid <discovered list> --workers N`. With the

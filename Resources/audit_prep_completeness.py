@@ -269,7 +269,9 @@ def raw_has_config_txt(raw_folder: Path) -> bool:
 
 
 def expected_folder_basenames(
-    esid_padded: str, companions: Iterable[str]
+    esid_padded: str,
+    companions: Iterable[str],
+    day_zip_names: Optional[Iterable[str]] = None,
 ) -> Set[str]:
     """Compute the required-file set for a staging or uploaded folder.
 
@@ -285,12 +287,26 @@ def expected_folder_basenames(
         esid_padded: 3-digit ESID number string (e.g. ``"073"``).
         companions: Companion-file basenames from
             ``resource_files_list.csv``.
+        day_zip_names: For a PER-DAY folder, the expected day-ZIP names
+            (from ``prepare_dataset.expected_day_zip_names``); they
+            replace the legacy single ``ESID_NNN.zip`` in the set.
+            None (the default) means the legacy single-zip layout.
 
     Returns:
         The set of file basenames expected directly in the staging or
-        uploaded folder (hardcoded outputs + companions + conditionals).
+        uploaded folder (prep outputs + companions + conditionals).
     """
-    expected = {template.format(esid=esid_padded) for template in _HARDCODED_STAGING_FILES}
+    if day_zip_names is None:
+        expected = {
+            template.format(esid=esid_padded)
+            for template in _HARDCODED_STAGING_FILES
+        }
+    else:
+        expected = {
+            template.format(esid=esid_padded)
+            for template in _prep_contract.STAGING_OUTPUT_FILES_COMMON
+        }
+        expected.update(day_zip_names)
     expected.update(companions)
     # Conditional files belong in the expected set so their absence is
     # detected; ``audit_one_esid`` then routes that detection to the
@@ -390,6 +406,135 @@ def list_zip_contents(zip_path: Path) -> Optional[Set[str]]:
 # Per-ESID audit
 # =====================================================================
 
+def audit_day_zips(
+    esid_padded: str,
+    raw_folder: Path,
+    target_folder: Path,
+    companions: List[str],
+) -> Tuple[str, List[str]]:
+    """Audit a PER-DAY staging or uploaded folder for completeness.
+
+    The expectation comes from the prep contract's own grouping rule
+    (``prepare_dataset.expected_day_zip_names``, which calls the same
+    ``azus_common.wav_day_key`` the prep used), so a folder can never be
+    grouped one way and audited another.  Each expected day ZIP must be
+    present and readable, and its contents must be EXACTLY that day's
+    raw WAVs plus CONFIG.TXT (when the raw folder has one) — exact
+    per-day equality is what certifies that every raw WAV is covered
+    exactly once across the archives, that none leaked into a foreign
+    day's ZIP, and that no metadata entries snuck in (per-day ZIPs
+    carry none by design).
+
+    Args:
+        esid_padded: Canonical ESID string (e.g. ``"073"``).
+        raw_folder: The original raw ESID folder.
+        target_folder: The Staging_Area or Uploaded_Data folder being
+            audited.
+        companions: Companion-file basenames from
+            ``resource_files_list.csv``.
+
+    Returns:
+        ``(status, details)`` with the same semantics as
+        :func:`audit_one_esid`.
+    """
+    missing: List[str] = []
+
+    try:
+        expected_zip_names = _prep_contract.expected_day_zip_names(
+            esid_padded, raw_folder
+        )
+    except ValueError as exc:
+        # A raw WAV with no 8-digit prefix cannot belong to any day ZIP,
+        # so this folder cannot have been per-day prepped from THIS raw
+        # folder — the truth set is underivable, not provably wrong.
+        return ("Ambiguous", [f"cannot derive the day-ZIP set: {exc}"])
+
+    # ---- Folder-side check (Set A, with day ZIPs in place of the
+    #      legacy single ZIP) ----
+    expected_folder = expected_folder_basenames(
+        esid_padded, companions, day_zip_names=expected_zip_names
+    )
+    actual_folder = {p.name for p in target_folder.iterdir() if p.is_file()}
+    folder_misses = expected_folder - actual_folder
+    required_folder_misses = folder_misses - set(_CONDITIONAL_FILES)
+    missing.extend(
+        f"folder missing: {name}" for name in sorted(required_folder_misses)
+    )
+
+    # A day ZIP for a day with no raw audio is as wrong as a missing one.
+    actual_zip_names = {
+        p.name for p in target_folder.iterdir()
+        if p.is_file()
+        and (parsed := azus_common.parse_day_zip_name(p.name)) is not None
+        and parsed[0] == esid_padded
+    }
+    missing.extend(
+        f"day ZIP exists for a day with no raw audio: {name}"
+        for name in sorted(actual_zip_names - set(expected_zip_names))
+    )
+
+    # ---- Per-ZIP contents: exactly that day's WAVs (+ CONFIG.TXT) ----
+    raw_by_day: Dict[str, Set[str]] = {}
+    for wav_name in list_raw_wavs(raw_folder):
+        day = azus_common.wav_day_key(wav_name)
+        if day is not None:  # None is unreachable past the guard above
+            raw_by_day.setdefault(day, set()).add(wav_name)
+    has_config = raw_has_config_txt(raw_folder)
+
+    ambiguities: List[str] = []
+    for zip_name in expected_zip_names:
+        zip_path = target_folder / zip_name
+        if not zip_path.is_file():
+            continue  # already reported as a folder miss
+        contents = list_zip_contents(zip_path)
+        if contents is None:
+            ambiguities.append(
+                f"Could not read the ZIP index of {zip_name} — "
+                "archive corrupt?"
+            )
+            continue
+        parsed = azus_common.parse_day_zip_name(zip_name)
+        day = parsed[1] if parsed else ""
+        expected_contents = set(raw_by_day.get(day, set()))
+        if has_config:
+            expected_contents.add("CONFIG.TXT")
+        # Normalize a lowercase CONFIG.txt copy the same way the
+        # single-zip path tolerates it.
+        normalized = {
+            "CONFIG.TXT" if n.upper() == "CONFIG.TXT" else n
+            for n in contents
+        }
+        missing.extend(
+            f"{zip_name} missing: {name}"
+            for name in sorted(expected_contents - normalized)
+        )
+        missing.extend(
+            f"{zip_name} unexpected entry: {name}"
+            for name in sorted(normalized - expected_contents)
+        )
+
+    if missing:
+        return ("No", missing)
+
+    # ---- Conditional-file and CONFIG ambiguities (mirror steps 5-6) ----
+    for cond in _CONDITIONAL_FILES:
+        if cond in folder_misses:
+            ambiguities.append(
+                f"folder missing conditional file: {cond} "
+                f"(could be intentional — depends on site Keywords)"
+            )
+    if not has_config:
+        ambiguities.append(
+            "CONFIG.TXT absent from the raw folder (and therefore from "
+            "every day ZIP) — could be intentional for a site without a "
+            "real device config."
+        )
+
+    if ambiguities:
+        return ("Ambiguous", ambiguities)
+    return ("Yes", [])
+
+
 def audit_one_esid(
     esid_padded: str,
     raw_folder: Path,
@@ -410,6 +555,11 @@ def audit_one_esid(
 
       0. Fast path: if the sentinel exists and ``audit_all`` is False,
          return ``("Yes", [])`` immediately.
+      0b. Layout routing (July 2026): no data ZIP at all → ``"No"``;
+          BOTH layouts present (mixed) → ``"No"``;
+          ``resource_files_list.csv`` couldn't be loaded → ``"Ambiguous"``;
+          a PER-DAY folder → :func:`audit_day_zips`; a single-zip
+          folder continues with the legacy rules below.
       1. ZIP missing → ``"No"`` unambiguously.
       2. ``resource_files_list.csv`` couldn't be loaded → ``"Ambiguous"``.
       3. ZIP exists but its index couldn't be read → ``"Ambiguous"``.
@@ -445,16 +595,33 @@ def audit_one_esid(
         )
         return ("Yes", [])
 
-    # ---- Step 1: ZIP must exist ----
+    # ---- Step 0b: layout routing ----
     zip_name = f"ESID_{esid_padded}.zip"
-    zip_path = target_folder / zip_name
-    if not zip_path.is_file():
-        missing.append(f"ZIP archive missing: {zip_name}")
+    mode = _prep_contract.staging_zip_mode(target_folder, esid_padded)
+    if mode is None:
+        missing.append(
+            f"ZIP archive missing: neither {zip_name} nor any "
+            f"ESID_{esid_padded}_YYYY_MM_DD.zip is present"
+        )
         return ("No", missing)
+    if mode == _prep_contract.ZIP_MODE_MIXED:
+        return ("No", [
+            "both the single-site ZIP and per-day ZIPs are present — a "
+            "mixed layout no prep produces; re-prep this folder"
+        ])
 
     # ---- Step 2: companion list is required to determine truth set ----
+    # (Moved ahead of the layout branch — both layouts need it.)
     if companions is None:
         return ("Ambiguous", ["Could not load Resources/resource_files_list.csv"])
+
+    if mode == _prep_contract.ZIP_MODE_PER_DAY:
+        return audit_day_zips(
+            esid_padded, raw_folder, target_folder, companions
+        )
+
+    # ---- Legacy single-zip audit (steps 1/3-7, unchanged) ----
+    zip_path = target_folder / zip_name
 
     # ---- Step 3: enumerate ZIP contents ----
     zip_contents = list_zip_contents(zip_path)

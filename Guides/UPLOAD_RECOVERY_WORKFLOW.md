@@ -290,6 +290,17 @@ interrupted — continue it), `ZIP_ALREADY_COMMITTED` (nothing to do), and why
 each of the rest was skipped. Every verdict has a recommended action in the
 module docstring.
 
+> **Set your expectations from the first production scan (2026-07-29).** Of 100
+> in-scope drafts: 58 `TOO_MANY_FILES`, 24 `COMPANIONS_MISSING`, **13
+> `CONVERTIBLE`**, 5 `NO_STAGING_FOLDER`. The oversized 58 run from 291 to 6315
+> WAVs — the smallest is still 3× Zenodo's 100-file cap, so **no `--max-files`
+> value reaches any of them** and the ZIP is their only vehicle. File-by-file is
+> a fix for small sites; it is not the answer for the bulk of the backlog.
+>
+> The scan does earn its keep though: 6 of those 13 (103, 147, 201, 211, 232,
+> 350) have no `record_id` on disk at all, so `finish_stuck_uploads.py` cannot
+> see them by any invocation.
+
 What it does that the state-file path cannot:
 
 - **Recovers the draft pointer.** For a `CONVERTIBLE` ESID with no state file,

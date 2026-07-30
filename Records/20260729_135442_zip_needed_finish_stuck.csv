@@ -1,0 +1,83 @@
+ESID#,Record ID,Verdict,Raw File Count,Total Files,Companions Committed,Reason
+149,21058672,COMPANIONS_MISSING,13,28,12/15,3 companions not committed — needs the companions and the ZIP
+198,21656867,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+251,21513070,TOO_MANY_FILES,1026,1041,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+284,21498671,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+293,21565698,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+314,21504552,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+325,21589044,TOO_MANY_FILES,1025,1040,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+337,21505934,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+371,21496092,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+378,21581902,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+404,21571051,TOO_MANY_FILES,1020,1035,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+445,21501949,TOO_MANY_FILES,906,921,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+451,21587284,TOO_MANY_FILES,850,865,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+465,21502945,TOO_MANY_FILES,291,306,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+509,21565064,TOO_MANY_FILES,1018,1033,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+530,21656151,COMPANIONS_MISSING,13,28,0/15,15 companions not committed — needs the companions and the ZIP
+656,21656940,TOO_MANY_FILES,6165,6180,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+657,21638683,TOO_MANY_FILES,5907,5922,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+659,21668451,TOO_MANY_FILES,6275,6290,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+660,21655318,TOO_MANY_FILES,6061,6076,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+661,21658306,TOO_MANY_FILES,6263,6278,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+665,21655432,TOO_MANY_FILES,6082,6097,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+666,21669500,TOO_MANY_FILES,6307,6322,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+667,21656796,TOO_MANY_FILES,6162,6177,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+668,21672219,TOO_MANY_FILES,6315,6330,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+670,21656725,TOO_MANY_FILES,6157,6172,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+674,21657030,TOO_MANY_FILES,6174,6189,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+676,21656457,TOO_MANY_FILES,6153,6168,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+677,21656527,TOO_MANY_FILES,6153,6168,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+679,21657835,TOO_MANY_FILES,6216,6231,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+683,21655655,TOO_MANY_FILES,6094,6109,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+684,21657877,TOO_MANY_FILES,6219,6234,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+685,21657744,TOO_MANY_FILES,6213,6228,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+688,21657956,TOO_MANY_FILES,6237,6252,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+689,21669719,TOO_MANY_FILES,6309,6324,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+690,21657675,TOO_MANY_FILES,6211,6226,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+691,21627742,TOO_MANY_FILES,5762,5777,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+693,21669184,TOO_MANY_FILES,6294,6309,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+699,21657490,TOO_MANY_FILES,6195,6210,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+703,21655989,TOO_MANY_FILES,6136,6151,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+705,21657294,TOO_MANY_FILES,6187,6202,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+706,21658096,TOO_MANY_FILES,6239,6254,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+710,21668701,TOO_MANY_FILES,6278,6293,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+712,21655827,TOO_MANY_FILES,6126,6141,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+720,21656062,TOO_MANY_FILES,6135,6150,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+724,21657145,TOO_MANY_FILES,6184,6199,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+727,21649984,TOO_MANY_FILES,6006,6021,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+729,21668906,TOO_MANY_FILES,6287,6302,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+730,21656667,TOO_MANY_FILES,6157,6172,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+733,21656226,TOO_MANY_FILES,6140,6155,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+738,21657616,TOO_MANY_FILES,6210,6225,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+741,21658426,TOO_MANY_FILES,6270,6285,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+758,21612789,COMPANIONS_MISSING,9,24,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+761,21619566,TOO_MANY_FILES,5972,5987,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+763,21627690,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+797,21658375,TOO_MANY_FILES,6270,6285,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+803,21656425,TOO_MANY_FILES,6149,6164,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+805,21511989,TOO_MANY_FILES,1169,1184,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+806,21657430,COMPANIONS_MISSING,12,27,0/15,15 companions not committed — needs the companions and the ZIP
+820,21669045,COMPANIONS_MISSING,11,26,0/15,15 companions not committed — needs the companions and the ZIP
+828,21669345,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+834,21655614,COMPANIONS_MISSING,11,26,0/15,15 companions not committed — needs the companions and the ZIP
+835,21657226,COMPANIONS_MISSING,11,26,0/15,15 companions not committed — needs the companions and the ZIP
+846,21657352,COMPANIONS_MISSING,12,27,0/15,15 companions not committed — needs the companions and the ZIP
+849,21656290,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+870,21580943,COMPANIONS_MISSING,15,30,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+872,21589498,TOO_MANY_FILES,1018,1033,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+881,21656593,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+890,21655130,COMPANIONS_MISSING,28,43,0/15,15 companions not committed — needs the companions and the ZIP
+906,21655877,COMPANIONS_MISSING,15,30,0/15,15 companions not committed — needs the companions and the ZIP
+914,21584490,TOO_MANY_FILES,1023,1038,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+916,21619793,TOO_MANY_FILES,1438,1453,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+918,21602595,TOO_MANY_FILES,847,862,15/15,exceeds --max-files 96 — the ZIP is the only vehicle
+920,21612196,COMPANIONS_MISSING,27,42,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+922,21655931,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+933,21658149,COMPANIONS_MISSING,10,25,0/15,15 companions not committed — needs the companions and the ZIP
+937,21606298,COMPANIONS_MISSING,10,25,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+938,21655048,COMPANIONS_MISSING,13,28,0/15,15 companions not committed — needs the companions and the ZIP
+940,21600864,COMPANIONS_MISSING,7,22,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+948,21614140,COMPANIONS_MISSING,12,27,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+960,21619224,COMPANIONS_MISSING,12,27,14/15,1 companion not committed (file_list.csv) — needs the companion and the ZIP
+962,21655775,TOO_MANY_FILES,6104,6119,15/15,exceeds --max-files 96 — the ZIP is the only vehicle

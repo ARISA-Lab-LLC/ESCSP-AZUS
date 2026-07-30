@@ -288,6 +288,7 @@ def already_prepared(esid_padded: str) -> Optional[Path]:
 def run_prepare_dataset(
     esid_folder: Path,
     config_path: str,
+    single_zip: bool = False,
 ) -> int:
     """Invoke ``prepare_dataset.py`` as a subprocess and return its exit code.
 
@@ -316,6 +317,9 @@ def run_prepare_dataset(
             The eclipse type is not passed — prepare_dataset.py reads it
             from each ESID's "Local Eclipse Type" cell in the collector
             CSV named by the config.
+        single_zip: Forward ``--single-zip`` (the legacy one-archive
+            layout).  Off by default — the per-day layout is
+            prepare_dataset.py's own default and needs no flag.
 
     Returns:
         The subprocess exit code.  0 = success.  Anything else =
@@ -327,6 +331,8 @@ def run_prepare_dataset(
         str(esid_folder),                                 # positional: the raw ESID dir
         "--config", config_path,
     ]
+    if single_zip:
+        cmd.append("--single-zip")
     logger.info("Running: %s", " ".join(cmd))
     # subprocess.run blocks until the child process exits.  No timeout —
     # preparing a multi-GB site can legitimately take a long time.
@@ -373,6 +379,14 @@ def main() -> None:
             "(header row optional); numbers and CSV paths may be mixed. "
             "Without this flag, every ESID folder is prepared in numerical "
             "order."
+        ),
+    )
+    parser.add_argument(
+        "--single-zip", action="store_true",
+        help=(
+            "Forwarded to prepare_dataset.py: build the legacy single "
+            "ESID_NNN.zip instead of the default one-ZIP-per-recording-day "
+            "layout."
         ),
     )
     parser.add_argument(
@@ -518,6 +532,7 @@ def main() -> None:
             rc = run_prepare_dataset(
                 esid_folder=folder,
                 config_path=args.config,
+                single_zip=args.single_zip,
             )
         except Exception as exc:
             logger.error("  FAILED — could not spawn subprocess: %s", exc)

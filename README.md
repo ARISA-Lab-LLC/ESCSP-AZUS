@@ -93,6 +93,26 @@ Python code.
   progress file: every run re-derives state from Zenodo and disk, so an
   interrupted conversion re-classifies as `RESUMABLE` and continues. Covered by
   `tests/test_finish_zip_only_drafts.py`.
+- **Per-day ZIP layout (the prep default, July 2026)** — multi-GB single
+  archives are the pipeline's dominant upload failure (58 of 100 stuck drafts
+  in the 2026-07-29 scan), so `prepare_dataset.py` now packs **one ZIP per
+  recording day**: `ESID_NNN_YYYY_MM_DD.zip`, the day read literally from the
+  WAV filename prefix (an unset-clock `19700101_…` groups under `1970_01_01`
+  rather than blocking; a WAV with no 8-digit prefix refuses the prep, naming
+  the offenders). Each day ZIP holds that day's WAVs plus a copy of
+  `CONFIG.TXT` and nothing else — the metadata companions stay standalone on
+  the record. `file_list.csv` carries one ZIP row per archive and every WAV
+  row names the archive that holds it. Records prepped this way are marked by
+  a trailing `A` on the dataset version (`2024.1.0A`), and
+  `new_version_upload.py`'s bump rule continues its revision ladder after the
+  marker (`2024.1.0A` → `2024.1.0Aa`). A site whose day count would blow
+  Zenodo's 100-files-per-record cap is refused before the first ZIP byte.
+  `--single-zip` (also on `prep_all_datasets.py`) preserves the legacy
+  layout. Both audit tools understand both layouts. ⚠️ The upload pipeline
+  does not handle per-day folders yet — that is the next phase; do not feed
+  them to `standalone_tasks.py` until it lands. Covered by
+  `tests/test_prepare_dataset_day_zips.py`, `tests/test_azus_common_day_names.py`,
+  and `tests/test_audit_prep_completeness_day_zips.py`.
 - **Interrupted-prep detection** — `prepare_dataset.py` moves into
   `Staging_Area/` via a two-phase atomic pattern and writes a `.prep_complete`
   sentinel file as its very last action. `prep_all_datasets.py`'s skip check

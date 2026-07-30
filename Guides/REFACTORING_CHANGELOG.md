@@ -1,5 +1,84 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — per-day ZIP layout: one archive per recording day (the new prep default)
+
+Multi-GB single ZIPs are the pipeline's dominant upload failure — they time out
+repeatedly, losing hours per attempt, and the 2026-07-29 production scan showed 58
+of 100 stuck drafts are exactly this. Going forward every ESID is prepped as **one
+ZIP per recording day** (`ESID_NNN_YYYY_MM_DD.zip`, suffixed ESIDs included:
+`ESID_122_Part_1_of_2_2024_04_08.zip`); small archives rarely time out and a single
+failure is cheap to retry. All of an ESID's day ZIPs still go to ONE Zenodo record.
+
+**Decisions (user-confirmed):**
+
+- **The day is the LITERAL 8-digit prefix of the WAV filename** — one grouping
+  rule, `azus_common.wav_day_key`, shared by prep, verification, and the audits so
+  a file can never be grouped one way and audited another. An unset AudioMoth
+  clock's `19700101_…` files group under `1970_01_01` rather than blocking; only a
+  WAV with no 8-digit prefix refuses the prep (fatal, offenders named).
+- **Day ZIPs are lean**: that day's WAVs + a copy of CONFIG.TXT (first entry, as
+  always) and NOTHING else. The metadata companions live once on the record;
+  `add_files_to_zip` does not run in this layout, which also kills the
+  internal/external file-list two-step — the archives are final the moment they
+  are written.
+- **Entries sit under the ZIP-stem subfolder** (`ESID_005_2024_04_08/`), so
+  extracting several day archives side by side never collides.
+- **`file_list.csv`: one ZIP row per archive** (first, in day order), each WAV
+  row's Notes names its archive, CONFIG.TXT's row notes the per-ZIP copies.
+- **The dataset version gains a trailing `A`** (`2024.1.0` → `2024.1.0A`),
+  applied once to the in-memory collector row so `total_eclipse_data.csv` and the
+  README inherit it. Idempotent. `new_version_upload.bump_version_label` now
+  treats the marker as base version and continues its lowercase ladder after it
+  (`2024.1.0A` → `2024.1.0Aa`) instead of refusing. NOTE: the Zenodo record's
+  version METADATA is set at upload time from the master collectors CSV — the
+  upload phase must source it from the staged CSV for the `A` to reach the record.
+- **The Zenodo file cap is enforced before the first ZIP byte**:
+  day count + companions vs `azus_common.ZENODO_MAX_FILES_PER_RECORD` (hoisted
+  from `file_by_file_upload`, which now aliases it) — ~85 days with the standard
+  companion set. Over-long deployments are refused with the remediations named.
+- **`--single-zip` preserves the legacy layout byte-for-byte** (on
+  `prepare_dataset.py` and forwarded by `prep_all_datasets.py`); needed for
+  re-preps of already-published single-ZIP records, which
+  `new_version_upload.py` expects to hold exactly one archive.
+
+**Naming infrastructure** (`azus_common`): `wav_day_key`, `day_zip_name`,
+`parse_day_zip_name` (end-anchored date tail, so Part suffixes — themselves
+digits and underscores — parse correctly), and **`parse_esid` now strips a
+trailing `_YYYY_MM_DD` like a reserved tail** — without that, every day-ZIP name
+would parse as the nonsense suffixed ESID `"007_2024_04_08"` and match no
+collector row, manifest, or staging folder. All 14 existing call sites parse
+folder or ZIP basenames; none legitimately carries a date tail.
+
+**Verification & audits**: `verify_day_zips_against_source` re-groups a FRESH
+disk scan by day and requires exact per-day equality — which simultaneously
+proves every disk WAV is covered exactly once, none leaked into a foreign day's
+archive, and no metadata snuck in — plus CONFIG.TXT in every archive; zero-byte
+WAVs warn-not-fail as before. `audit_prep_completeness` routes on the new
+`staging_zip_mode` contract function (`single` / `per_day` / `mixed` — mixed is
+a hard No) and audits per-day folders via `expected_day_zip_names`, the same
+grouping rule prep used; single-zip folders go through the untouched legacy
+rules. `audit_wav_integrity` gained `locate_zips` / `scan_zips_wavs` (merged
+stats; a WAV basename in two archives is a discrepancy).
+
+**Deliberately NOT in this phase — the upload pipeline.** `standalone_tasks.py`
+still assumes one ZIP per folder: it would mint one draft per day-ZIP and its
+integrity gate compares all WAVs against a single archive. **Per-day staging
+folders must not be fed to `standalone_tasks.py` until the upload phase lands.**
+Known touch-points are listed in the plan: `get_upload_data`,
+`verify_dataset_integrity`, `get_recording_dates`, `zip_filename` retry scoping,
+`known_md5s`, `archive_staging_to_uploaded`, `--defer-zip`, and the recovery
+tools (`file_by_file_upload._zip_name`, `finish_zip_only_drafts`,
+`new_version_upload` ZIP_AMBIGUOUS, `clean_raw_staging_leftovers._single_zip`,
+`refresh_readme`'s ZIP-row precondition).
+
+Tests: `tests/test_azus_common_day_names.py` (16),
+`tests/test_prepare_dataset_day_zips.py` (29, incl. both layouts end-to-end
+through the real CLI), `tests/test_audit_prep_completeness_day_zips.py` (16),
+extensions to `tests/test_audit_wav_integrity.py`,
+`tests/test_prepare_dataset_atomic_move.py` (per-day sibling; legacy case pinned
+to `--single-zip`), and `tests/test_new_version_upload.py` (marker ladder).
+Suite: 859 tests, docstring audit 0 gaps.
+
 ## July 2026 — discover ZIP-only drafts from Zenodo, not from local state files
 
 `finish_stuck_uploads.py` finds work by scanning `Staging_Area/` for
@@ -65,7 +144,60 @@ Decisions worth recording:
   safe. Sharing one function would have meant a behaviour flag, so the ~15
   lines live locally instead.
 
-Tests: `tests/test_finish_zip_only_drafts.py`, 79 tests, no network.
+Tests: `tests/test_finish_zip_only_drafts.py`, no network.
+
+### What the first production scan found, and the two fixes it forced
+
+The first full read-only scan classified **100 in-scope drafts** (234 account
+records: 100 drafts, 105 published, 29 non-ESID titles) in 54 seconds:
+
+| Verdict | Count |
+|---|---|
+| `TOO_MANY_FILES` | 58 |
+| `COMPANIONS_MISSING` | 24 |
+| `CONVERTIBLE` | 13 |
+| `NO_STAGING_FOLDER` | 5 |
+
+**The premise held.** 6 of the 13 convertible drafts — 103, 147, 201, 211, 232,
+350 — carry no `record_id` locally at all, so `finish_stuck_uploads.py` cannot
+see them. Those are the drafts this tool exists to reach.
+
+**But file-by-file serves a small minority.** The 58 oversized drafts run from
+291 to 6315 WAVs; the *smallest* is still 3× Zenodo's 100-file cap, so no
+`--max-files` value reaches any of them. For those the ZIP is the only vehicle,
+which means ZIP upload reliability — not this tool — is where the remaining
+value is. Recorded here so the next person does not re-derive it.
+
+Two defects the scan exposed:
+
+1. **The `TOO_MANY_FILES` advice was wrong**, on 58% of the output. It
+   recommended `split_oversized_raw_folders.py`, which handles
+   `_Part_N_of_2` **pairs only** and carries its own
+   `a half still exceeds the limit` verdict. A 6307-WAV site needs ~78
+   records, not 2. New `records_needed` / `split_advice` compute what the
+   site would actually take — accounting for the companion set being
+   repeated in every record, so the usable slots are `max_files -
+   companions` — and recommend a split only when two records genuinely
+   suffice (97–162 raw files at the default). The static
+   `_RECOMMENDED_ACTION` text now points at the Notes column instead of
+   guessing.
+2. **`{esid: folder}` was last-wins on a one-to-many relationship.**
+   `azus_common.parse_esid` strips the `_staging` / `_uploaded` tails, so a
+   leftover `Raw_Data/ESID_055_Staging` resolves to ESID 055 exactly as
+   `Raw_Data/ESID#055` does — and three scan rows showed such a leftover as
+   their Raw Folder. The dict comprehension silently kept whichever came
+   last in directory order, so the tool could have hashed and uploaded from
+   a stale staging leftover. New `index_esid_folders` returns
+   `{esid: [folder, ...]}`, `LocalPackage` carries both lists, and a new
+   `AMBIGUOUS_LOCAL_FOLDER` verdict **refuses** — checked ahead of every
+   other gate, because a count derived from the wrong folder is worse than
+   no answer.
+
+Also fixed a vacuous test: `test_hash_columns_are_empty_without_the_flag`
+iterated the detail rows to assert their hash columns were empty, so zero rows
+passed. It now asserts the row count first.
+
+Suite: 788 tests, docstring audit 0 gaps.
 
 ### The bug this found: `run_file_by_file` was not idempotent
 

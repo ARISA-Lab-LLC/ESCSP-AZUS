@@ -105,6 +105,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import azus_common
+# The per-day prep marks dataset versions with a trailing suffix
+# ("2024.1.0A"); bump_version_label must recognize it, and importing the
+# constant from its owner means the two modules cannot drift.
+from prepare_dataset import DAY_ZIP_VERSION_SUFFIX
 
 # The pipeline modules live at the project root, one level up.
 _PROJECT_ROOT = azus_common.PROJECT_ROOT
@@ -278,10 +282,14 @@ _RECOMMENDED_ACTION = {
 def bump_version_label(current: Optional[str]) -> str:
     """Advance a version label by its trailing revision letter.
 
-    ``2024.1.0`` -> ``2024.1.0a`` -> ``2024.1.0b``.  The rule refuses
-    anything it cannot advance unambiguously rather than inventing a
-    convention: silently turning ``1.0-beta`` into ``1.0-betb`` would put
-    a nonsense version on a permanent public record.
+    ``2024.1.0`` -> ``2024.1.0a`` -> ``2024.1.0b``.  The per-day prep's
+    version marker (:data:`DAY_ZIP_VERSION_SUFFIX`, ``"A"``) is treated
+    as part of the BASE version, and the lowercase revision ladder
+    continues after it: ``2024.1.0A`` -> ``2024.1.0Aa`` ->
+    ``2024.1.0Ab``.  Beyond that, the rule refuses anything it cannot
+    advance unambiguously rather than inventing a convention: silently
+    turning ``1.0-beta`` into ``1.0-betb`` would put a nonsense version
+    on a permanent public record.
 
     Args:
         current: The published record's ``metadata.version``.
@@ -310,6 +318,23 @@ def bump_version_label(current: Optional[str]) -> str:
         )
     if not suffix:
         return stem + "a"
+
+    # The per-day marker is base version, not a revision letter: start
+    # (or continue) the lowercase ladder after it.
+    if suffix == DAY_ZIP_VERSION_SUFFIX:
+        return text + "a"
+    if (
+        len(suffix) == 2
+        and suffix[0] == DAY_ZIP_VERSION_SUFFIX
+        and suffix[1].islower()
+    ):
+        if suffix[1] == "z":
+            raise ValueError(
+                f"Version {text!r} has reached 'z' — 26 letter revisions "
+                "means something else is wrong" + escape
+            )
+        return text[:-1] + chr(ord(suffix[1]) + 1)
+
     if len(suffix) > 1:
         raise ValueError(
             f"Version {text!r} ends in more than one letter ({suffix!r}), so "

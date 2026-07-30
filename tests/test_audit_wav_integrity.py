@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 
@@ -275,6 +276,102 @@ class TestScanZipAndMatch(unittest.TestCase):
         stats, err = m.scan_zip_wavs(zp, 1)
         self.assertIsNone(stats)
         self.assertIsNotNone(err)
+
+
+class TestPerDayZips(unittest.TestCase):
+    """Multi-archive discovery + merged stats for the per-day layout."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.staging = self.d / "Staging_Area" / "ESID_073_Staging"
+        self.staging.mkdir(parents=True)
+        (self.d / "Uploaded_Data").mkdir()
+        for attr, value in (("_STAGING_AREA", self.d / "Staging_Area"),
+                            ("_UPLOADED_DATA", self.d / "Uploaded_Data")):
+            patcher = unittest.mock.patch.object(m, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _day_zip(self, day, entries):
+        zp = self.staging / f"ESID_073_{day}.zip"
+        stem = zp.stem
+        with zipfile.ZipFile(zp, "w") as zf:
+            for name, data in entries:
+                zf.writestr(f"{stem}/{name}", data)
+        return zp
+
+    def test_locate_zips_finds_every_day_archive(self):
+        self._day_zip("2024_04_08", [("A.WAV", b"x")])
+        self._day_zip("2024_04_09", [("B.WAV", b"y")])
+        zips, location = m.locate_zips("073")
+        self.assertEqual(location, "Staging")
+        self.assertEqual(
+            [z.name for z in zips],
+            ["ESID_073_2024_04_08.zip", "ESID_073_2024_04_09.zip"],
+        )
+
+    def test_locate_zips_ignores_other_esids_day_archives(self):
+        self._day_zip("2024_04_08", [("A.WAV", b"x")])
+        (self.staging / "ESID_074_2024_04_08.zip").write_bytes(b"PK")
+        zips, _ = m.locate_zips("073")
+        self.assertEqual([z.name for z in zips],
+                         ["ESID_073_2024_04_08.zip"])
+
+    def test_locate_zips_single_layout_unchanged(self):
+        zp = self.staging / "ESID_073.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("ESID_073/A.WAV", b"x")
+        zips, location = m.locate_zips("073")
+        self.assertEqual(([z.name for z in zips], location),
+                         (["ESID_073.zip"], "Staging"))
+
+    def test_locate_zips_nothing_found(self):
+        self.assertEqual(m.locate_zips("073"), ([], "Not Found"))
+
+    def test_merged_stats_match_a_multi_day_site(self):
+        raw = self.d / "ESID_073"
+        raw.mkdir()
+        write_wav(raw / "20240408_120000.WAV", 500)
+        write_wav(raw / "20240409_090000.WAV", 2000)
+        disk = m.scan_disk_wavs(raw, 1)
+        self._day_zip("2024_04_08", [
+            ("CONFIG.TXT", b"gain\n"),
+            ("20240408_120000.WAV", riff_header(500) + b"\x00" * 488),
+        ])
+        self._day_zip("2024_04_09", [
+            ("CONFIG.TXT", b"gain\n"),
+            ("20240409_090000.WAV", riff_header(2000) + b"\x00" * 1988),
+        ])
+        zips, _ = m.locate_zips("073")
+        zstats, err = m.scan_zips_wavs(zips, 1)
+        self.assertIsNone(err)
+        self.assertEqual(zstats.count, 2)  # CONFIG.TXT not a WAV
+        row = m.build_row("073", disk, "Staging", zstats, None)
+        self.assertEqual(row["Match"], "YES")
+        self.assertFalse(m.row_has_problem(row))
+
+    def test_same_wav_in_two_day_zips_is_a_discrepancy(self):
+        raw = self.d / "ESID_073"
+        raw.mkdir()
+        write_wav(raw / "20240408_120000.WAV", 500)
+        payload = riff_header(500) + b"\x00" * 488
+        self._day_zip("2024_04_08", [("20240408_120000.WAV", payload)])
+        self._day_zip("2024_04_09", [("20240408_120000.WAV", payload)])
+        zips, _ = m.locate_zips("073")
+        zstats, err = m.scan_zips_wavs(zips, 1)
+        self.assertIsNone(err)
+        disk = m.scan_disk_wavs(raw, 1)
+        row = m.build_row("073", disk, "Staging", zstats, None)
+        self.assertEqual(row["Match"], "NO")
+        self.assertIn("duplicate", str(row["Notes"]).lower())
+
+    def test_one_corrupt_archive_fails_the_whole_scan_naming_it(self):
+        self._day_zip("2024_04_08", [("A.WAV", b"x" * 100)])
+        (self.staging / "ESID_073_2024_04_09.zip").write_bytes(b"not a zip")
+        zips, _ = m.locate_zips("073")
+        stats, err = m.scan_zips_wavs(zips, 1)
+        self.assertIsNone(stats)
+        self.assertIn("ESID_073_2024_04_09.zip", err)
 
 
 class TestSelfCheck(unittest.TestCase):

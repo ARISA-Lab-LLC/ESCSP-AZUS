@@ -140,10 +140,22 @@ WAVs, CONFIG.TXT, etc.).
 Each dataset lives in its own self-contained subdirectory. The upload script
 scans for `ESID_XXX/` subdirectories and processes each one independently.
 
+> **Two ZIP layouts (July 2026).** The prep default is now **one ZIP per
+> recording day**: `ESID_NNN_YYYY_MM_DD.zip` (day = the literal 8-digit
+> prefix of the WAV filenames), each holding that day's WAVs + a copy of
+> `CONFIG.TXT` and **no metadata** — the companions stay standalone.
+> `file_list.csv` then carries one ZIP row per archive, each WAV row
+> names its archive, and the dataset version carries a trailing `A`.
+> The single `ESID_XXX.zip` shown below is the legacy layout
+> (`--single-zip`); everything else in the folder is identical in both.
+
 ```
 Staging_Area/
 ├── ESID_004/
 │   ├── ESID_004.zip                     ← Audio archive (WAV files + CONFIG.TXT)
+│   │                                      — legacy layout; the per-day default
+│   │                                      has ESID_004_2024_04_08.zip,
+│   │                                      ESID_004_2024_04_09.zip, ... instead
 │   ├── ESID_004_to_upload.csv           ← Upload manifest (what Zenodo receives)
 │   ├── ESID_004_zip_attempt_upload.csv  ← ONLY after the file-by-file fallback
 │   │                                      ran: the manifest as it was for the
@@ -181,7 +193,8 @@ Staging_Area/
 
 | File | Uploaded to Zenodo | Purpose |
 |------|--------------------|---------|
-| `ESID_XXX.zip` | Yes | All WAV recordings + CONFIG.TXT |
+| `ESID_XXX.zip` | Yes | All WAV recordings + CONFIG.TXT (legacy `--single-zip` layout) |
+| `ESID_XXX_YYYY_MM_DD.zip` | Yes | One recording day's WAVs + a copy of CONFIG.TXT (per-day layout, the default — one such archive per day, no metadata inside) |
 | `ESID_XXX_to_upload.csv` | No | Tells AZUS which files to upload |
 | `ESID_XXX_zip_attempt_upload.csv` | No | Provenance. Present only once the file-by-file fallback has run for this ESID: a snapshot of `ESID_XXX_to_upload.csv` **as it was for the ZIP attempt**, taken before the fallback rewrote it. Written once and never replaced, so a re-run cannot overwrite the original history. Provenance only — as of July 2026 a failed fallback run is retried by simply re-running it; `required_files` no longer mistakes the rewritten manifest's raw rows for companions, so restoring this by hand is not needed. |
 | `ESID_XXX_file_by_file_upload.csv` | No | Provenance. Present only once the fallback has run: a mirror of the rewritten manifest, i.e. the individual WAVs + CONFIG.TXT + companions that replaced the ZIP. Refreshed on each fallback run. |

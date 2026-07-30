@@ -80,14 +80,14 @@ logger = logging.getLogger("azus.file_by_file")
 _MANIFEST_TEMPLATE = "ESID_{esid}_to_upload.csv"
 _FILE_LIST_NAME = "file_list.csv"
 
-# Zenodo accepts at most 100 files per record:
-#   https://help.zenodo.org/docs/deposit/manage-files/
-# A file-by-file record carries every WAV + CONFIG.TXT + every companion
-# individually, so a large site can exceed this — ESID 797 had 6270 WAVs.
-# Exceeding it means the upload CANNOT succeed, and discovering that after
-# the point of no return leaves a record whose ZIP has been deleted and
-# whose file set can never be completed.  Refused up front instead.
-_ZENODO_MAX_FILES_PER_RECORD = 100
+# Zenodo accepts at most 100 files per record (constant lives in
+# azus_common with its citation).  A file-by-file record carries every
+# WAV + CONFIG.TXT + every companion individually, so a large site can
+# exceed this — ESID 797 had 6270 WAVs.  Exceeding it means the upload
+# CANNOT succeed, and discovering that after the point of no return
+# leaves a record whose ZIP has been deleted and whose file set can
+# never be completed.  Refused up front instead.
+_ZENODO_MAX_FILES_PER_RECORD = azus_common.ZENODO_MAX_FILES_PER_RECORD
 
 
 # ===================================================================

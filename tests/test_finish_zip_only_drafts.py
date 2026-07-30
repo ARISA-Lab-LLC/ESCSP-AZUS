@@ -227,11 +227,16 @@ class _Fixture(unittest.TestCase):
         return _COMPANIONS + list(_WAVS) + ["CONFIG.TXT"]
 
     def package(self):
-        """The LocalPackage the tool would derive for the fixture."""
+        """The LocalPackage the tool would derive for the fixture.
+
+        Indexes the real fixture directories rather than hand-building the
+        map, so a test that plants a second folder for this ESID actually
+        exercises the ambiguity path.
+        """
         return m.derive_local_package(
             self.ESID,
-            {self.ESID: self.staging},
-            {self.ESID: self.raw},
+            m.index_esid_folders(self.staging_area),
+            m.index_esid_folders(self.raw_root),
         )
 
     # --- CLI driver -------------------------------------------------------
@@ -557,7 +562,7 @@ class TestLocalGates(_Fixture):
     def test_no_raw_folder(self):
         self.build()
         package = m.derive_local_package(
-            self.ESID, {self.ESID: self.staging}, {}
+            self.ESID, {self.ESID: [self.staging]}, {}
         )
         verdict, _ = m.local_verdict(package, "555", self.ESID, 96)
         self.assertEqual(verdict, m.NO_RAW_FOLDER)
@@ -620,6 +625,126 @@ class TestFileCountGuard(_Fixture):
 # =====================================================================
 #  The scan writes nothing
 # =====================================================================
+
+class TestOversizedSiteAdvice(_Fixture):
+    """What we tell an operator about a site Zenodo cannot hold.
+
+    The production scan made this the dominant verdict — 58 of 100 drafts —
+    and every one was told to "split the site with
+    split_oversized_raw_folders.py". That tool handles ``_Part_N_of_2``
+    PAIRS ONLY and carries its own verdict for "a half still exceeds the
+    limit", so the advice was wrong for anything needing more than two
+    records.
+    """
+
+    def test_records_needed_accounts_for_repeated_companions(self):
+        # Every record repeats the companions, so usable slots are
+        # max_files - companions, not max_files.
+        self.assertEqual(m.records_needed(81, 15, 96), 1)
+        self.assertEqual(m.records_needed(82, 15, 96), 2)
+        self.assertEqual(m.records_needed(162, 15, 96), 2)
+        self.assertEqual(m.records_needed(163, 15, 96), 3)
+
+    def test_records_needed_is_zero_when_companions_fill_a_record(self):
+        """No split can help if the companions alone hit the ceiling."""
+        self.assertEqual(m.records_needed(500, 96, 96), 0)
+        self.assertEqual(m.records_needed(500, 200, 96), 0)
+
+    def test_a_two_part_split_is_recommended_when_it_would_work(self):
+        advice = m.split_advice(150, 15, 96)
+        self.assertIn("_Part_1_of_2", advice)
+
+    def test_a_split_is_NOT_recommended_when_pairs_cannot_help(self):
+        """ESID 666: 6307 raw files would need ~78 records, not 2."""
+        advice = m.split_advice(6307, 15, 96)
+        self.assertNotIn("_Part_1_of_2", advice)
+        self.assertIn("78 records", advice)
+        self.assertIn("ZIP is the only vehicle", advice)
+
+    def test_companions_alone_filling_a_record_says_so(self):
+        advice = m.split_advice(500, 96, 96)
+        self.assertIn("no split can help", advice)
+
+    def test_the_verdict_note_carries_the_advice(self):
+        self.build(wav_count=200)
+        verdict, note = m.local_verdict(self.package(), "555", self.ESID, 96)
+        self.assertEqual(verdict, m.TOO_MANY_FILES)
+        self.assertIn("records for this ONE ESID", note)
+
+    def test_the_recommended_action_points_at_the_notes(self):
+        """The static text cannot know the count, so it must not guess."""
+        action = m._RECOMMENDED_ACTION[m.TOO_MANY_FILES]
+        self.assertIn("Notes", action)
+        self.assertNotIn("split_oversized_raw_folders.py", action)
+
+
+class TestAmbiguousLocalFolder(_Fixture):
+    """Two local folders resolving to one ESID must refuse, not pick.
+
+    ``parse_esid`` strips the ``_staging`` / ``_uploaded`` tails, so a
+    leftover ``Raw_Data/ESID_055_Staging`` resolves to ESID 055 exactly as
+    ``Raw_Data/ESID#055`` does. The production scan showed three drafts
+    whose Raw Folder was such a leftover. A ``{esid: folder}`` map is
+    last-wins, so one silently won — and this tool would then hash and
+    upload from whichever came last in directory order.
+    """
+
+    def test_index_keeps_every_folder_for_an_esid(self):
+        leftover = self.raw_root / f"ESID_{self.ESID}_Staging"
+        leftover.mkdir()
+        index = m.index_esid_folders(self.raw_root)
+        self.assertEqual(len(index[self.ESID]), 2)
+        self.assertEqual(
+            {p.name for p in index[self.ESID]},
+            {f"ESID#{self.ESID}", f"ESID_{self.ESID}_Staging"},
+        )
+
+    def test_a_staging_leftover_in_raw_data_parses_as_the_esid(self):
+        """The premise — if this ever stops holding, the guard is moot."""
+        self.assertEqual(
+            azus_common.parse_esid(f"ESID_{self.ESID}_Staging"), self.ESID
+        )
+
+    def test_duplicate_raw_folders_are_refused(self):
+        self.build()
+        leftover = self.raw_root / f"ESID_{self.ESID}_Staging"
+        leftover.mkdir()
+        verdict, note = m.local_verdict(self.package(), "555", self.ESID, 96)
+        self.assertEqual(verdict, m.AMBIGUOUS_LOCAL_FOLDER)
+        self.assertIn("raw folders", note)
+        self.assertIn(f"ESID_{self.ESID}_Staging", note)
+
+    def test_duplicate_staging_folders_are_refused(self):
+        self.build()
+        (self.staging_area / f"ESID_{self.ESID}").mkdir()
+        verdict, note = m.local_verdict(self.package(), "555", self.ESID, 96)
+        self.assertEqual(verdict, m.AMBIGUOUS_LOCAL_FOLDER)
+        self.assertIn("staging folders", note)
+
+    def test_ambiguity_is_refused_before_anything_is_derived_from_it(self):
+        """Checked ahead of every other gate: a count taken from the wrong
+        folder is worse than no answer."""
+        self.build(prep_sentinel=False)          # would be PREP_INCOMPLETE
+        (self.raw_root / f"ESID_{self.ESID}_Staging").mkdir()
+        verdict, _ = m.local_verdict(self.package(), "555", self.ESID, 96)
+        self.assertEqual(verdict, m.AMBIGUOUS_LOCAL_FOLDER)
+
+    def test_ambiguous_esid_costs_zero_network_calls(self):
+        self.build()
+        (self.raw_root / f"ESID_{self.ESID}_Staging").mkdir()
+        code, mocks = self.run_cli()
+        self.assertEqual(code, 1)
+        mocks["list_draft_files"].assert_not_called()
+        self.assertEqual(
+            self.summary_rows()[0]["Verdict"], m.AMBIGUOUS_LOCAL_FOLDER
+        )
+
+    def test_one_folder_each_side_is_not_ambiguous(self):
+        self.build()
+        self.assertEqual(
+            m.local_verdict(self.package(), "555", self.ESID, 96), ("", "")
+        )
+
 
 class TestScanIsReadOnly(_Fixture):
     """A read-only run must be provably read-only."""
@@ -708,7 +833,11 @@ class TestScanIsReadOnly(_Fixture):
     def test_hash_columns_are_empty_without_the_flag(self):
         self.build()
         self.run_cli(listings={self.RECORD: committed(_COMPANIONS)})
-        for row in self.detail_rows():
+        rows = self.detail_rows()
+        # Guard the guard: with no rows the column assertions below would
+        # pass vacuously and an empty detail report would look correct.
+        self.assertEqual(len(rows), len(_COMPANIONS) + len(_WAVS) + 1)
+        for row in rows:
             self.assertEqual(row["SHA-512"], "")
             self.assertEqual(row["MD5"], "")
 

@@ -198,6 +198,7 @@ MANIFESTS_MISSING = "MANIFESTS_MISSING"
 NO_RAW_FOLDER = "NO_RAW_FOLDER"
 RAW_FILES_MISSING = "RAW_FILES_MISSING"
 TOO_MANY_FILES = "TOO_MANY_FILES"
+AMBIGUOUS_LOCAL_FOLDER = "AMBIGUOUS_LOCAL_FOLDER"
 UPLOADED_TWIN_EXISTS = "UPLOADED_TWIN_EXISTS"
 STATE_RECORD_MISMATCH = "STATE_RECORD_MISMATCH"
 COMPANIONS_MISSING = "COMPANIONS_MISSING"
@@ -255,8 +256,15 @@ _RECOMMENDED_ACTION = {
     ),
     TOO_MANY_FILES: (
         "the file-by-file set exceeds --max-files (Zenodo caps a record at "
-        "100 files) — split the site with "
-        "Resources/split_oversized_raw_folders.py, or persist with the ZIP"
+        "100 files) — read the Notes column, which says whether a 2-part "
+        "split can bring this site within the limit or whether the ZIP is "
+        "its only vehicle"
+    ),
+    AMBIGUOUS_LOCAL_FOLDER: (
+        "two or more local folders resolve to this ESID (parse_esid strips "
+        "_Staging/_Uploaded, so Raw_Data/ESID_NNN_Staging leftovers collide "
+        "with Raw_Data/ESID#NNN) — resolve them, e.g. with "
+        "Resources/clean_raw_staging_leftovers.py, then re-run"
     ),
     UPLOADED_TWIN_EXISTS: (
         "an Uploaded_Data/ESID_NNN_Uploaded folder already exists — "
@@ -394,6 +402,10 @@ class LocalPackage:
             ``""`` when there is no state file or no such key.
         already_file_by_file: True when upload_state.json marks the folder
             ``mode: file_by_file``.
+        staging_options: EVERY staging folder that resolves to this ESID.
+        raw_options: EVERY raw folder that resolves to this ESID.  More than
+            one means the ESID is ambiguous and nothing may be derived from
+            either — see :func:`local_verdict`.
     """
 
     staging_dir: Path
@@ -402,6 +414,8 @@ class LocalPackage:
     companion_names: List[str] = field(default_factory=list)
     state_record_id: str = ""
     already_file_by_file: bool = False
+    staging_options: List[Path] = field(default_factory=list)
+    raw_options: List[Path] = field(default_factory=list)
 
 
 def esid_from_hit(
@@ -630,6 +644,68 @@ def classify_from_entries(
     return CONVERTIBLE, "every companion is committed; the ZIP is not"
 
 
+def records_needed(raw_count: int, companion_count: int, max_files: int) -> int:
+    """How many records a file-by-file upload of this site would take.
+
+    Every record repeats the full companion set, so the usable slots per
+    record are ``max_files - companion_count``, not ``max_files``.
+
+    Args:
+        raw_count: Number of WAVs + CONFIG.TXT.
+        companion_count: Number of standalone companions.
+        max_files: Per-record file ceiling.
+
+    Returns:
+        The number of records required, or ``0`` when the companions alone
+        already fill a record (so no split can ever help).
+    """
+    per_record = max_files - companion_count
+    if per_record <= 0:
+        return 0
+    return -(-raw_count // per_record)  # ceil, integer-only
+
+
+def split_advice(
+    raw_count: int, companion_count: int, max_files: int
+) -> str:
+    """Say what can actually be done about an oversized site.
+
+    ``split_oversized_raw_folders.py`` handles ``_Part_N_of_2`` **pairs
+    only** — it has its own verdict for "a half still exceeds the limit".
+    So recommending a split is honest only when two records would suffice.
+    The production scan showed why this matters: 58 of 100 drafts were
+    oversized, most needing dozens of records, and every one of them was
+    being told to split.
+
+    Args:
+        raw_count: Number of WAVs + CONFIG.TXT.
+        companion_count: Number of standalone companions.
+        max_files: Per-record file ceiling.
+
+    Returns:
+        A sentence naming the only viable route for this site.
+    """
+    needed = records_needed(raw_count, companion_count, max_files)
+    if needed == 0:
+        return (
+            f"the {companion_count} companion(s) alone fill a record at "
+            f"--max-files {max_files}, so no split can help; the ZIP is the "
+            "only vehicle for this site"
+        )
+    if needed <= 2:
+        return (
+            "splitting the site into a _Part_1_of_2 / _Part_2_of_2 pair "
+            "(Resources/split_oversized_raw_folders.py) would bring each "
+            "half within the limit"
+        )
+    return (
+        f"file-by-file would need ~{needed} records for this ONE ESID, and "
+        "split_oversized_raw_folders.py only produces 2-part pairs — so "
+        "file-by-file cannot serve this site. The ZIP is the only vehicle; "
+        "its problems belong to the ZIP upload path"
+    )
+
+
 def local_verdict(
     package: LocalPackage,
     record_id: str,
@@ -651,6 +727,17 @@ def local_verdict(
         ``(verdict, note)``, or ``("", "")`` when every local gate passes
         and the draft's file list should be fetched.
     """
+    # Ambiguity first: everything below is derived FROM these folders, so a
+    # count or a hash taken from the wrong one is worse than no answer.
+    for label, options in (
+        ("staging", package.staging_options), ("raw", package.raw_options),
+    ):
+        if len(options) > 1:
+            return AMBIGUOUS_LOCAL_FOLDER, (
+                f"{len(options)} {label} folders resolve to ESID {esid}: "
+                f"{', '.join(p.name for p in options)}"
+            )
+
     if not package.staging_dir.is_dir():
         return NO_STAGING_FOLDER, f"no folder at {package.staging_dir}"
     if not (package.staging_dir / azus_common.PREP_SENTINEL).is_file():
@@ -670,7 +757,10 @@ def local_verdict(
         return TOO_MANY_FILES, (
             f"{total} file(s) ({len(package.raw_files)} raw + "
             f"{len(package.companion_names)} companion) exceeds "
-            f"--max-files {max_files}"
+            f"--max-files {max_files} — "
+            + split_advice(
+                len(package.raw_files), len(package.companion_names), max_files
+            )
         )
 
     if package.raw_dir is None:
@@ -751,24 +841,60 @@ def read_state_record_id(staging_dir: Path) -> str:
     return str(loaded.get("record_id") or "")
 
 
+def index_esid_folders(root: Path) -> Dict[str, List[Path]]:
+    """Map each canonical ESID to EVERY folder under ``root`` claiming it.
+
+    One-to-MANY deliberately.  ``azus_common.parse_esid`` strips the
+    ``_staging`` / ``_uploaded`` tails, so ``Raw_Data/ESID_055_Staging`` — a
+    leftover from an interrupted prep — resolves to ESID 055 exactly as
+    ``Raw_Data/ESID#055`` does.  A ``{esid: folder}`` comprehension over
+    ``find_esid_folders`` is last-wins, so one of the two would silently
+    win and this tool would hash and upload from whichever came last in
+    directory order.  Returning both lets the caller REFUSE instead.
+
+    Args:
+        root: Folder containing ESID subdirectories.
+
+    Returns:
+        ``{canonical_esid: [folder, ...]}`` in :func:`find_esid_folders`
+        order.
+    """
+    index: Dict[str, List[Path]] = {}
+    for _sort, esid, folder in azus_common.find_esid_folders(root):
+        index.setdefault(esid, []).append(folder)
+    return index
+
+
 def derive_local_package(
-    esid: str, staging_by_esid: Dict[str, Path], raw_by_esid: Dict[str, Path]
+    esid: str,
+    staging_index: Dict[str, List[Path]],
+    raw_index: Dict[str, List[Path]],
 ) -> LocalPackage:
     """Gather everything local about one ESID, with no network calls.
 
     Args:
         esid: Canonical ESID string.
-        staging_by_esid: Canonical ESID → staging folder.
-        raw_by_esid: Canonical ESID → raw folder.
+        staging_index: From :func:`index_esid_folders` over ``Staging_Area``.
+        raw_index: From :func:`index_esid_folders` over the raw-data folder.
 
     Returns:
         The :class:`LocalPackage`.  When the staging folder is absent the
         manifest-derived fields are simply empty; the caller's gates
-        report that.
+        report that.  When either side is ambiguous the first folder is
+        used for reporting only — :func:`local_verdict` refuses before
+        anything derived from it is trusted.
     """
-    staging_dir = staging_by_esid.get(esid, _STAGING_AREA / f"ESID_{esid}_Staging")
+    staging_options = staging_index.get(esid, [])
+    raw_options = raw_index.get(esid, [])
+    staging_dir = (
+        staging_options[0] if staging_options
+        else _STAGING_AREA / f"ESID_{esid}_Staging"
+    )
     package = LocalPackage(
-        staging_dir=staging_dir, raw_dir=raw_by_esid.get(esid),
+        staging_dir=staging_dir,
+        raw_dir=raw_options[0] if raw_options else None,
+        staging_options=staging_options,
+        raw_options=raw_options,
     )
     if not staging_dir.is_dir():
         return package
@@ -1161,8 +1287,8 @@ def discover_drafts(
 def classify_candidate(
     cand: Candidate,
     credentials: Credentials,
-    staging_by_esid: Dict[str, Path],
-    raw_by_esid: Dict[str, Path],
+    staging_index: Dict[str, List[Path]],
+    raw_index: Dict[str, List[Path]],
     max_files: int,
     *,
     with_hashes: bool,
@@ -1172,8 +1298,8 @@ def classify_candidate(
     Args:
         cand: The candidate draft.
         credentials: Zenodo API credentials.
-        staging_by_esid: Canonical ESID → staging folder.
-        raw_by_esid: Canonical ESID → raw folder.
+        staging_index: From :func:`index_esid_folders` over ``Staging_Area``.
+        raw_index: From :func:`index_esid_folders` over the raw-data folder.
         max_files: Ceiling for ``len(raw) + len(companions)``.
         with_hashes: Fill the detail report's hash columns from cache.
 
@@ -1184,7 +1310,7 @@ def classify_candidate(
     if cand.verdict:
         return summary_row(cand, None, None, cand.verdict, cand.note), [], None
 
-    package = derive_local_package(cand.esid, staging_by_esid, raw_by_esid)
+    package = derive_local_package(cand.esid, staging_index, raw_index)
     verdict, note = local_verdict(
         package, cand.record_id, cand.esid, max_files
     )
@@ -1583,14 +1709,8 @@ def main() -> None:
             logger.info("Cancelled by user.")
             sys.exit(0)
 
-    staging_by_esid = {
-        esid: folder
-        for _sort, esid, folder in azus_common.find_esid_folders(_STAGING_AREA)
-    }
-    raw_by_esid = {
-        esid: folder
-        for _sort, esid, folder in azus_common.find_esid_folders(raw_root)
-    }
+    staging_index = index_esid_folders(_STAGING_AREA)
+    raw_index = index_esid_folders(raw_root)
     publish_config: Tuple[Optional[str], bool] = (None, False)
     if args.execute:
         community_id, reserve_doi, _auto = _load_publish_config(args.config)
@@ -1624,7 +1744,7 @@ def main() -> None:
 
         for index, cand in enumerate(candidates):
             row, detail_rows, package = classify_candidate(
-                cand, credentials, staging_by_esid, raw_by_esid,
+                cand, credentials, staging_index, raw_index,
                 args.max_files, with_hashes=args.with_hashes,
             )
             verdict = row["Verdict"]

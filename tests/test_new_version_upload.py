@@ -318,9 +318,28 @@ class TestBumpVersionLabel(unittest.TestCase):
     def test_surrounding_whitespace_is_stripped_not_bumped(self):
         self.assertEqual(nvu.bump_version_label("  2024.1.0  "), "2024.1.0a")
 
+    def test_per_day_marker_starts_the_ladder_after_itself(self):
+        """2024.1.0A is a per-day BASE version, not a revision letter.
+
+        Until July 2026 an uppercase ending was refused outright; the
+        per-day prep now marks its versions with a trailing "A"
+        (prepare_dataset.DAY_ZIP_VERSION_SUFFIX), and bumping such a
+        record must keep the marker and revise after it.
+        """
+        self.assertEqual(nvu.bump_version_label("2024.1.0A"), "2024.1.0Aa")
+        self.assertEqual(nvu.bump_version_label("2024.1.0Aa"), "2024.1.0Ab")
+        self.assertEqual(nvu.bump_version_label("2024.1.0Ay"), "2024.1.0Az")
+
+    def test_the_marker_constant_is_the_producers(self):
+        import prepare_dataset
+        self.assertEqual(
+            prepare_dataset.DAY_ZIP_VERSION_SUFFIX, "A"
+        )
+
     def test_refusals(self):
-        for value in ("2024.1.0z", "2024.1.0A", "2024.1.0ab", "1.0-beta",
-                      "", "   ", None, "v", "draft", "abc"):
+        for value in ("2024.1.0z", "2024.1.0Az", "2024.1.0B", "2024.1.0ab",
+                      "2024.1.0Aab", "1.0-beta", "", "   ", None, "v",
+                      "draft", "abc"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     nvu.bump_version_label(value)
@@ -331,8 +350,8 @@ class TestBumpVersionLabel(unittest.TestCase):
         self.assertIn("more than one letter", str(ctx.exception))
 
     def test_every_refusal_names_the_escape_hatch(self):
-        for value in ("2024.1.0z", "2024.1.0A", "2024.1.0ab", "1.0-beta",
-                      "", None, "v"):
+        for value in ("2024.1.0z", "2024.1.0Az", "2024.1.0B", "2024.1.0ab",
+                      "1.0-beta", "", None, "v"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError) as ctx:
                     nvu.bump_version_label(value)

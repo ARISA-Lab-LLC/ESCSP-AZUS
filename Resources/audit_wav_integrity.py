@@ -536,28 +536,54 @@ def scan_zip_wavs(
         the archive is unreadable — ``error`` being a short message
         such as ``"BadZipFile: ..."``.
     """
+    return scan_zips_wavs([zip_path], tiny_threshold)
+
+
+def scan_zips_wavs(
+    zip_paths: List[Path], tiny_threshold: int
+) -> Tuple[Optional[WavStats], Optional[str]]:
+    """Read the .wav entries of one OR MORE archives into merged stats.
+
+    The multi-archive generalization for per-day layouts
+    (``ESID_NNN_YYYY_MM_DD.zip``): every archive's entries land in one
+    :class:`WavStats`, so the disk-vs-ZIP comparison sees the site's
+    audio as a whole regardless of how it is packed.  A basename
+    appearing in two archives is a discrepancy — in the per-day layout
+    every WAV belongs to exactly one day (CONFIG.TXT, the one
+    deliberate duplicate, is not a WAV and is not counted).
+
+    Args:
+        zip_paths: The archives to read, in report order.
+        tiny_threshold: Nonzero entries smaller than this are tiny.
+
+    Returns:
+        A ``(stats, None)`` tuple on success, or ``(None, error)`` when
+        ANY archive is unreadable — ``error`` names the archive.
+    """
     stats = WavStats()
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                basename = info.filename.rsplit("/", 1)[-1]
-                if not _is_wav_name(basename):
-                    if basename.lower().endswith(".wav"):
-                        stats.skipped_sidecars += 1
-                    continue
-                if basename in stats.sizes:
-                    stats.discrepancies.append(
-                        (basename, "duplicate WAV basename in ZIP")
+    for zip_path in zip_paths:
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    basename = info.filename.rsplit("/", 1)[-1]
+                    if not _is_wav_name(basename):
+                        if basename.lower().endswith(".wav"):
+                            stats.skipped_sidecars += 1
+                        continue
+                    if basename in stats.sizes:
+                        stats.discrepancies.append(
+                            (basename, "duplicate WAV basename across "
+                                       "ZIP entries")
+                        )
+                    verdict = classify_zip_entry(
+                        info.file_size, info.compress_size,
+                        info.compress_type, info.CRC, tiny_threshold,
                     )
-                verdict = classify_zip_entry(
-                    info.file_size, info.compress_size, info.compress_type,
-                    info.CRC, tiny_threshold,
-                )
-                stats._apply(basename, info.file_size, verdict)
-    except (zipfile.BadZipFile, OSError) as exc:
-        return None, f"{exc.__class__.__name__}: {exc}"
+                    stats._apply(basename, info.file_size, verdict)
+        except (zipfile.BadZipFile, OSError) as exc:
+            return None, f"{zip_path.name}: {exc.__class__.__name__}: {exc}"
     return stats, None
 
 
@@ -599,25 +625,42 @@ def find_raw_esid_folders(raw_root: Path) -> List[Tuple[int, str, Path]]:
     return found
 
 
-def locate_zip(esid_padded: str) -> Tuple[Optional[Path], str]:
-    """Find ESID_NNN.zip in Staging_Area/ first, then Uploaded_Data/.
+def locate_zips(esid_padded: str) -> Tuple[List[Path], str]:
+    """Find this ESID's data archives in Staging_Area/, then Uploaded_Data/.
+
+    Layout-agnostic: the legacy single ``ESID_NNN.zip`` and any per-day
+    ``ESID_NNN_YYYY_MM_DD.zip`` archives are all returned from whichever
+    location holds them.  (A folder holding BOTH layouts returns both —
+    the merged scan then reports every WAV as a duplicate basename,
+    which is exactly the alarm a mixed layout deserves.)
 
     Args:
-        esid_padded: Zero-padded 3-digit ESID (e.g. ``"046"``).
+        esid_padded: Canonical ESID string (e.g. ``"046"``).
 
     Returns:
-        A ``(zip_path, location)`` tuple: the located archive and either
-        ``"Staging"`` or ``"Uploaded"``, or ``(None, "Not Found")`` when
-        no matching ZIP exists in either location.
+        A ``(zip_paths, location)`` tuple: the located archives in name
+        order and either ``"Staging"`` or ``"Uploaded"``, or
+        ``([], "Not Found")`` when neither location holds any.
     """
     for base, location in (
         (_STAGING_AREA / f"ESID_{esid_padded}_Staging", "Staging"),
         (_UPLOADED_DATA / f"ESID_{esid_padded}_Uploaded", "Uploaded"),
     ):
-        zip_path = base / f"ESID_{esid_padded}.zip"
-        if zip_path.is_file():
-            return zip_path, location
-    return None, "Not Found"
+        if not base.is_dir():
+            continue
+        zips: List[Path] = []
+        single = base / f"ESID_{esid_padded}.zip"
+        if single.is_file():
+            zips.append(single)
+        for entry in sorted(base.iterdir()):
+            if not entry.is_file():
+                continue
+            parsed = azus_common.parse_day_zip_name(entry.name)
+            if parsed is not None and parsed[0] == esid_padded:
+                zips.append(entry)
+        if zips:
+            return zips, location
+    return [], "Not Found"
 
 
 def _cross_check_cell(stats: Optional[WavStats]) -> str:
@@ -835,11 +878,13 @@ def main() -> None:
 
     for _, esid_padded, folder in esid_folders:
         disk = scan_disk_wavs(folder, args.tiny_threshold)
-        zip_path, zip_location = locate_zip(esid_padded)
+        zip_paths, zip_location = locate_zips(esid_padded)
         zip_stats: Optional[WavStats] = None
         zip_error: Optional[str] = None
-        if zip_path is not None:
-            zip_stats, zip_error = scan_zip_wavs(zip_path, args.tiny_threshold)
+        if zip_paths:
+            zip_stats, zip_error = scan_zips_wavs(
+                zip_paths, args.tiny_threshold
+            )
 
         row = build_row(esid_padded, disk, zip_location, zip_stats, zip_error)
 
