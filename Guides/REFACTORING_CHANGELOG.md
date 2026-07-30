@@ -1,5 +1,89 @@
 # AZUS Refactoring Change Log
 
+## July 2026 — five defects in the per-day prep, found by an adversarial audit
+
+A five-lens adversarial review of the just-committed per-day workflow (each
+finding then handed to a refute-by-default skeptic) confirmed six findings, four of
+which were the same defect reported independently by four lenses. Both blockers are
+reproduced and closed; the fixes are verified end-to-end through the real CLI.
+
+**1. A stale day-ZIP from an earlier failed prep was re-staged and uploadable
+(HIGH).** `verify_day_zips_against_source` derived `actual_names` from the archives
+the CURRENT run created, never scanning the output directory. A prep that fails
+between building and the atomic move deliberately leaves its build folder in place
+(`clean_raw_staging_leftovers.py`: "Nothing in the pipeline ever cleans these up")
+and `main()` only `mkdir(exist_ok=True)`s it — so if the operator removed a day's
+audio and re-ran, that day's archive survived, invisible to verification. It got no
+`file_list.csv` row, but `create_upload_manifest` (a directory scan) listed it, so it
+moved into `Staging_Area/` with the completion sentinel and, on a single-surviving-day
+site, could be PUT onto the record as **undocumented audio with no hash, size, or
+description anywhere in the manifest**. Multi-day sites were contained by the upload
+integrity gate; this class is new to per-day mode, since the legacy layout rewrites
+its one constant ZIP name every run. Verification now enumerates `output_dir` and
+refuses with a `STALE day ZIP …` message naming the folder to delete.
+
+**2. One AppleDouble sidecar refused an entire ESID (MEDIUM, but a certain
+production blocker).** macOS writes `._NAME.WAV` companions on the exFAT SD cards
+this data arrives on. `audit_wav_integrity._is_wav_name` and
+`hash_raw_wavs.is_hashable_name` have always skipped them; `group_wavs_by_day` did
+not, so a single sidecar had no 8-digit prefix and aborted the whole site. New
+`azus_common.is_raw_wav_name` is the shared rule; new `prepare_dataset.raw_wav_files`
+is the one lister the per-day path uses for zipping, expectation, grouping, and the
+file-list rows. `group_wavs_by_day` also skips them itself, so a sidecar is
+structurally incapable of refusing a site whatever the caller passes.
+`audit_day_zips` applies the same rule, so prep and the auditor cannot disagree. The
+legacy path deliberately keeps its historical unfiltered glob —
+`create_internal_file_list` gained an optional `wav_files` parameter rather than
+changing legacy behaviour, so re-preps of published single-ZIP records produce
+byte-identical output.
+
+A related divergence surfaced and is now documented and handled:
+`_is_wav_name` rejects only the `._` prefix, so it accepts `.hidden.wav` where the
+per-day rule rejects it. `verify_day_zips_against_source` therefore re-filters its own
+disk side rather than trusting `scan_disk_wavs`, so a hidden `.wav` cannot manufacture
+a "disk WAV in no archive" mismatch.
+
+**3. The per-day file list was built AFTER verification (MEDIUM).** The legacy path
+verifies after building the internal list, which is what catches a WAV that changed
+between zipping and the file list (whose per-WAV rows re-`stat` the source). Per-day
+had the opposite order, leaving that window unchecked. `_run_day_zip_prep` now
+mirrors legacy: zip → metadata → internal list → **verify** → per-day file list →
+manifest. The grouping and cap guards still run before any archive is written, so
+fail-fast on the common refusals is unchanged.
+
+**4. `parse_day_zip_name` accepted any extension (LOW).** Callers use it to decide a
+folder's LAYOUT, so a stray `ESID_005_2024_04_08.log` flipped `staging_zip_mode` to
+per-day. `.zip` is now required (case-insensitive). `parse_esid`'s tail-stripping is
+unaffected, so a dated folder name still resolves to its ESID.
+
+**5. The version-`A` docstring overclaimed (LOW).** It asserted the upload phase
+sources the version from the staged CSV. It does not: `get_draft_config` reads
+`data_collector.version` from the MASTER collectors spreadsheet, which prep never
+writes back to. A per-day record therefore carries `2024.1.0A` inside its own
+`total_eclipse_data.csv` while its Zenodo version field still reads `2024.1.0`.
+Corrected to state the gap explicitly and scope its closure to the upload phase.
+
+**Also fixed: a vacuous test of my own.**
+`test_refusal_happens_before_any_zip_is_written` asserted no ZIPs existed after
+calling `enforce_zenodo_file_cap` directly — true wherever the guard sits, since the
+guard never writes ZIPs. It now drives `_run_day_zip_prep`, which is the only thing
+that exercises the ORDER, with a negative control proving the guard is not refusing
+everything.
+
+**Confirmed NOT broken by the audit:** the `parse_esid` date-tail strip breaks no
+existing caller (all 14 enumerated; independently corroborated by a production run
+over 408 raw folders in which all 16 `_Part_N_of_2` ESIDs and `120A` parsed
+correctly), and the upload pipeline **does** refuse a per-day folder cleanly —
+`verify_dataset_integrity` runs before any network call and no day-ZIP can satisfy a
+`file_list.csv` that lists every day's WAVs, so nothing is created, published, or
+archived. `--skip-integrity-hash` does not bypass it.
+
+Tests: 26 added (885 total) — `TestStaleArchiveIsRefused` (incl. end-to-end: exit 1,
+no staging folder, no sentinel), `TestAppleDoubleSidecars`,
+`TestHiddenWavIsIgnoredConsistently`, `TestIsRawWavName`,
+`TestAuditAgreesWithPrepOnSidecars`, plus the extension and cap-ordering cases.
+Docstring audit 0 gaps.
+
 ## July 2026 — per-day ZIP layout: one archive per recording day (the new prep default)
 
 Multi-GB single ZIPs are the pipeline's dominant upload failure — they time out

@@ -476,6 +476,11 @@ def audit_day_zips(
     # ---- Per-ZIP contents: exactly that day's WAVs (+ CONFIG.TXT) ----
     raw_by_day: Dict[str, Set[str]] = {}
     for wav_name in list_raw_wavs(raw_folder):
+        # Sidecars are excluded from the per-day archives (see
+        # prepare_dataset.raw_wav_files), so they must be excluded from
+        # the expectation too or every archive would read as incomplete.
+        if not azus_common.is_raw_wav_name(wav_name):
+            continue
         day = azus_common.wav_day_key(wav_name)
         if day is not None:  # None is unreachable past the guard above
             raw_by_day.setdefault(day, set()).add(wav_name)

@@ -217,6 +217,28 @@ def wav_day_key(filename: str) -> Optional[str]:
     return f"{m.group(1)}_{m.group(2)}_{m.group(3)}"
 
 
+def is_raw_wav_name(name: str) -> bool:
+    """Report whether a name is a real raw audio recording.
+
+    Excludes macOS AppleDouble sidecars (``._20240408_120000.WAV``) and
+    any other hidden file: they end in ``.wav`` but are resource-fork
+    metadata, created whenever macOS writes to the exFAT SD cards this
+    data arrives on.  ``audit_wav_integrity._is_wav_name`` and
+    ``hash_raw_wavs.is_hashable_name`` already skip them; this is the
+    same rule for the per-day prep, so a sidecar cannot be mistaken for
+    an ungroupable recording and abort a whole site.
+
+    Args:
+        name: A bare file name (not a full path).
+
+    Returns:
+        True for a visible ``.wav``/``.WAV`` file, False otherwise.
+    """
+    if name.startswith("."):
+        return False
+    return name.lower().endswith(".wav")
+
+
 def day_zip_name(esid: str, day: str) -> str:
     """Build a per-day ZIP file name.
 
@@ -248,10 +270,17 @@ def parse_day_zip_name(name: str) -> Optional[Tuple[str, str]]:
 
     Returns:
         A ``(canonical_esid, day)`` tuple, or None when the name is not
-        a per-day ZIP name (no date tail, or no valid ESID before it) —
-        a legacy ``ESID_073.zip`` returns None here, not a half-parse.
+        a per-day ZIP name (wrong extension, no date tail, or no valid
+        ESID before it) — a legacy ``ESID_073.zip`` returns None here,
+        not a half-parse.
     """
-    stem = _NAME_EXTENSION_RE.sub("", name.strip())
+    text = name.strip()
+    # The ``.zip`` extension is REQUIRED: callers use this to decide
+    # whether a folder holds per-day data archives, and a stray
+    # ``ESID_073_2024_04_08.txt`` or ``.log`` must not flip that verdict.
+    if not text.lower().endswith(".zip"):
+        return None
+    stem = _NAME_EXTENSION_RE.sub("", text)
     m = _DAY_NAME_TAIL_RE.search(stem)
     if m is None:
         return None

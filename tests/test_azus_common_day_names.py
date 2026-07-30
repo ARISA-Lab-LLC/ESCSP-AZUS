@@ -102,6 +102,85 @@ class TestDayZipNameRoundTrip(unittest.TestCase):
                      "ESID_0055_2024_04_08.zip"):  # 4-digit ESID: malformed
             self.assertIsNone(azus_common.parse_day_zip_name(name), name)
 
+    def test_only_zip_files_are_day_archives(self):
+        """Callers use this to decide a folder's LAYOUT.
+
+        A stray dated log or CSV must not flip a folder's verdict to
+        per-day — the extension is part of the identity, not incidental.
+        """
+        for ext in (".txt", ".csv", ".log", ".json", ".zip.part", ""):
+            self.assertIsNone(
+                azus_common.parse_day_zip_name(f"ESID_005_2024_04_08{ext}"),
+                ext or "(no extension)",
+            )
+        # Case-insensitive on the extension itself.
+        for ext in (".zip", ".ZIP", ".Zip"):
+            self.assertEqual(
+                azus_common.parse_day_zip_name(f"ESID_005_2024_04_08{ext}"),
+                ("005", "2024_04_08"), ext,
+            )
+
+    def test_a_dated_folder_name_still_parses_as_its_esid(self):
+        """parse_esid keeps stripping the tail even with no extension."""
+        self.assertEqual(azus_common.parse_esid("ESID_005_2024_04_08"), "005")
+
+
+class TestIsRawWavName(unittest.TestCase):
+    """AppleDouble sidecars are not recordings.
+
+    macOS writes ``._NAME.WAV`` companions on exFAT SD cards.  They end
+    in ``.WAV`` but carry no audio; every tool that walks raw folders
+    must agree to skip them, or one of them will refuse a whole site.
+    """
+
+    def test_accepts_real_wavs(self):
+        for name in ("20240408_120000.WAV", "20240408_120000.wav",
+                     "Recording_1.WAV"):
+            self.assertTrue(azus_common.is_raw_wav_name(name), name)
+
+    def test_rejects_sidecars_and_hidden_files(self):
+        for name in ("._20240408_120000.WAV", ".hidden.wav", ".DS_Store"):
+            self.assertFalse(azus_common.is_raw_wav_name(name), name)
+
+    def test_rejects_non_wavs(self):
+        for name in ("CONFIG.TXT", "README.md", "ESID_005.zip"):
+            self.assertFalse(azus_common.is_raw_wav_name(name), name)
+
+    def test_agrees_with_hash_raw_wavs_on_every_wav_name(self):
+        """The hash cache and the per-day prep must see the same set."""
+        import hash_raw_wavs
+        for name in ("20240408_120000.WAV", "20240408_120000.wav",
+                     "._20240408_120000.WAV", ".hidden.wav", "Recording_1.WAV"):
+            self.assertEqual(
+                azus_common.is_raw_wav_name(name),
+                hash_raw_wavs.is_hashable_name(name),
+                name,
+            )
+
+    def test_it_is_stricter_than_audit_wav_integrity_on_hidden_files(self):
+        """A documented divergence, and why the per-day verify re-filters.
+
+        ``audit_wav_integrity._is_wav_name`` rejects only the ``._``
+        AppleDouble prefix, so it accepts a ``.hidden.wav``.  This rule
+        rejects every hidden file (matching the hash cache).  The two
+        agree on the case that actually occurs in the field; because they
+        diverge on the contrived one, ``verify_day_zips_against_source``
+        filters ``scan_disk_wavs`` output through THIS predicate rather
+        than trusting it — otherwise a ``.hidden.wav`` would be on the
+        disk side of the comparison but in no archive.
+        """
+        import audit_wav_integrity
+        # Agree on the real-world case:
+        for name in ("20240408_120000.WAV", "._20240408_120000.WAV"):
+            self.assertEqual(
+                azus_common.is_raw_wav_name(name),
+                audit_wav_integrity._is_wav_name(name),
+                name,
+            )
+        # Diverge on a non-AppleDouble hidden file:
+        self.assertTrue(audit_wav_integrity._is_wav_name(".hidden.wav"))
+        self.assertFalse(azus_common.is_raw_wav_name(".hidden.wav"))
+
 
 class TestParseEsidDateTail(unittest.TestCase):
     """A day-ZIP name resolves to its real ESID, not a poisoned suffix."""

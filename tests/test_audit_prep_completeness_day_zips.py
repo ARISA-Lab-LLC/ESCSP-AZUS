@@ -216,6 +216,32 @@ class TestPerDayAudit(_Case):
         self.assertTrue(any("corrupt" in d for d in details), details)
 
 
+class TestAuditAgreesWithPrepOnSidecars(_Case):
+    """The auditor's expectation must match what prep actually archives.
+
+    prep excludes AppleDouble sidecars from the per-day archives; if the
+    auditor still expected them, every archive would read as incomplete
+    and a correct folder would audit No.
+    """
+
+    def test_complete_folder_with_a_sidecar_still_audits_yes(self):
+        self.make_complete_per_day_staging()
+        (self.raw / "._20240408_120000.WAV").write_bytes(b"x" * 80)
+        status, details = self.audit()
+        self.assertEqual(status, "Yes", details)
+
+    def test_a_dated_non_zip_does_not_flip_the_layout_verdict(self):
+        """staging_zip_mode keys on parse_day_zip_name, which needs .zip."""
+        (self.staging / f"ESID_{_ESID}_2024_04_08.log").write_text("noise")
+        self.assertIsNone(
+            prep.staging_zip_mode(self.staging, _ESID),
+            "a dated .log is not a data archive",
+        )
+        status, details = self.audit()
+        self.assertEqual(status, "No")
+        self.assertTrue(any("ZIP archive missing" in d for d in details))
+
+
 class TestSingleZipStillAuditedByLegacyRules(_Case):
     def _make_single_zip_staging(self):
         zip_path = self.staging / f"ESID_{_ESID}.zip"

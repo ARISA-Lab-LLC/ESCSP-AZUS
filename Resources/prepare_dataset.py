@@ -350,6 +350,34 @@ def create_zip_file(
 #  Per-day ZIP creation (the default layout, July 2026)
 # ===================================================================
 
+def raw_wav_files(source_dir: Path) -> List[Path]:
+    """List a raw folder's real WAV recordings, in deterministic order.
+
+    THE per-day mode's audio set.  Mirrors the legacy glob (``*.WAV``
+    then ``*.wav``, sorted within each) but drops AppleDouble sidecars
+    and other hidden files via :func:`azus_common.is_raw_wav_name`.
+    Without that filter a single ``._20240408_120000.WAV`` — which macOS
+    creates on any exFAT SD card, and which every other tool in the
+    pipeline already skips — has no 8-digit prefix and would abort the
+    whole site's prep.
+
+    The legacy single-zip path deliberately keeps its own unfiltered
+    glob, so its published-record contents do not change.
+
+    Args:
+        source_dir: The raw ESID folder.
+
+    Returns:
+        The WAV paths, uppercase-glob matches first then lowercase.
+    """
+    return [
+        p for p in (
+            sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
+        )
+        if azus_common.is_raw_wav_name(p.name)
+    ]
+
+
 def group_wavs_by_day(wav_files: Sequence[Path]) -> Dict[str, List[Path]]:
     """Group WAV files by the LITERAL day in their filenames.
 
@@ -360,6 +388,11 @@ def group_wavs_by_day(wav_files: Sequence[Path]) -> Dict[str, List[Path]]:
     has nothing to group by, and that is a hard error because silently
     dropping it would ship an incomplete record.
 
+    Hidden files and AppleDouble sidecars are skipped rather than
+    counted as ungroupable — callers should already be passing a list
+    from :func:`raw_wav_files`, but this makes a sidecar structurally
+    incapable of refusing a site whatever the caller does.
+
     Args:
         wav_files: The raw folder's WAV files.
 
@@ -368,12 +401,14 @@ def group_wavs_by_day(wav_files: Sequence[Path]) -> Dict[str, List[Path]]:
         files sorted by name.
 
     Raises:
-        ValueError: When any WAV has no 8-digit date prefix; the message
-            names the offending files.
+        ValueError: When any real WAV has no 8-digit date prefix; the
+            message names the offending files.
     """
     by_day: Dict[str, List[Path]] = {}
     unparseable: List[str] = []
     for wav_file in wav_files:
+        if not azus_common.is_raw_wav_name(wav_file.name):
+            continue
         day = azus_common.wav_day_key(wav_file.name)
         if day is None:
             unparseable.append(wav_file.name)
@@ -480,9 +515,7 @@ def create_day_zip_files(
             8-digit date prefix.
     """
     config_file = _find_config_file(source_dir)
-    wav_files = (
-        sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
-    )
+    wav_files = raw_wav_files(source_dir)
     by_day = group_wavs_by_day(wav_files)
 
     logger.info(
@@ -554,12 +587,9 @@ def expected_day_zip_names(esid: str, raw_folder: Path) -> List[str]:
         ValueError: When any raw WAV has no 8-digit date prefix (such a
             folder cannot have been per-day prepped).
     """
-    wav_files = (
-        sorted(raw_folder.glob("*.WAV")) + sorted(raw_folder.glob("*.wav"))
-    )
     return [
         azus_common.day_zip_name(esid, day)
-        for day in group_wavs_by_day(wav_files)
+        for day in group_wavs_by_day(raw_wav_files(raw_folder))
     ]
 
 
@@ -635,12 +665,23 @@ def _apply_day_zip_version_suffix(collector_data: Dict[str, str]) -> None:
     Appends :data:`DAY_ZIP_VERSION_SUFFIX` to the collector row's
     version value (``2024.1.0`` → ``2024.1.0A``).  This is the single
     insertion point for the marker: it runs right after the collector
-    row loads, so every downstream writer inherits it —
+    row loads, so every downstream PREP writer inherits it —
     :func:`create_single_collector_csv` writes the row verbatim into
-    ``total_eclipse_data.csv``, and the README is rendered from the
-    same dict.  (The README template carries no version placeholder of
-    its own, and the Zenodo record's version METADATA is set at upload
-    time — the upload phase sources it from the staged CSV.)
+    ``total_eclipse_data.csv``, and the README is rendered from the same
+    dict.  (The README template carries no version placeholder of its
+    own, so the marker reaches the README only via that CSV's rendered
+    values.)
+
+    SCOPE, stated because it is easy to assume otherwise: the marker
+    does **NOT** yet reach the Zenodo record's ``version`` METADATA
+    field.  That is set at upload time by
+    ``standalone_tasks.get_draft_config`` from ``data_collector.version``
+    — i.e. from the MASTER collectors spreadsheet, which prep never
+    writes back to.  So a per-day record currently carries
+    ``2024.1.0A`` inside its own ``total_eclipse_data.csv`` while its
+    Zenodo version field still reads ``2024.1.0``.  Closing that gap
+    (sourcing the version from the staged CSV, or re-applying the
+    marker at upload time) belongs to the upload phase.
 
     Idempotent: a value already ending in the marker is left alone, so
     a collectors spreadsheet updated to carry the ``A`` itself does not
@@ -806,6 +847,7 @@ def create_internal_file_list(
     source_dir: Path,
     content_hashes: Dict[str, str],
     resource_specs: List[Dict[str, str]],
+    wav_files: Optional[List[Path]] = None,
 ) -> Tuple[Path, List[Dict[str, str]]]:
     """Create the *internal* file_list.csv — for placement inside the ZIP.
 
@@ -833,6 +875,11 @@ def create_internal_file_list(
         resource_specs: List of resource file row dicts as returned by
             :func:`load_resource_files_list`.  Drives the companion-file
             entries in the file list.
+        wav_files: The exact WAV set to write rows for.  None (the legacy
+            default) re-globs ``source_dir`` unfiltered; the per-day path
+            passes :func:`raw_wav_files` output so the rows can never
+            describe a file no archive holds (an AppleDouble sidecar
+            would otherwise get a row of its own).
 
     Returns:
         Tuple of:
@@ -929,7 +976,10 @@ def create_internal_file_list(
         logger.info("  Added CONFIG.TXT (hash from write pass)")
 
     # --- WAV audio files (hash already computed during ZIP creation) ---
-    wav_files = sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
+    if wav_files is None:
+        wav_files = (
+            sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
+        )
     logger.info("  Adding %d WAV file entries...", len(wav_files))
 
     for wav_file in wav_files:
@@ -1279,7 +1329,7 @@ def verify_zip_against_source(zip_path: Path, source_dir: Path) -> List[str]:
 
 
 def verify_day_zips_against_source(
-    zip_paths: List[Path], source_dir: Path, esid: str
+    zip_paths: List[Path], source_dir: Path, esid: str, output_dir: Path
 ) -> List[str]:
     """Verify the day ZIPs collectively hold every WAV the raw folder holds.
 
@@ -1297,9 +1347,13 @@ def verify_day_zips_against_source(
     Each ZIP must also carry CONFIG.TXT whenever the raw folder has one.
 
     Args:
-        zip_paths: The finalized day ZIPs.
+        zip_paths: The day ZIPs this run created.
         source_dir: The raw ESID folder the WAVs came from.
         esid: Canonical ESID string (names the expected archives).
+        output_dir: The staging folder being assembled.  Scanned for day
+            ZIPs rather than trusting ``zip_paths``, so an archive left
+            behind by an EARLIER failed prep cannot ride through — see
+            the stale-archive note below.
 
     Returns:
         List of human-readable problem strings.  Empty list = verified.
@@ -1328,6 +1382,14 @@ def verify_day_zips_against_source(
     # zipping with no groupable prefix belongs to no archive — fatal.
     disk_by_day: Dict[str, Dict[str, int]] = {}
     for name, size in disk_stats.sizes.items():
+        # scan_disk_wavs excludes AppleDouble sidecars but NOT every
+        # hidden file (audit_wav_integrity._is_wav_name only rejects the
+        # "._" prefix).  Apply the per-day rule here too, so the disk
+        # side of this comparison is exactly the set the archives were
+        # built from and a stray ".hidden.wav" cannot manufacture a
+        # mismatch.
+        if not azus_common.is_raw_wav_name(name):
+            continue
         day = azus_common.wav_day_key(name)
         if day is None:
             problems.append(
@@ -1340,17 +1402,36 @@ def verify_day_zips_against_source(
     expected_names = {
         azus_common.day_zip_name(esid, day) for day in disk_by_day
     }
-    actual_names = {p.name for p in zip_paths}
+    # Scan the OUTPUT DIRECTORY, not just this run's zip_paths.  A prep
+    # that fails between building and the atomic move deliberately leaves
+    # its build folder in place (clean_raw_staging_leftovers.py:
+    # "Nothing in the pipeline ever cleans these up"), and main() only
+    # mkdir(exist_ok=True)s it — so a re-run after the operator removes a
+    # day's audio inherits that day's archive.  Trusting zip_paths made
+    # such an orphan invisible: it got no file_list.csv row, but
+    # create_upload_manifest (a directory scan) listed it, so it moved
+    # into Staging_Area with the completion sentinel and could be PUT on
+    # the record as undocumented audio.  Found by the July 2026 audit.
+    actual_names = {
+        entry.name for entry in output_dir.iterdir()
+        if entry.is_file()
+        and (parsed := azus_common.parse_day_zip_name(entry.name)) is not None
+        and parsed[0] == esid
+    }
     for name in sorted(expected_names - actual_names):
         problems.append(f"Day ZIP missing for a day that has audio: {name}")
     for name in sorted(actual_names - expected_names):
         problems.append(
-            f"Day ZIP exists for a day with no source audio: {name}"
+            f"STALE day ZIP for a day with no source audio: {name} — most "
+            "likely left by an earlier failed prep of this ESID. Delete "
+            f"the build folder ({output_dir}) and re-run; nothing in the "
+            "pipeline removes these automatically."
         )
 
     config_file = _find_config_file(source_dir)
     verified_wavs = 0
     for zip_path in sorted(zip_paths, key=lambda p: p.name):
+        # Stale archives are reported above, not re-verified here.
         parsed = azus_common.parse_day_zip_name(zip_path.name)
         if parsed is None or zip_path.name not in expected_names:
             continue  # already reported above
@@ -2047,9 +2128,7 @@ def _run_day_zip_prep(
     # Step 2a: Group by the literal filename day and enforce the Zenodo
     # per-record file cap — both BEFORE anything is written, so an
     # ungroupable or over-long site costs a directory scan, not hours.
-    wav_files = (
-        sorted(source_dir.glob("*.WAV")) + sorted(source_dir.glob("*.wav"))
-    )
+    wav_files = raw_wav_files(source_dir)
     try:
         by_day = group_wavs_by_day(wav_files)
     except ValueError as exc:
@@ -2072,25 +2151,11 @@ def _run_day_zip_prep(
         logger.warning("Resources directory not found: %s", resources_dir)
     enforce_zenodo_file_cap(len(by_day), len(resource_specs), esid)
 
-    # Step 2b: Create the day ZIPs (final immediately — no metadata is
-    # appended in this layout), then verify them against a FRESH scan of
-    # the raw folder before generating anything else.
+    # Step 2b: Create the day ZIPs.  They are final immediately — no
+    # metadata is appended in this layout.
     zip_paths, per_zip, content_hashes = create_day_zip_files(
         source_dir, output_dir, esid
     )
-    zip_problems = verify_day_zips_against_source(
-        zip_paths, source_dir, esid
-    )
-    if zip_problems:
-        for problem in zip_problems:
-            logger.error("ZIP VERIFICATION FAILED: %s", problem)
-        logger.error(
-            "The prepared day ZIPs do not match the raw data — nothing "
-            "was moved to Staging_Area/ and no completion sentinel was "
-            "written. Fix the raw folder (or re-run when it is fully "
-            "synced) and re-run this preparation."
-        )
-        sys.exit(1)
 
     # Step 3: Mark the version, then write the single-row collector CSV —
     # the marked dict is what create_single_collector_csv and the README
@@ -2111,11 +2176,39 @@ def _run_day_zip_prep(
     create_readme_md(readme_html, output_dir)
 
     # Step 7: Build the standard rows (companions + CONFIG + WAVs, hashes
-    # from the write pass), then overwrite with the per-day layout: one
-    # ZIP row per day archive, WAV rows annotated with their archive.
+    # from the write pass).  ``wav_files`` is the same filtered set the
+    # archives were built from, so a row can never describe a file no
+    # archive holds.
     _, internal_rows = create_internal_file_list(
-        output_dir, esid, source_dir, content_hashes, resource_specs
+        output_dir, esid, source_dir, content_hashes, resource_specs,
+        wav_files=wav_files,
     )
+
+    # Step 8: Verify the finished archives against a FRESH scan of the raw
+    # folder, and only then write the file list that describes them.  This
+    # ordering mirrors the legacy path (internal list -> append -> verify ->
+    # external list) for a reason: the per-WAV rows re-``stat`` the source
+    # files, so verifying AFTER they are built is what catches a WAV that
+    # changed between zipping and the file list.  Verifying first (as this
+    # did until the July 2026 audit) left that window unchecked.  Failing
+    # here exits nonzero BEFORE the move and the sentinel, so an
+    # inconsistent package can never become an uploadable staging folder.
+    zip_problems = verify_day_zips_against_source(
+        zip_paths, source_dir, esid, output_dir
+    )
+    if zip_problems:
+        for problem in zip_problems:
+            logger.error("ZIP VERIFICATION FAILED: %s", problem)
+        logger.error(
+            "The prepared day ZIPs do not match the raw data — nothing "
+            "was moved to Staging_Area/ and no completion sentinel was "
+            "written. Fix the raw folder (or re-run when it is fully "
+            "synced) and re-run this preparation."
+        )
+        sys.exit(1)
+
+    # Step 9: the per-day file list — one ZIP row per archive, WAV rows
+    # annotated with the archive that holds them.
     create_day_zip_file_list(
         output_dir, esid, zip_paths, per_zip, internal_rows
     )
